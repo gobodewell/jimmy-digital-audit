@@ -9,7 +9,8 @@ const SOCIALFETCH_KEY = process.env.SOCIALFETCH_KEY || '';
 const BL_BASE         = 'https://tools.brightlocal.com/seo-tools/api';
 const SF_BASE         = 'https://api.socialfetch.dev/v1';
 
-app.use(cors());
+app.use(cors({ origin: "*", methods: ["GET","POST","OPTIONS"], allowedHeaders: ["Content-Type","Authorization"] }));
+app.options("*", cors());
 app.use(express.json());
 
 app.get('/health', (req, res) => res.json({ ok: true }));
