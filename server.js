@@ -4,7 +4,6 @@
 
 const express = require('express');
 const cors = require('cors');
-const fetch = require('node-fetch');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -13,10 +12,8 @@ const SEMRUSH_KEY = process.env.SEMRUSH_KEY || '';
 app.use(cors());
 app.use(express.json());
 
-// Health check
 app.get('/health', (req, res) => res.json({ ok: true }));
 
-// SEMrush domain overview
 app.get('/semrush/domain', async (req, res) => {
   const { domain } = req.query;
   if (!domain) return res.status(400).json({ error: 'domain required' });
@@ -30,7 +27,6 @@ app.get('/semrush/domain', async (req, res) => {
   }
 });
 
-// SEMrush listing management
 app.get('/semrush/listings', async (req, res) => {
   const { domain } = req.query;
   if (!domain) return res.status(400).json({ error: 'domain required' });
