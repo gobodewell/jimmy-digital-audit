@@ -126,22 +126,31 @@ app.get('/social/profiles', async (req, res) => {
   const out = {};
   const calls = [];
 
+  // Helper: clean and normalize a social URL or handle
+  function cleanUrl(val, base) {
+    if (!val) return null;
+    // Decode any URL encoding first
+    let decoded = decodeURIComponent(val).trim().replace(/\/+$/, '');
+    if (decoded.startsWith('http')) return decoded;
+    return base + decoded.replace(/^\/+/, '');
+  }
+
   if (fb) {
-    const url = ensureUrl(fb, 'https://www.facebook.com/');
-    calls.push(sfGet(`/facebook/profiles?url=${encodeURIComponent(url)}`).then(d => { if (d) out.facebook = d; }).catch(() => {}));
+    const url = cleanUrl(fb, 'https://www.facebook.com/');
+    calls.push(sfGet('/facebook/profiles?url=' + encodeURIComponent(url)).then(d => { if (d) out.facebook = d; }).catch(e => console.error('FB error:', e.message)));
   }
   if (li) {
-    const url = ensureUrl(li, 'https://www.linkedin.com/company/');
-    calls.push(sfGet(`/linkedin/companies?url=${encodeURIComponent(url)}`).then(d => { if (d) out.linkedin = d; }).catch(() => {}));
+    const url = cleanUrl(li, 'https://www.linkedin.com/company/');
+    calls.push(sfGet('/linkedin/companies?url=' + encodeURIComponent(url)).then(d => { if (d) out.linkedin = d; }).catch(e => console.error('LI error:', e.message)));
   }
   if (ig) {
-    const handle = ig.replace(/^@/, '').replace(/.*instagram\.com\//, '').replace(/\/$/, '');
-    calls.push(sfGet(`/instagram/profiles/${encodeURIComponent(handle)}`).then(d => { if (d) out.instagram = d; }).catch(() => {}));
+    const handle = decodeURIComponent(ig).replace(/^@/, '').replace(/.*instagram\.com\//, '').replace(/\/+$/, '');
+    calls.push(sfGet('/instagram/profiles/' + encodeURIComponent(handle)).then(d => { if (d) out.instagram = d; }).catch(e => console.error('IG error:', e.message)));
   }
   if (yt) {
-    const handle = yt.replace(/^@/, '').replace(/.*youtube\.com\/@?/, '').replace(/\/$/, '');
-    const url = `https://www.youtube.com/@${handle}`;
-    calls.push(sfGet(`/youtube/channel?url=${encodeURIComponent(url)}`).then(d => { if (d) out.youtube = d; }).catch(() => {}));
+    const handle = decodeURIComponent(yt).replace(/^@/, '').replace(/.*youtube\.com\/@?/, '').replace(/\/+$/, '');
+    const url = 'https://www.youtube.com/@' + handle;
+    calls.push(sfGet('/youtube/channel?url=' + encodeURIComponent(url)).then(d => { if (d) out.youtube = d; }).catch(e => console.error('YT error:', e.message)));
   }
 
   await Promise.allSettled(calls);
