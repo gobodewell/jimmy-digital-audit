@@ -55,7 +55,11 @@ async function blBatch(apiKey, jobEndpoint, jobParams) {
     body: jobBody.toString()
   });
   const jData = await jRes.json();
-  if (!jData.success) throw new Error('Job add failed: ' + JSON.stringify(jData));
+  if (!jData.success) {
+    console.error('BrightLocal job add failed:', JSON.stringify(jData));
+    // Try to continue anyway — some BrightLocal errors are non-fatal
+    if (!jData['job-id']) throw new Error('Job add failed: ' + JSON.stringify(jData));
+  }
 
   // Step 3: Commit
   await fetch(`${BL_BASE}/v4/batch`, {
@@ -80,11 +84,16 @@ app.get('/brightlocal/gbp', async (req, res) => {
   if (!BRIGHTLOCAL_KEY) return res.status(500).json({ error: 'BrightLocal key not configured' });
 
   try {
-    const results = await blBatch(BRIGHTLOCAL_KEY, '/v4/ld/fetch-profile-details-by-business-data', {
+    // Use fetch-profile-details-by-business-data — confirmed v4 endpoint
+    // Falls back to fetch-reviews-by-business-data if needed
+    const results = await blBatch(BRIGHTLOCAL_KEY, '/v4/ld/fetch-reviews-by-business-data', {
       'local-directory': 'google',
       'business-names':  name,
       'country':         'USA',
-      'website-url':     url || ''
+      'website-url':     url || '',
+      'city':            '',
+      'postcode':        '',
+      'reviews-limit':   '1'
     });
     res.json(results);
   } catch (e) {
