@@ -215,6 +215,7 @@ textarea{resize:vertical;min-height:60px}
     <div class="ph-s">DataForSEO + AI-powered analysis</div>
     <div class="tabs">
       <button class="tab active" onclick="st('setup')">Setup</button>
+      <button class="tab" onclick="st('aireview')">AI Review</button>
       <button class="tab" onclick="st('visibility')">Visibility</button>
       <button class="tab" onclick="st('website')">Website</button>
       <button class="tab" onclick="st('social')">Social</button>
@@ -247,6 +248,49 @@ textarea{resize:vertical;min-height:60px}
       </div>
     </div>
 
+    <!-- AI REVIEW TAB -->
+    <div class="tp" id="tp-aireview">
+      <div class="sl">AI reviews run automatically when you click Run Audit on the Setup tab.</div>
+
+      <!-- Visibility AI -->
+      <div class="card">
+        <div class="ct">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+          Visibility review
+          <span id="ai-vis-status" class="badge bgr" style="margin-left:auto">—</span>
+        </div>
+        <div id="ai-vis-text" class="aib" style="min-height:60px;color:var(--text3);font-size:13px">Not run yet — click Run Audit on Setup tab.</div>
+      </div>
+
+      <!-- Website AI -->
+      <div class="card">
+        <div class="ct">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="3" y="3" width="18" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+          Website review
+          <span id="ai-web-status" class="badge bgr" style="margin-left:auto">—</span>
+        </div>
+        <div id="ai-web-text" class="aib" style="min-height:60px;color:var(--text3);font-size:13px">Not run yet — click Run Audit on Setup tab.</div>
+      </div>
+
+      <!-- Social AI -->
+      <div class="card">
+        <div class="ct">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M17 2H7a5 5 0 0 0-5 5v10a5 5 0 0 0 5 5h10a5 5 0 0 0 5-5V7a5 5 0 0 0-5-5z"/><circle cx="12" cy="12" r="3"/></svg>
+          Social media review
+          <span id="ai-soc-status" class="badge bgr" style="margin-left:auto">—</span>
+        </div>
+        <div id="ai-soc-text" class="aib" style="min-height:60px;color:var(--text3);font-size:13px">Not run yet — click Run Audit on Setup tab.</div>
+      </div>
+
+      <div id="build-report-wrap" style="margin-top:8px">
+        <button class="btn btn-primary" style="width:100%;padding:14px;font-size:15px;justify-content:center" onclick="buildReport()">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+          Build Report — fill in all fields from AI reviews
+        </button>
+        <div id="build-report-msg" style="margin-top:8px;font-size:13px;color:var(--text2);text-align:center"></div>
+      </div>
+    </div>
+
     <!-- VISIBILITY TAB -->
     <div class="tp" id="tp-visibility">
       <div class="sl">Domain metrics — DataForSEO Labs</div>
@@ -260,12 +304,6 @@ textarea{resize:vertical;min-height:60px}
       <div id="gbp-block" class="card" style="display:none">
         <div class="ct">GBP result</div>
         <div id="gbp-details"></div>
-      </div>
-
-      <div class="sl">AI visibility review</div>
-      <div id="ai-vis-panel" class="aip" style="display:none">
-        <div class="aih"><div class="ait"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/></svg>AI analysis</div><span id="ai-vis-status" class="badge bgr">—</span></div>
-        <div class="aib" id="ai-vis-text"></div>
       </div>
 
       <div class="sl">Visibility checklist</div>
@@ -297,12 +335,6 @@ textarea{resize:vertical;min-height:60px}
         <div class="mc"><div class="ml">Performance score</div><div class="mv" id="m-ps">—</div><div class="mt">Google score 0–100</div></div>
       </div>
 
-      <div class="sl">AI website review</div>
-      <div id="ai-web-panel" class="aip" style="display:none">
-        <div class="aih"><div class="ait"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="3" y="3" width="18" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>AI website review</div><span id="ai-web-status" class="badge bgr">—</span></div>
-        <div class="aib" id="ai-web-text"></div>
-      </div>
-
       <div class="sl">Technology checklist — auto-filled by Lighthouse</div>
       <div class="card">
         <div class="cl">
@@ -331,13 +363,7 @@ textarea{resize:vertical;min-height:60px}
 
     <!-- SOCIAL TAB -->
     <div class="tp" id="tp-social">
-      <div class="sl">AI social review</div>
-      <div id="ai-soc-panel" class="aip" style="display:none">
-        <div class="aih"><div class="ait"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M17 2H7a5 5 0 0 0-5 5v10a5 5 0 0 0 5 5h10a5 5 0 0 0 5-5V7a5 5 0 0 0-5-5z"/><circle cx="12" cy="12" r="3"/></svg>AI social review</div><span id="ai-soc-status" class="badge bgr">—</span></div>
-        <div class="aib" id="ai-soc-text"></div>
-      </div>
-
-      <div class="sl">Social handles — auto-filled from AI review above</div>
+      <div class="sl">Social handles — enter or auto-fill from AI Review tab</div>
       <div class="card">
         <div style="font-size:12px;color:var(--text3);margin-bottom:10px">AI fills these automatically. Correct any errors then click Pull follower counts.</div>
         <div class="fr fr2">
@@ -517,7 +543,7 @@ function showPage(n) {
 }
 
 function st(n) {
-  const order = ['setup','visibility','website','social','export'];
+  const order = ['setup','aireview','visibility','website','social','export'];
   document.querySelectorAll('.tab').forEach((b,i) => b.classList.toggle('active', order[i]===n));
   document.querySelectorAll('.tp').forEach(p => p.classList.toggle('active', p.id==='tp-'+n));
   if (n==='export') buildOut();
@@ -621,8 +647,8 @@ async function runAudit() {
 
   btn.disabled = false;
   btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg> Run audit';
-  toast('Audit complete — review the tabs');
-  st('visibility');
+  toast('Audit complete — click AI Review tab to read results then Build Report');
+  st('aireview');
 }
 
 // ── DataForSEO: domain overview ───────────────────────────────────────────────
@@ -736,11 +762,9 @@ async function runGBP(name, url) {
 // ── Claude streaming helper ───────────────────────────────────────────────────
 async function claudeStream(prompt, panelId, statusId, textId) {
   const antKey = lg('cfg_ant');
-  const panel  = document.getElementById(panelId);
   const textEl = document.getElementById(textId);
   const statEl = document.getElementById(statusId);
 
-  panel.style.display = '';
   if (!antKey) {
     textEl.innerHTML = '<p style="color:var(--red)">Add your Anthropic API key in Settings.</p>';
     statEl.textContent = 'no key'; statEl.className = 'badge br';
@@ -1071,6 +1095,96 @@ async function _doSocialFetch(fb, li, ig, yt) {
     document.getElementById('sf-status').textContent = '✗ Error: ' + e.message;
     setStep('socialfetch', 'error');
   }
+}
+
+// ── Build Report — parse all AI JSON and fill fields ─────────────────────────
+function buildReport() {
+  const msg = document.getElementById('build-report-msg');
+  let filled = 0;
+
+  // Parse visibility JSON
+  const visText = document.getElementById('ai-vis-text')?.innerText || '';
+  const visJ = extractJSON(AD.aiVisibility || visText);
+  if (visJ) {
+    if (visJ.chatgpt)   { ck('c-cgpt'); filled++; }
+    if (visJ.sitemap)   { ck('c-sm');   filled++; }
+    if (visJ.meta)      { ck('c-meta'); filled++; }
+    if (visJ.reviewCTA) { ck('c-rcta'); filled++; }
+    if (visJ.awards)    { ck('c-awd');  filled++; }
+    if (visJ.summary) {
+      const n = document.getElementById('n-vis');
+      if (n) n.value = visJ.summary;
+    }
+  }
+
+  // Parse website JSON
+  const webJ = extractJSON(AD.aiWebsite || '');
+  if (webJ) {
+    if (webJ.nav)          { ck('c-nav'); filled++; }
+    if (webJ.linkedContent) { ck('c-lnk'); filled++; }
+    if (webJ.photos)       { ck('c-pho'); filled++; }
+    if (webJ.headlines)    { ck('c-hdl'); filled++; }
+    if (webJ.ctas)         { ck('c-cta'); filled++; }
+    if (webJ.resources)    { ck('c-res'); filled++; }
+    if (webJ.faqs)         { ck('c-faq'); filled++; }
+    if (webJ.reviewCTA)    { ck('c-rcta'); filled++; }
+    if (webJ.awards)       { ck('c-awd'); filled++; }
+    if (webJ.analytics)    { ck('c-ga');  filled++; }
+    if (webJ.notes) {
+      const n = document.getElementById('n-web');
+      if (n && !n.value) n.value = webJ.notes;
+    }
+  }
+
+  // Parse social JSON
+  const socJ = extractJSON(AD.aiSocial || '');
+  if (socJ) {
+    if (socJ.facebook?.found) {
+      ck('c-hfb'); filled++;
+      if (socJ.facebook.url)       sv('h-fb', socJ.facebook.url);
+      if (socJ.facebook.followers) { sv('m-fb', socJ.facebook.followers); filled++; }
+      if (socJ.facebook.postingFrequently) ck('c-pst');
+      if (socJ.facebook.brandedHeader)     ck('c-bhd');
+      if (socJ.facebook.customURL)         ck('c-url');
+      if (socJ.facebook.logo)              ck('c-lgp');
+      if (socJ.facebook.contactInfo)       ck('c-cni');
+      if (socJ.facebook.tagging)           ck('c-tag');
+      if (socJ.facebook.summary)           ck('c-sum');
+    }
+    if (socJ.linkedin?.found) {
+      ck('c-hli'); filled++;
+      if (socJ.linkedin.url)       sv('h-li', socJ.linkedin.url);
+      if (socJ.linkedin.followers) { sv('m-lif', socJ.linkedin.followers); filled++; }
+      if (socJ.linkedin.postingFrequently) ck('c-pst');
+      if (socJ.linkedin.brandedHeader)     ck('c-bhd');
+      if (socJ.linkedin.customURL)         ck('c-url');
+    }
+    if (socJ.instagram?.found) {
+      ck('c-hig'); filled++;
+      if (socJ.instagram.url)       sv('h-ig', socJ.instagram.url);
+      if (socJ.instagram.followers) { sv('m-ig', socJ.instagram.followers); filled++; }
+    }
+    if (socJ.youtube?.found) {
+      ck('c-hyt'); filled++;
+      if (socJ.youtube.url)         sv('h-yt', socJ.youtube.url);
+      if (socJ.youtube.subscribers) { sv('m-yt', socJ.youtube.subscribers); filled++; }
+    }
+    if (socJ.socialLinksOnSite) ck('c-sln');
+  }
+
+  if (filled === 0) {
+    msg.textContent = 'No AI data found — make sure the audit has run first.';
+    msg.style.color = 'var(--red)';
+    return;
+  }
+
+  recalc();
+  msg.textContent = filled + ' fields filled in. Review the tabs then go to Export.';
+  msg.style.color = 'var(--green)';
+  toast(filled + ' fields filled from AI review ✓');
+
+  // Switch to visibility tab after 1 second so user can review
+  setTimeout(() => st('visibility'), 1200);
 }
 
 // ── Scoring ───────────────────────────────────────────────────────────────────
