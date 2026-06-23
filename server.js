@@ -20,12 +20,21 @@ function dfsAuth() {
 }
 
 async function dfsPost(path, body) {
-  const r = await fetch(DFS_BASE + path, {
-    method:  'POST',
-    headers: { 'Authorization': dfsAuth(), 'Content-Type': 'application/json' },
-    body:    JSON.stringify(body)
-  });
-  return r.json();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 25000);
+  try {
+    const r = await fetch(DFS_BASE + path, {
+      method:  'POST',
+      headers: { 'Authorization': dfsAuth(), 'Content-Type': 'application/json' },
+      body:    JSON.stringify(body),
+      signal:  controller.signal
+    });
+    clearTimeout(timeout);
+    return r.json();
+  } catch(e) {
+    clearTimeout(timeout);
+    throw e;
+  }
 }
 
 // ── Health ────────────────────────────────────────────────────────────────────
@@ -42,12 +51,13 @@ app.get('/domain/overview', async (req, res) => {
       { target: domain, location_code: 2840, language_code: 'en' }
     ]);
     const item = d?.tasks?.[0]?.result?.[0]?.items?.[0];
+    console.log('DFS domain raw item:', JSON.stringify(item)?.slice(0, 300));
     if (!item) return res.json({ da: 0, keywords: 0, traffic: 0 });
-    res.json({
-      da:       item.rank                || 0,
-      keywords: item.organic?.count      || 0,
-      traffic:  Math.round(item.organic?.etv || 0)
-    });
+    const organic = item.metrics?.organic || item.organic || {};
+    const da = item.rank || item.domain_rank || 0;
+    const keywords = organic.count || organic.pos_1 + organic.pos_2_3 + organic.pos_4_10 || 0;
+    const traffic = Math.round(organic.etv || organic.estimated_traffic || 0);
+    res.json({ da, keywords, traffic });
   } catch (e) {
     console.error('DFS domain/overview error:', e.message);
     res.status(500).json({ error: e.message });
