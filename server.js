@@ -1,0 +1,216 @@
+const express = require('express');
+const cors    = require('cors');
+
+const app  = express();
+const PORT = process.env.PORT || 3001;
+
+const DFS_LOGIN    = process.env.DATAFORSEO_LOGIN    || '';
+const DFS_PASSWORD = process.env.DATAFORSEO_PASSWORD || '';
+const SF_KEY       = process.env.SOCIALFETCH_KEY     || '';
+const SF_BASE      = 'https://api.socialfetch.dev/v1';
+const DFS_BASE     = 'https://api.dataforseo.com/v3';
+
+app.use(cors({ origin: '*', methods: ['GET','POST','OPTIONS'], allowedHeaders: ['Content-Type','Authorization'] }));
+app.options('*', cors());
+app.use(express.json());
+
+// ── Auth helper ───────────────────────────────────────────────────────────────
+function dfsAuth() {
+  return 'Basic ' + Buffer.from(DFS_LOGIN + ':' + DFS_PASSWORD).toString('base64');
+}
+
+async function dfsPost(path, body) {
+  const r = await fetch(DFS_BASE + path, {
+    method:  'POST',
+    headers: { 'Authorization': dfsAuth(), 'Content-Type': 'application/json' },
+    body:    JSON.stringify(body)
+  });
+  return r.json();
+}
+
+// ── Health ────────────────────────────────────────────────────────────────────
+app.get('/health', (req, res) => res.json({ ok: true, dfs: !!DFS_LOGIN, sf: !!SF_KEY }));
+
+// ── 1. Domain overview — DA, keywords, traffic ────────────────────────────────
+// Endpoint: /v3/dataforseo_labs/google/domain_rank_overview/live
+app.get('/domain/overview', async (req, res) => {
+  const { domain } = req.query;
+  if (!domain) return res.status(400).json({ error: 'domain required' });
+  if (!DFS_LOGIN) return res.status(500).json({ error: 'DataForSEO not configured' });
+  try {
+    const d = await dfsPost('/dataforseo_labs/google/domain_rank_overview/live', [
+      { target: domain, location_code: 2840, language_code: 'en' }
+    ]);
+    const item = d?.tasks?.[0]?.result?.[0]?.items?.[0];
+    if (!item) return res.json({ da: 0, keywords: 0, traffic: 0 });
+    res.json({
+      da:       item.rank                || 0,
+      keywords: item.organic?.count      || 0,
+      traffic:  Math.round(item.organic?.etv || 0)
+    });
+  } catch (e) {
+    console.error('DFS domain/overview error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── 2. Lighthouse — page speed, size, mobile, HTTPS, meta, indexable, GA, images
+// Endpoint: /v3/on_page/lighthouse/live/json
+app.get('/site/lighthouse', async (req, res) => {
+  const { url } = req.query;
+  if (!url) return res.status(400).json({ error: 'url required' });
+  if (!DFS_LOGIN) return res.status(500).json({ error: 'DataForSEO not configured' });
+  try {
+    const d = await dfsPost('/on_page/lighthouse/live/json', [
+      { url, for_mobile: true }
+    ]);
+    const audits = d?.tasks?.[0]?.result?.[0]?.audits;
+    const cats   = d?.tasks?.[0]?.result?.[0]?.categories;
+    if (!audits) return res.status(500).json({ error: 'No Lighthouse data returned', raw: d?.tasks?.[0] });
+
+    // Extract the metrics we need for the audit checklist
+    const lcp      = audits['largest-contentful-paint']?.numericValue;
+    const fcp      = audits['first-contentful-paint']?.numericValue;
+    const tbt      = audits['total-blocking-time']?.numericValue;
+    const speed    = lcp ? (lcp / 1000).toFixed(2) : fcp ? (fcp / 1000).toFixed(2) : null;
+    const totalBytes = audits['total-byte-weight']?.numericValue;
+    const sizeMB   = totalBytes ? (totalBytes / 1024 / 1024).toFixed(2) : null;
+    const perfScore = cats?.performance?.score != null ? Math.round(cats.performance.score * 100) : null;
+    const seoScore  = cats?.seo?.score          != null ? Math.round(cats.seo.score * 100)         : null;
+
+    // Boolean checks
+    const isHttps     = url.startsWith('https');
+    const isMobile    = perfScore != null && perfScore >= 50;
+    const isIndexable = (audits['is-crawlable']?.score ?? 0) >= 0.9;
+    const hasMeta     = (audits['meta-description']?.score ?? 0) >= 0.9;
+    const hasSitemap  = (audits['robots-txt']?.score ?? 0) >= 0.9;
+    const speedPass   = speed != null && parseFloat(speed) < 3;
+    const sizePass    = sizeMB != null && parseFloat(sizeMB) < 3;
+
+    // Oversized images
+    const imgItems  = audits['uses-optimized-images']?.details?.items || 
+                      audits['uses-responsive-images']?.details?.items || [];
+    const imagesOk  = imgItems.length === 0;
+    const imgList   = imgItems.slice(0, 5).map(i => {
+      const name = (i.url || '').split('/').pop().split('?')[0] || 'unknown';
+      const kb   = i.totalBytes ? Math.round(i.totalBytes / 1024) + 'KB' : '';
+      return name + (kb ? ' (' + kb + ')' : '');
+    });
+
+    // Google Analytics — check third-party summary
+    const thirdParty = audits['third-party-summary']?.details?.items || [];
+    const hasGA = thirdParty.some(i =>
+      /google.tag|google.analytics|googletagmanager/i.test(i.entity || '')
+    );
+
+    res.json({
+      speed, sizeMB, perfScore, seoScore,
+      isHttps, isMobile, isIndexable, hasMeta, hasSitemap,
+      speedPass, sizePass, imagesOk, imgList, hasGA
+    });
+  } catch (e) {
+    console.error('DFS lighthouse error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── 3. GBP — claimed, rating, review count, photos ───────────────────────────
+// Endpoint: /v3/business_data/google/my_business_info/live  (no polling!)
+app.get('/gbp/info', async (req, res) => {
+  const { name, location } = req.query;
+  if (!name) return res.status(400).json({ error: 'name required' });
+  if (!DFS_LOGIN) return res.status(500).json({ error: 'DataForSEO not configured' });
+  try {
+    const d = await dfsPost('/business_data/google/my_business_info/live', [
+      {
+        keyword:       name,
+        location_name: location || 'United States',
+        language_name: 'English'
+      }
+    ]);
+    const items = d?.tasks?.[0]?.result?.[0]?.items;
+    if (!items || items.length === 0) return res.json({ found: false });
+
+    // Find the best matching result
+    const biz = items[0];
+    res.json({
+      found:       true,
+      title:       biz.title        || '',
+      address:     biz.address      || '',
+      phone:       biz.phone        || '',
+      rating:      biz.rating?.value               || null,
+      reviewCount: biz.rating?.votes_count         || 0,
+      claimed:     biz.is_claimed                  || false,
+      hasPhotos:   (biz.main_image || biz.images?.length > 0) || false,
+      category:    biz.category                    || '',
+      url:         biz.url                         || ''
+    });
+  } catch (e) {
+    console.error('DFS GBP error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── 4. SocialFetch — follower counts by URL/handle ───────────────────────────
+async function sfGet(path) {
+  const r = await fetch(SF_BASE + path, { headers: { 'x-api-key': SF_KEY } });
+  if (!r.ok) {
+    const t = await r.text();
+    console.error('SocialFetch ' + r.status + ' ' + path + ':', t.slice(0, 150));
+    return null;
+  }
+  return r.json();
+}
+
+function cleanHandle(val, base) {
+  if (!val) return null;
+  const decoded = decodeURIComponent(val).trim().replace(/\/+$/, '');
+  if (decoded.startsWith('http')) return decoded;
+  return base + decoded.replace(/^\/+/, '');
+}
+
+app.get('/social/profiles', async (req, res) => {
+  const { fb, li, ig, yt } = req.query;
+  if (!SF_KEY) return res.status(500).json({ error: 'SocialFetch not configured' });
+
+  const out   = {};
+  const calls = [];
+
+  if (fb) {
+    const url = cleanHandle(fb, 'https://www.facebook.com/');
+    calls.push(
+      sfGet('/facebook/profiles?url=' + encodeURIComponent(url))
+        .then(d => { if (d) out.facebook = d; })
+        .catch(e => console.error('FB:', e.message))
+    );
+  }
+  if (li) {
+    const url = cleanHandle(li, 'https://www.linkedin.com/company/');
+    calls.push(
+      sfGet('/linkedin/companies?url=' + encodeURIComponent(url))
+        .then(d => { if (d) out.linkedin = d; })
+        .catch(e => console.error('LI:', e.message))
+    );
+  }
+  if (ig) {
+    const handle = decodeURIComponent(ig).replace(/^@/, '').replace(/.*instagram\.com\//, '').replace(/\/+$/, '');
+    calls.push(
+      sfGet('/instagram/profiles/' + encodeURIComponent(handle))
+        .then(d => { if (d) out.instagram = d; })
+        .catch(e => console.error('IG:', e.message))
+    );
+  }
+  if (yt) {
+    const handle = decodeURIComponent(yt).replace(/^@/, '').replace(/.*youtube\.com\/@?/, '').replace(/\/+$/, '');
+    calls.push(
+      sfGet('/youtube/channel?url=' + encodeURIComponent('https://www.youtube.com/@' + handle))
+        .then(d => { if (d) out.youtube = d; })
+        .catch(e => console.error('YT:', e.message))
+    );
+  }
+
+  await Promise.allSettled(calls);
+  res.json(out);
+});
+
+app.listen(PORT, () => console.log('Proxy running on port ' + PORT));
