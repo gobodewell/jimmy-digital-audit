@@ -750,8 +750,6 @@ async function claudeStream(prompt, panelId, statusId, textId) {
   statEl.textContent = 'analyzing…'; statEl.className = 'badge ba';
   textEl.innerHTML = '<span class="spin">⟳</span> Analyzing...';
 
-  const tools = [{ type: 'web_search_20250305', name: 'web_search', max_uses: 5 }];
-
   try {
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -763,43 +761,39 @@ async function claudeStream(prompt, panelId, statusId, textId) {
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-6',
-        max_tokens: 1500,
-        stream: true,
-        tools,
+        max_tokens: 2000,
+        tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 5 }],
         messages: [{ role: 'user', content: prompt }]
       })
     });
 
-    const reader  = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let fullText = '';
-    textEl.innerHTML = '';
+    const d = await resp.json();
 
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      const lines = decoder.decode(value).split('\n');
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        const data = line.slice(6);
-        if (data === '[DONE]') continue;
-        try {
-          const ev = JSON.parse(data);
-          if (ev.type === 'content_block_start' && ev.content_block?.type === 'server_tool_use') {
-            textEl.innerHTML += '<p style="color:var(--amber)"><span class="spin">⟳</span> Searching...</p>';
-          }
-          if (ev.type === 'content_block_delta' && ev.delta?.type === 'text_delta') {
-            fullText += ev.delta.text;
-            textEl.innerHTML = mdToHtml(fullText);
-          }
-        } catch {}
-      }
-    }
+    // Extract text from response
+    const fullText = d.content
+      .filter(b => b.type === 'text')
+      .map(b => b.text)
+      .join('\n');
+
+    textEl.innerHTML = mdToHtml(fullText);
     statEl.textContent = 'done'; statEl.className = 'badge bg';
     return fullText;
   } catch(e) {
     textEl.innerHTML = '<p style="color:var(--red)">Error: '+e.message+'</p>';
     statEl.textContent = 'error'; statEl.className = 'badge br';
+    return null;
+  }
+}
+
+// ── Parse JSON from AI response ───────────────────────────────────────────────
+function extractJSON(text) {
+  if (!text) return null;
+  const match = text.match(/---JSON---\s*([\s\S]*?)\s*---END---/);
+  if (!match) return null;
+  try {
+    return JSON.parse(match[1].trim());
+  } catch(e) {
+    console.error('JSON parse error:', e.message, match[1].slice(0, 200));
     return null;
   }
 }
@@ -818,23 +812,37 @@ async function runAIVisibility(name, url) {
   setStep('ai-vis', 'running');
   const prompt = `You are a digital marketing auditor for financial advisory firms. Audit the online visibility of "${name}" (${url}).
 
-Search for:
-1. Does "${name}" appear in ChatGPT? Search "Who is ${name}" and note the result.
-2. Does the website have a sitemap? Check ${url}/sitemap.xml
-3. Are meta descriptions present on the homepage?
-4. Are there any significant online directory listings or citations?
-5. Does the website have a Google Review call-to-action anywhere?
-6. Are any recently received industry awards displayed on the site?
+Use web search to check:
+1. Search "Who is ${name}" in a way that simulates ChatGPT — does the firm appear in AI search results?
+2. Check ${url}/sitemap.xml — does a sitemap exist?
+3. Check the homepage source — are meta descriptions present?
+4. Does the website have a Google Review call-to-action?
+5. Are recently received industry awards displayed on the site?
 
-Be direct and specific. Use **bold** for key findings and bullet lists.`;
+Write a brief summary of your findings, then end with this EXACT block:
+
+---JSON---
+{
+  "chatgpt": true or false,
+  "sitemap": true or false,
+  "meta": true or false,
+  "reviewCTA": true or false,
+  "awards": true or false,
+  "summary": "2-3 sentence summary of key findings"
+}
+---END---`;
 
   const result = await claudeStream(prompt, 'ai-vis-panel', 'ai-vis-status', 'ai-vis-text');
   if (result) {
     AD.aiVisibility = result;
-    if (/appears in chatgpt|found in chatgpt|yes.*chatgpt/i.test(result)) ck('c-cgpt');
-    if (/sitemap.*found|has.*sitemap|sitemap exists/i.test(result)) ck('c-sm');
-    if (/review.*cta.*pass|cta.*review.*pass|directs.*google.*review/i.test(result)) ck('c-rcta');
-    if (/award.*found|displays.*award|industry award/i.test(result)) ck('c-awd');
+    const j = extractJSON(result);
+    if (j) {
+      if (j.chatgpt)   ck('c-cgpt');
+      if (j.sitemap)   ck('c-sm');
+      if (j.meta)      ck('c-meta');
+      if (j.reviewCTA) ck('c-rcta');
+      if (j.awards)    ck('c-awd');
+    }
   }
   setStep('ai-vis', result ? 'done' : 'error');
 }
@@ -844,32 +852,56 @@ async function runAIWebsite(name, url) {
   setStep('ai-web', 'running');
   const prompt = `You are a digital marketing auditor for financial advisory firms. Do a thorough visual review of "${name}" at ${url}.
 
-Browse the site and check ALL of the following. For each item state PASS, FAIL, or PARTIAL with one sentence explanation:
+Browse the site and check each item below. Write a brief summary of what you found, then end with this EXACT block:
 
-1. Navigation — simple and clean? Count main nav items.
-2. Homepage links — does content link to other site pages?
-3. Photos — high quality and professional?
-4. Headlines — benefit-based (what the client gains)?
-5. CTAs — descriptive and actionable (not just "Learn More")?
-6. Blog/Resources — is there a thought leadership section?
-7. FAQs — are there FAQs WITH answers on any page?
-8. Google Review CTA — anything directing clients to leave a Google review?
-9. Industry awards — any recently received awards displayed?
-10. Google Analytics — any GA or GTM tags visible in page source?`;
+---JSON---
+{
+  "nav": true or false,
+  "linkedContent": true or false,
+  "photos": true or false,
+  "headlines": true or false,
+  "ctas": true or false,
+  "resources": true or false,
+  "faqs": true or false,
+  "reviewCTA": true or false,
+  "awards": true or false,
+  "analytics": true or false,
+  "notes": "key findings in 2-3 sentences"
+}
+---END---
+
+Definitions:
+- nav: is navigation simple and clean (7 or fewer items)?
+- linkedContent: does homepage content link to other pages?
+- photos: are there high quality professional photos?
+- headlines: are headlines benefit-based (not just "About Us")?
+- ctas: are CTAs descriptive (not just "Click Here" or "Learn More")?
+- resources: is there a blog or resources section?
+- faqs: are there FAQs WITH answers?
+- reviewCTA: does site direct clients to leave Google reviews?
+- awards: are recently received industry awards displayed?
+- analytics: is Google Analytics or GTM installed?`;
 
   const result = await claudeStream(prompt, 'ai-web-panel', 'ai-web-status', 'ai-web-text');
   if (result) {
     AD.aiWebsite = result;
-    if (/navigation.*pass|nav.*pass/i.test(result))        ck('c-nav');
-    if (/homepage links.*pass|content.*link.*pass/i.test(result)) ck('c-lnk');
-    if (/photos.*pass|high.quality.*pass/i.test(result))   ck('c-pho');
-    if (/headlines.*pass|benefit.*head.*pass/i.test(result)) ck('c-hdl');
-    if (/ctas.*pass|calls.to.action.*pass/i.test(result))  ck('c-cta');
-    if (/blog.*pass|resources.*pass|thought.*pass/i.test(result)) ck('c-res');
-    if (/faq.*pass/i.test(result))                         ck('c-faq');
-    if (/review.*cta.*pass/i.test(result))                 ck('c-rcta');
-    if (/award.*pass/i.test(result))                       ck('c-awd');
-    if (/analytics.*pass|ga.*found|gtm.*found/i.test(result)) ck('c-ga');
+    const j = extractJSON(result);
+    if (j) {
+      if (j.nav)          ck('c-nav');
+      if (j.linkedContent) ck('c-lnk');
+      if (j.photos)       ck('c-pho');
+      if (j.headlines)    ck('c-hdl');
+      if (j.ctas)         ck('c-cta');
+      if (j.resources)    ck('c-res');
+      if (j.faqs)         ck('c-faq');
+      if (j.reviewCTA)    ck('c-rcta');
+      if (j.awards)       ck('c-awd');
+      if (j.analytics)    ck('c-ga');
+      if (j.notes) {
+        const n = document.getElementById('n-web');
+        if (n && !n.value) n.value = j.notes;
+      }
+    }
   }
   setStep('ai-web', result ? 'done' : 'error');
 }
@@ -879,30 +911,62 @@ async function runAISocial(name, url) {
   setStep('ai-soc', 'running');
   const prompt = `You are a digital marketing auditor for financial advisory firms. Audit the social media presence of "${name}" (website: ${url}).
 
-Search each platform:
+Search for each platform:
 1. Facebook — search "${name} Facebook page"
-2. LinkedIn — search "${name} LinkedIn company"
+2. LinkedIn — search "${name} LinkedIn company page"  
 3. Instagram — search "${name} Instagram"
 4. YouTube — search "${name} YouTube channel"
-5. Check ${url} for social media links in footer/header
+5. Check ${url} for social links in footer/header
 
-For each platform found check: posting frequency (last post date), branded header, logo as profile pic, contact info, custom branded URL, tagging other pages.
+For each platform found, check: last post date, branded header, logo as profile pic, contact info complete, custom branded URL, tagging other pages.
 
-IMPORTANT: End your response with this exact block:
----SOCIAL DATA---
-Facebook URL: [full URL or N/A]
-Facebook followers: [number or N/A]
-Facebook last post: [date or N/A]
-LinkedIn URL: [full URL or N/A]
-LinkedIn followers: [number or N/A]
-LinkedIn last post: [date or N/A]
-Instagram URL: [username only or N/A]
-Instagram followers: [number or N/A]
-Instagram last post: [date or N/A]
-YouTube URL: [full URL or N/A]
-YouTube subscribers: [number or N/A]
-YouTube last post: [date or N/A]
-Social links on website: [Yes/No]
+Write a brief summary, then end with this EXACT block:
+
+---JSON---
+{
+  "facebook": {
+    "found": true or false,
+    "url": "full URL or null",
+    "followers": number or null,
+    "lastPost": "date string or null",
+    "postingFrequently": true or false,
+    "brandedHeader": true or false,
+    "customURL": true or false,
+    "logo": true or false,
+    "contactInfo": true or false,
+    "tagging": true or false,
+    "summary": true or false
+  },
+  "linkedin": {
+    "found": true or false,
+    "url": "full URL or null",
+    "followers": number or null,
+    "lastPost": "date string or null",
+    "postingFrequently": true or false,
+    "brandedHeader": true or false,
+    "customURL": true or false,
+    "logo": true or false,
+    "contactInfo": true or false,
+    "tagging": true or false,
+    "summary": true or false
+  },
+  "instagram": {
+    "found": true or false,
+    "url": "handle only or null",
+    "followers": number or null,
+    "lastPost": "date string or null",
+    "postingFrequently": true or false,
+    "logo": true or false
+  },
+  "youtube": {
+    "found": true or false,
+    "url": "full URL or null",
+    "subscribers": number or null,
+    "lastPost": "date string or null",
+    "postingFrequently": true or false
+  },
+  "socialLinksOnSite": true or false
+}
 ---END---`;
 
   const result = await claudeStream(prompt, 'ai-soc-panel', 'ai-soc-status', 'ai-soc-text');
