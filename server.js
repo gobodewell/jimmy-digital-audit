@@ -7,6 +7,7 @@ const PORT = process.env.PORT || 3001;
 const DFS_LOGIN    = process.env.DATAFORSEO_LOGIN    || '';
 const DFS_PASSWORD = process.env.DATAFORSEO_PASSWORD || '';
 const SF_KEY       = process.env.SOCIALFETCH_KEY     || '';
+const GOOGLE_KEY   = process.env.GOOGLE_API_KEY       || '';
 const SF_BASE      = 'https://api.socialfetch.dev/v1';
 const DFS_BASE     = 'https://api.dataforseo.com/v3';
 
@@ -50,6 +51,7 @@ app.get('/domain/overview', async (req, res) => {
     const d = await dfsPost('/dataforseo_labs/google/domain_rank_overview/live', [
       { target: domain, location_code: 2840, language_code: 'en' }
     ]);
+    console.log('DFS domain full response:', JSON.stringify(d)?.slice(0, 500));
     const item = d?.tasks?.[0]?.result?.[0]?.items?.[0];
     console.log('DFS domain raw item:', JSON.stringify(item)?.slice(0, 300));
     if (!item) return res.json({ da: 0, keywords: 0, traffic: 0 });
@@ -64,19 +66,19 @@ app.get('/domain/overview', async (req, res) => {
   }
 });
 
-// ── 2. Lighthouse — page speed, size, mobile, HTTPS, meta, indexable, GA, images
-// Endpoint: /v3/on_page/lighthouse/live/json
+// ── 2. PageSpeed — page speed, size, mobile, HTTPS, meta, indexable, GA, images
+// Using Google PageSpeed Insights API (free, reliable, no CORS issues)
 app.get('/site/lighthouse', async (req, res) => {
   const { url } = req.query;
   if (!url) return res.status(400).json({ error: 'url required' });
-  if (!DFS_LOGIN) return res.status(500).json({ error: 'DataForSEO not configured' });
   try {
-    const d = await dfsPost('/on_page/lighthouse/live/json', [
-      { url, for_mobile: true }
-    ]);
-    const audits = d?.tasks?.[0]?.result?.[0]?.audits;
-    const cats   = d?.tasks?.[0]?.result?.[0]?.categories;
-    if (!audits) return res.status(500).json({ error: 'No Lighthouse data returned', raw: d?.tasks?.[0] });
+    const psUrl = 'https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=' +
+      encodeURIComponent(url) + '&strategy=mobile' + (GOOGLE_KEY ? '&key=' + GOOGLE_KEY : '');
+    const r = await fetch(psUrl);
+    const d = await r.json();
+    const audits = d?.lighthouseResult?.audits;
+    const cats   = d?.lighthouseResult?.categories;
+    if (!audits) return res.status(500).json({ error: 'No PageSpeed data returned' });
 
     // Extract the metrics we need for the audit checklist
     const lcp      = audits['largest-contentful-paint']?.numericValue;
