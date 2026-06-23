@@ -74,11 +74,16 @@ app.get('/site/lighthouse', async (req, res) => {
   try {
     const psUrl = 'https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=' +
       encodeURIComponent(url) + '&strategy=mobile' + (GOOGLE_KEY ? '&key=' + GOOGLE_KEY : '');
-    const r = await fetch(psUrl);
+    console.log('PageSpeed fetching:', psUrl.slice(0, 100));
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30000);
+    const r = await fetch(psUrl, { signal: controller.signal });
+    clearTimeout(timeout);
     const d = await r.json();
+    console.log('PageSpeed response status:', d?.lighthouseResult ? 'ok' : JSON.stringify(d?.error || d?.message || 'no lighthouse result'));
     const audits = d?.lighthouseResult?.audits;
     const cats   = d?.lighthouseResult?.categories;
-    if (!audits) return res.status(500).json({ error: 'No PageSpeed data returned' });
+    if (!audits) return res.status(500).json({ error: 'No PageSpeed data returned', detail: d?.error || d?.message });
 
     // Extract the metrics we need for the audit checklist
     const lcp      = audits['largest-contentful-paint']?.numericValue;
