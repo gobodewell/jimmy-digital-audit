@@ -502,13 +502,13 @@ const DEFAULT_SF    = 'sfk_NGdIuFimdTIkNSaVyBgZLvyRrRMMXagmvbLHXKSbfWSfUiersakac
 let AD = {}; // audit data store
 
 const STEP_DEFS = [
-  { id: 'domain',    label: 'Domain metrics — DataForSEO Labs' },
-  { id: 'lighthouse',label: 'Technical audit — DataForSEO Lighthouse' },
-  { id: 'gbp',       label: 'Google Business Profile — DataForSEO' },
+  { id: 'domain',    label: 'Domain metrics - DataForSEO Labs' },
+  { id: 'lighthouse',label: 'Technical audit - DataForSEO Lighthouse' },
+  { id: 'gbp',       label: 'Google Business Profile - DataForSEO' },
   { id: 'ai-vis',    label: 'AI visibility review' },
   { id: 'ai-web',    label: 'AI website deep review' },
   { id: 'ai-soc',    label: 'AI social media analysis' },
-  { id: 'socialfetch',label: 'SocialFetch — live follower counts' },
+  { id: 'socialfetch',label: 'SocialFetch - live follower counts' },
 ];
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
@@ -523,7 +523,6 @@ const sv  = (id,v)=> {
   const e=document.getElementById(id);
   if(!e) return;
   e.value = v;
-  // Trigger change event so number inputs register the new value
   e.dispatchEvent(new Event('change'));
 };
 const getVal = id => document.getElementById(id)?.value?.trim() || '';
@@ -593,7 +592,7 @@ async function testProxy() {
     const r = await fetch(proxy + '/health');
     const d = await r.json();
     msg.textContent = d.ok
-      ? '✓ Proxy live — DFS: ' + (d.dfs?'configured':'not set') + ' · SF: ' + (d.sf?'configured':'not set')
+      ? '✓ Proxy live - DFS: ' + (d.dfs?'configured':'not set') + ' · SF: ' + (d.sf?'configured':'not set')
       : '✗ Proxy returned unexpected response';
   } catch(e) {
     msg.textContent = '✗ Could not reach proxy: ' + e.message;
@@ -636,7 +635,7 @@ async function runAudit() {
 
   initSteps();
 
-  // Phase 1 — run all API calls in parallel
+  // Phase 1 - run all API calls in parallel
   await Promise.allSettled([
     runDomain(domain),
     runLighthouse(url),
@@ -644,21 +643,21 @@ async function runAudit() {
     runSiteCheck(url)
   ]);
 
-  // Phase 2 — AI reviews sequentially
+  // Phase 2 - AI reviews sequentially
   await runAIVisibility(name, url);
   await runAIWebsite(name, url);
   await runAISocial(name, url);
 
-  // Phase 3 — SocialFetch with handles found by AI
+  // Phase 3 - SocialFetch with handles found by AI
   await runSocialFetch();
 
   btn.disabled = false;
   btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg> Run audit';
-  toast('Audit complete — click AI Review tab to read results then Build Report');
+  toast('Audit complete - click AI Review tab to read results then Build Report');
   st('aireview');
 }
 
-// ── Direct site checks — sitemap, HTTPS ──────────────────────────────────────
+// ── Direct site checks - sitemap, HTTPS ──────────────────────────────────────
 async function runSiteCheck(url) {
   const proxy = lg('cfg_proxy') || DEFAULT_PROXY;
   try {
@@ -768,8 +767,8 @@ async function runGBP(name, url) {
     details.innerHTML =
       '<span class="badge '+(d.claimed?'bg':'ba')+'">'+(d.claimed?'Claimed ✓':'Unclaimed')+'</span>&nbsp;' +
       '<span class="badge bp">'+(d.reviewCount||0)+' reviews</span>&nbsp;' +
-      '<span class="badge bgr">'+(d.rating||'—')+' ★</span>&nbsp;' +
-      '<span class="badge bgr">'+(d.category||'—')+'</span>';
+      '<span class="badge bgr">'+(d.rating||'-')+' ★</span>&nbsp;' +
+      '<span class="badge bgr">'+(d.category||'-')+'</span>';
 
     setStep('gbp', 'done');
   } catch(e) {
@@ -857,14 +856,14 @@ function mdToHtml(md) {
 // ── AI: visibility ────────────────────────────────────────────────────────────
 async function runAIVisibility(name, url) {
   setStep('ai-vis', 'running');
-  const prompt = `You are a digital marketing auditor for financial advisory firms. Audit the online visibility of "${name}" (${url}).
+  const prompt = `You are a thorough digital marketing auditor for financial advisory firms. Audit the online visibility of "${name}" (${url}).
 
-Use web search to check:
-1. Search "Who is ${name}" in a way that simulates ChatGPT — does the firm appear in AI search results?
-2. Check ${url}/sitemap.xml — does a sitemap exist?
-3. Check the homepage source — are meta descriptions present?
-4. Does the website have a Google Review call-to-action?
-5. Are recently received industry awards displayed on the site?
+Use web search to check each item - do not guess, actually search and verify:
+1. Search "Who is ${name}" and also "${name} financial advisor" - does the firm appear prominently? Would an AI tool like ChatGPT know about them?
+2. Actually fetch ${url}/sitemap.xml - does it return a valid sitemap page?
+3. Search "${name} site:totuswm.com" style query using the domain from ${url} - check indexing and meta descriptions
+4. Browse ${url} and look specifically for any Google Review link, button, or CTA
+5. Browse ${url} and look for any award badges, certifications, or industry recognition displayed
 
 Write a brief summary of your findings, then end with this EXACT block:
 
@@ -897,9 +896,11 @@ Write a brief summary of your findings, then end with this EXACT block:
 // ── AI: website ───────────────────────────────────────────────────────────────
 async function runAIWebsite(name, url) {
   setStep('ai-web', 'running');
-  const prompt = `You are a digital marketing auditor for financial advisory firms. Do a thorough visual review of "${name}" at ${url}.
+  const prompt = `You are a thorough digital marketing auditor for financial advisory firms. Do a deep visual review of "${name}" at ${url}.
 
-Browse the site and check each item below. Write a brief summary of what you found, then end with this EXACT block:
+Browse the ENTIRE site - not just the homepage. Check the homepage, about page, services pages, contact page, and any resources/blog section. For each item below, actually look for evidence before marking true or false - do not guess.
+
+Write a brief summary of specific things you found on the site, then end with this EXACT block:
 
 ---JSON---
 {
@@ -956,18 +957,27 @@ Definitions:
 // ── AI: social ────────────────────────────────────────────────────────────────
 async function runAISocial(name, url) {
   setStep('ai-soc', 'running');
-  const prompt = `You are a digital marketing auditor for financial advisory firms. Audit the social media presence of "${name}" (website: ${url}).
+  const prompt = `You are a thorough digital marketing auditor for financial advisory firms. Your job is to find and VERIFY the correct social media profiles for "${name}" (website: ${url}).
 
-Search for each platform:
-1. Facebook — search "${name} Facebook page"
-2. LinkedIn — search "${name} LinkedIn company page"  
-3. Instagram — search "${name} Instagram"
-4. YouTube — search "${name} YouTube channel"
-5. Check ${url} for social links in footer/header
+IMPORTANT: Many financial firms have similar names. Do NOT just take the first result - you must VERIFY each profile actually belongs to this specific firm by cross-referencing the website URL, business description, location, and branding.
 
-For each platform found, check: last post date, branded header, logo as profile pic, contact info complete, custom branded URL, tagging other pages.
+For each platform, follow this process:
+1. Search for the profile
+2. Check if the profile URL, business description, or website link matches ${url} or "${name}"
+3. If uncertain, search again with the domain name: search the firm's domain name on Facebook, or look for a link to their website on the profile
+4. If you find multiple profiles with similar names, pick the one that links to ${url} or matches the firm's description/location
+5. If you genuinely cannot confirm a profile belongs to this firm, mark it as not found rather than guessing
 
-Write a brief summary, then end with this EXACT block:
+Search each platform:
+- Facebook: search "${name} Facebook" then verify by checking if the page links back to the firm's website or matches the firm's description/location
+- LinkedIn: search "${name} LinkedIn company" then verify
+- Instagram: search "${name} Instagram" then verify handle matches other platforms
+- YouTube: search "${name} YouTube channel" then verify
+- Check ${url} footer/header for social links - these are the most reliable confirmation
+
+For each confirmed profile check: last post date, posting frequency, branded header, logo as profile pic, contact info, custom URL, tagging other pages.
+
+Write a brief summary of what you found and how you verified each profile, then end with this EXACT block:
 
 ---JSON---
 {
@@ -1058,7 +1068,7 @@ Write a brief summary, then end with this EXACT block:
     } else {
       console.error('Social JSON parse FAILED - raw result snippet:', result.slice(-500));
     }
-  
+  }
   setStep('ai-soc', result ? 'done' : 'error');
 }
 
@@ -1067,7 +1077,7 @@ async function runSocialFetch() {
   setStep('socialfetch', 'running');
   const fb = getVal('h-fb'), li = getVal('h-li'), ig = getVal('h-ig'), yt = getVal('h-yt');
   if (!fb && !li && !ig && !yt) {
-    document.getElementById('sf-status').textContent = 'No handles found — enter manually and click Pull';
+    document.getElementById('sf-status').textContent = 'No handles found - enter manually and click Pull';
     setStep('socialfetch', 'done');
     return;
   }
@@ -1110,7 +1120,7 @@ async function _doSocialFetch(fb, li, ig, yt) {
       if (c) { sv('m-yt', c); found++; }
     }
 
-    const msg = found > 0 ? '✓ ' + found + ' platform' + (found>1?'s':'') + ' pulled' : '✗ No counts — check handles';
+    const msg = found > 0 ? '✓ ' + found + ' platform' + (found>1?'s':'') + ' pulled' : '✗ No counts - check handles';
     document.getElementById('sf-status').textContent = msg;
     setStep('socialfetch', found > 0 ? 'done' : 'error');
     if (found > 0) toast(msg);
@@ -1120,7 +1130,7 @@ async function _doSocialFetch(fb, li, ig, yt) {
   }
 }
 
-// ── Build Report — parse all AI JSON and fill fields ─────────────────────────
+// ── Build Report - parse all AI JSON and fill fields ─────────────────────────
 function buildReport() {
   const msg = document.getElementById('build-report-msg');
   let filled = 0;
@@ -1196,7 +1206,7 @@ function buildReport() {
   }
 
   if (filled === 0) {
-    msg.textContent = 'No AI data found — make sure the audit has run first.';
+    msg.textContent = 'No AI data found - make sure the audit has run first.';
     msg.style.color = 'var(--red)';
     return;
   }
@@ -1240,25 +1250,25 @@ function buildOut() {
   const strip = t => (t||'').replace(/<[^>]+>/g,'').slice(0,400);
 
   const out =
-`DIGITAL AUDIT — ${name}
+`DIGITAL AUDIT - ${name}
 Date: ${date}
 URL: ${url}
 
 SCORES
-Visibility: ${s.v||'—'} | Website: ${s.w||'—'} | Social: ${s.s||'—'}
+Visibility: ${s.v||'-'} | Website: ${s.w||'-'} | Social: ${s.s||'-'}
 
 METRICS
-Domain Authority: ${AD.da||'—'} | Keywords: ${AD.keywords||'—'} | Traffic: ${AD.traffic||'—'}
-Page Speed: ${AD.speed||'—'}s | Page Size: ${AD.size||'—'}MB
-GBP Reviews: ${AD.gbpReviews??'—'} | GBP Rating: ${AD.gbpRating||'—'}
+Domain Authority: ${AD.da||'-'} | Keywords: ${AD.keywords||'-'} | Traffic: ${AD.traffic||'-'}
+Page Speed: ${AD.speed||'-'}s | Page Size: ${AD.size||'-'}MB
+GBP Reviews: ${AD.gbpReviews??'-'} | GBP Rating: ${AD.gbpRating||'-'}
 
-AI — VISIBILITY
+AI - VISIBILITY
 ${strip(AD.aiVisibility) || '(not run)'}
 
-AI — WEBSITE
+AI - WEBSITE
 ${strip(AD.aiWebsite) || '(not run)'}
 
-AI — SOCIAL
+AI - SOCIAL
 ${strip(AD.aiSocial) || '(not run)'}
 
 NOTES
@@ -1313,10 +1323,10 @@ async function pushAirtable() {
     const d = await r.json();
     if (d.id) {
       toast('Pushed to Airtable ✓');
-      document.getElementById('at-msg').textContent = 'Pushed at ' + new Date().toLocaleTimeString() + ' — ' + d.id;
+      document.getElementById('at-msg').textContent = 'Pushed at ' + new Date().toLocaleTimeString() + ' - ' + d.id;
       saveHist();
     } else {
-      toast('Airtable error — check field names');
+      toast('Airtable error - check field names');
       document.getElementById('at-msg').textContent = 'Error: ' + (d.error?.message || JSON.stringify(d).slice(0,100));
     }
   } catch(e) { toast('Push failed: '+e.message); }
@@ -1341,13 +1351,13 @@ function renderHist() {
   el.innerHTML = h.map(a => `
     <div class="hi">
       <div>
-        <div style="font-weight:600;font-size:14px">${a.clientName||'—'}</div>
+        <div style="font-weight:600;font-size:14px">${a.clientName||'-'}</div>
         <div style="font-size:12px;color:var(--text3);margin-top:2px">${a.clientURL||''} · ${new Date(a.savedAt).toLocaleDateString()}</div>
       </div>
       <div style="display:flex;gap:6px">
-        <span class="badge bg">V:${a.scores?.v||'—'}</span>
-        <span class="badge bp">W:${a.scores?.w||'—'}</span>
-        <span class="badge ba">S:${a.scores?.s||'—'}</span>
+        <span class="badge bg">V:${a.scores?.v||'-'}</span>
+        <span class="badge bp">W:${a.scores?.w||'-'}</span>
+        <span class="badge ba">S:${a.scores?.s||'-'}</span>
       </div>
     </div>`).join('');
 }
@@ -1358,7 +1368,7 @@ function clearAll() {
   document.querySelectorAll('input[type=number]').forEach(i => i.value='');
   document.querySelectorAll('textarea').forEach(t => t.value='');
   ['clientName','clientURL','atRecordId','h-fb','h-li','h-ig','h-yt'].forEach(id => sv(id,''));
-  ['da','kw','tr','spd','sz','ps'].forEach(id => setMV(id,'—',null));
+  ['da','kw','tr','spd','sz','ps'].forEach(id => setMV(id,'-',null));
   ['gbp-block','ai-vis-panel','ai-web-panel','ai-soc-panel','stepsWrap'].forEach(id => {
     const e = document.getElementById(id); if(e) e.style.display='none';
   });
