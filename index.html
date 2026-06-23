@@ -812,10 +812,12 @@ async function claudeStream(prompt, panelId, statusId, textId) {
 // ── Parse JSON from AI response ───────────────────────────────────────────────
 function extractJSON(text) {
   if (!text) return null;
-  const match = text.match(/---JSON---\s*([\s\S]*?)\s*---END---/);
+  const match = text.match(/---JSON---[\s\S]*?({[\s\S]*?})[\s\S]*?---END---/);
   if (!match) return null;
   try {
-    return JSON.parse(match[1].trim());
+    // Strip any markdown code fences
+    const clean = match[1].replace(/```json|```/g, '').trim();
+    return JSON.parse(clean);
   } catch(e) {
     console.error('JSON parse error:', e.message, match[1].slice(0, 200));
     return null;
