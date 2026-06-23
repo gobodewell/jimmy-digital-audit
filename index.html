@@ -519,7 +519,13 @@ const ls  = (k,v) => localStorage.setItem(k,v);
 const lg  = k     => localStorage.getItem(k) || '';
 const fv  = k     => lg('fld_'+k) || k;
 const ck  = id    => { const e=document.getElementById(id); if(e){e.checked=true; recalc();} };
-const sv  = (id,v)=> { const e=document.getElementById(id); if(e) e.value=v; };
+const sv  = (id,v)=> {
+  const e=document.getElementById(id);
+  if(!e) return;
+  e.value = v;
+  // Trigger change event so number inputs register the new value
+  e.dispatchEvent(new Event('change'));
+};
 const getVal = id => document.getElementById(id)?.value?.trim() || '';
 
 function setMV(id, val, good) {
@@ -630,11 +636,12 @@ async function runAudit() {
 
   initSteps();
 
-  // Phase 1 — run DataForSEO calls in parallel
+  // Phase 1 — run all API calls in parallel
   await Promise.allSettled([
     runDomain(domain),
     runLighthouse(url),
-    runGBP(name, url)
+    runGBP(name, url),
+    runSiteCheck(url)
   ]);
 
   // Phase 2 — AI reviews sequentially
@@ -649,6 +656,20 @@ async function runAudit() {
   btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg> Run audit';
   toast('Audit complete — click AI Review tab to read results then Build Report');
   st('aireview');
+}
+
+// ── Direct site checks — sitemap, HTTPS ──────────────────────────────────────
+async function runSiteCheck(url) {
+  const proxy = lg('cfg_proxy') || DEFAULT_PROXY;
+  try {
+    const r = await fetch(`${proxy}/site/check?url=${encodeURIComponent(url)}`);
+    const d = await r.json();
+    console.log('SITE CHECK:', JSON.stringify(d));
+    if (d.sitemap) ck('c-sm');
+    if (d.https)   ck('c-https');
+  } catch(e) {
+    console.error('Site check error:', e.message);
+  }
 }
 
 // ── DataForSEO: domain overview ───────────────────────────────────────────────
@@ -999,45 +1020,45 @@ Write a brief summary, then end with this EXACT block:
   if (result) {
     AD.aiSocial = result;
 
-    // Extract from structured block
-    function exSocial(key) {
-      const m = result.match(new RegExp(key + ':\\s*([^\n]+)', 'i'));
-      const v = m?.[1]?.trim();
-      return (!v || v==='N/A' || v==='n/a') ? null : v;
+    // Parse JSON and fill fields immediately
+    const socJ = extractJSON(result);
+    if (socJ) {
+      if (socJ.facebook?.found) {
+        ck('c-hfb');
+        if (socJ.facebook.url)       sv('h-fb', socJ.facebook.url);
+        if (socJ.facebook.followers) sv('m-fb', String(socJ.facebook.followers));
+        if (socJ.facebook.postingFrequently) ck('c-pst');
+        if (socJ.facebook.brandedHeader)     ck('c-bhd');
+        if (socJ.facebook.customURL)         ck('c-url');
+        if (socJ.facebook.logo)              ck('c-lgp');
+        if (socJ.facebook.contactInfo)       ck('c-cni');
+        if (socJ.facebook.tagging)           ck('c-tag');
+        if (socJ.facebook.summary)           ck('c-sum');
+      }
+      if (socJ.linkedin?.found) {
+        ck('c-hli');
+        if (socJ.linkedin.url)       sv('h-li', socJ.linkedin.url);
+        if (socJ.linkedin.followers) sv('m-lif', String(socJ.linkedin.followers));
+        if (socJ.linkedin.postingFrequently) ck('c-pst');
+        if (socJ.linkedin.brandedHeader)     ck('c-bhd');
+        if (socJ.linkedin.customURL)         ck('c-url');
+      }
+      if (socJ.instagram?.found) {
+        ck('c-hig');
+        if (socJ.instagram.url) sv('h-ig', socJ.instagram.url.replace(/^@/, ''));
+        if (socJ.instagram.followers) sv('m-ig', String(socJ.instagram.followers));
+      }
+      if (socJ.youtube?.found) {
+        ck('c-hyt');
+        if (socJ.youtube.url)         sv('h-yt', socJ.youtube.url);
+        if (socJ.youtube.subscribers) sv('m-yt', String(socJ.youtube.subscribers));
+      }
+      if (socJ.socialLinksOnSite) ck('c-sln');
+      console.log('Social JSON parsed OK:', JSON.stringify(socJ).slice(0, 200));
+    } else {
+      console.error('Social JSON parse FAILED - raw result snippet:', result.slice(-500));
     }
-    function exCount(key) {
-      const m = result.match(new RegExp(key + ':\\s*([\\d,]+)', 'i'));
-      return m ? m[1].replace(/,/g,'') : null;
-    }
-
-    const fbUrl = exSocial('Facebook URL');
-    const liUrl = exSocial('LinkedIn URL');
-    const igHandle = exSocial('Instagram URL');
-    const ytUrl = exSocial('YouTube URL');
-    if (fbUrl) { sv('h-fb', fbUrl); ck('c-hfb'); }
-    if (liUrl) { sv('h-li', liUrl); ck('c-hli'); }
-    if (igHandle) { sv('h-ig', igHandle.replace(/^@/,'')); ck('c-hig'); }
-    if (ytUrl) { sv('h-yt', ytUrl); ck('c-hyt'); }
-
-    const fbCount = exCount('Facebook followers');
-    const liCount = exCount('LinkedIn followers');
-    const igCount = exCount('Instagram followers');
-    const ytCount = exCount('YouTube subscribers');
-    if (fbCount) sv('m-fb', fbCount);
-    if (liCount) sv('m-lif', liCount);
-    if (igCount) sv('m-ig', igCount);
-    if (ytCount) sv('m-yt', ytCount);
-
-    // Other checklist items
-    if (/posting.*pass|active.*post/i.test(result))      ck('c-pst');
-    if (/branded.header.*pass/i.test(result))            ck('c-bhd');
-    if (/custom.*url.*pass/i.test(result))               ck('c-url');
-    if (/tagging.*pass/i.test(result))                   ck('c-tag');
-    if (/logo.*pass/i.test(result))                      ck('c-lgp');
-    if (/summary.*pass|bio.*pass/i.test(result))         ck('c-sum');
-    if (/contact.*pass/i.test(result))                   ck('c-cni');
-    if (/social links.*yes|links.*website.*yes/i.test(result)) ck('c-sln');
-  }
+  
   setStep('ai-soc', result ? 'done' : 'error');
 }
 
@@ -1144,7 +1165,7 @@ function buildReport() {
     if (socJ.facebook?.found) {
       ck('c-hfb'); filled++;
       if (socJ.facebook.url)       sv('h-fb', socJ.facebook.url);
-      if (socJ.facebook.followers) { sv('m-fb', socJ.facebook.followers); filled++; }
+      if (socJ.facebook.followers != null) { sv('m-fb', Number(socJ.facebook.followers)); filled++; }
       if (socJ.facebook.postingFrequently) ck('c-pst');
       if (socJ.facebook.brandedHeader)     ck('c-bhd');
       if (socJ.facebook.customURL)         ck('c-url');
@@ -1156,7 +1177,7 @@ function buildReport() {
     if (socJ.linkedin?.found) {
       ck('c-hli'); filled++;
       if (socJ.linkedin.url)       sv('h-li', socJ.linkedin.url);
-      if (socJ.linkedin.followers) { sv('m-lif', socJ.linkedin.followers); filled++; }
+      if (socJ.linkedin.followers != null) { sv('m-lif', Number(socJ.linkedin.followers)); filled++; }
       if (socJ.linkedin.postingFrequently) ck('c-pst');
       if (socJ.linkedin.brandedHeader)     ck('c-bhd');
       if (socJ.linkedin.customURL)         ck('c-url');
@@ -1164,12 +1185,12 @@ function buildReport() {
     if (socJ.instagram?.found) {
       ck('c-hig'); filled++;
       if (socJ.instagram.url)       sv('h-ig', socJ.instagram.url);
-      if (socJ.instagram.followers) { sv('m-ig', socJ.instagram.followers); filled++; }
+      if (socJ.instagram.followers != null) { sv('m-ig', Number(socJ.instagram.followers)); filled++; }
     }
     if (socJ.youtube?.found) {
       ck('c-hyt'); filled++;
       if (socJ.youtube.url)         sv('h-yt', socJ.youtube.url);
-      if (socJ.youtube.subscribers) { sv('m-yt', socJ.youtube.subscribers); filled++; }
+      if (socJ.youtube.subscribers != null) { sv('m-yt', Number(socJ.youtube.subscribers)); filled++; }
     }
     if (socJ.socialLinksOnSite) ck('c-sln');
   }

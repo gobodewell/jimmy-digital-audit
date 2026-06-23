@@ -131,7 +131,37 @@ app.get('/site/lighthouse', async (req, res) => {
   }
 });
 
-// ── 3. GBP — claimed, rating, review count, photos ───────────────────────────
+// ── 3. Sitemap check — direct HTTP ping ──────────────────────────────────────
+app.get('/site/check', async (req, res) => {
+  const { url } = req.query;
+  if (!url) return res.status(400).json({ error: 'url required' });
+  try {
+    const results = {};
+    const base = url.replace(/\/$/, '');
+
+    // Check sitemap
+    try {
+      const sr = await fetch(base + '/sitemap.xml', { method: 'HEAD', signal: AbortSignal.timeout(8000) });
+      results.sitemap = sr.ok || sr.status === 200;
+    } catch(e) { results.sitemap = false; }
+
+    // Check HTTPS
+    results.https = url.startsWith('https');
+
+    // Check robots.txt
+    try {
+      const rr = await fetch(base + '/robots.txt', { method: 'HEAD', signal: AbortSignal.timeout(5000) });
+      results.robotsTxt = rr.ok;
+    } catch(e) { results.robotsTxt = false; }
+
+    console.log('Site check results:', JSON.stringify(results));
+    res.json(results);
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── 4. GBP — claimed, rating, review count, photos ───────────────────────────
 // Endpoint: /v3/business_data/google/my_business_info/live  (no polling!)
 app.get('/gbp/info', async (req, res) => {
   const { name, location } = req.query;
