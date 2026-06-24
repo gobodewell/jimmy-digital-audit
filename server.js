@@ -313,7 +313,7 @@ app.post('/ai/message', async (req, res) => {
     let data = null;
     for (let i = 0; i < 6; i++) {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 60000);
+      const timeout = setTimeout(() => controller.abort(), 150000);  // web_fetch reads real pages — needs more than 60s
       const r = await fetch('https://api.anthropic.com/v1/messages', {
         method:  'POST',
         headers: {
@@ -350,8 +350,11 @@ app.post('/ai/message', async (req, res) => {
       .join('\n');
     res.json({ text, stop_reason: data?.stop_reason || null });
   } catch (e) {
+    const msg = e.name === 'AbortError'
+      ? 'AI review timed out — the site review took too long. Try running it again.'
+      : e.message;
     console.error('AI proxy error:', e.message);
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: msg });
   }
 });
 

@@ -1103,6 +1103,38 @@ async function pullFollowers() {
   await _doSocialFetch(fb, li, ig, yt);
 }
 
+// Reliable profile-level checks straight from SocialFetch data (better than AI guessing).
+// Every field is optional — absent fields simply don't tick the box.
+function sfProfileChecks(data) {
+  if (!data) return;
+  const p = data.profile || data.company || {};   // FB uses "profile", LinkedIn uses "company"
+  const c = data.contact || {};
+  const logo    = p.avatarUrl || p.logoUrl;
+  const cover   = p.coverImageUrl;
+  const url     = p.profileUrl || p.companyUrl || '';
+  const summary = (data.business && data.business.intro) || p.description || p.slogan;
+
+  if (logo)   ck('c-lgp');                              // logo as profile pic
+  if (cover)  ck('c-bhd');                              // branded header
+  if (c.email || c.phone || c.address) ck('c-cni');     // contact info complete
+  if (summary && String(summary).trim()) ck('c-sum');  // profile summary written
+  if (url && !/profile\.php|\/people\/|[?&]id=\d/i.test(url)) ck('c-url'); // custom branded URL
+
+  // Recent posts — LinkedIn returns these; Facebook does not. Drive posting
+  // cadence + tagging from real post data when available.
+  const posts = Array.isArray(data.recentPosts) ? data.recentPosts : [];
+  if (posts.length >= 2) {
+    const times = posts.map(x => Date.parse(x.publishedAt)).filter(t => !isNaN(t)).sort((a, b) => b - a);
+    if (times.length >= 2) {
+      const weeks   = (times[0] - times[times.length - 1]) / 604800000; // ms per week
+      const perWeek = weeks > 0 ? (times.length - 1) / weeks : times.length;
+      if (perWeek >= 2) ck('c-pst');  // posting ~2-3x/week or more
+    }
+    // tagging other pages: an @mention of another account in any recent post
+    if (posts.some(x => /(^|\s)@[A-Za-z0-9._'-]{2,}/.test(x.text || ''))) ck('c-tag');
+  }
+}
+
 async function _doSocialFetch(fb, li, ig, yt) {
   const proxy = lg('cfg_proxy') || DEFAULT_PROXY;
   const params = new URLSearchParams();
@@ -1119,18 +1151,22 @@ async function _doSocialFetch(fb, li, ig, yt) {
     if (d.facebook) {
       const c = d.facebook?.data?.metrics?.followers || d.facebook?.data?.metrics?.likes || 0;
       if (c) { sv('m-fb', c); found++; }
+      sfProfileChecks(d.facebook?.data);
     }
     if (d.linkedin) {
       const c = d.linkedin?.data?.metrics?.followers || 0;
       if (c) { sv('m-lif', c); found++; }
+      sfProfileChecks(d.linkedin?.data);
     }
     if (d.instagram) {
       const c = d.instagram?.data?.profile?.followersCount || d.instagram?.data?.metrics?.followers || 0;
       if (c) { sv('m-ig', c); found++; }
+      sfProfileChecks(d.instagram?.data);
     }
     if (d.youtube) {
       const c = d.youtube?.data?.channel?.subscriberCount || d.youtube?.data?.metrics?.subscribers || 0;
       if (c) { sv('m-yt', c); found++; }
+      sfProfileChecks(d.youtube?.data);
     }
 
     const msg = found > 0 ? '✓ ' + found + ' platform' + (found>1?'s':'') + ' pulled' : '✗ No counts - check handles';
