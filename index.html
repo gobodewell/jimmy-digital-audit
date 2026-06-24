@@ -607,12 +607,14 @@ function initSteps() {
   ).join('');
 }
 
-function setStep(id, state) {
+function setStep(id, state, msg) {
   const el = document.getElementById('step-'+id);
   if (!el) return;
   const icons = { pending:'○', running:'<span class="spin">⟳</span>', done:'✓', error:'✗' };
   el.className = 'step ' + state;
-  el.innerHTML = `<span class="si">${icons[state]||'○'}</span>${STEP_DEFS.find(s=>s.id===id)?.label||id}`;
+  const label = STEP_DEFS.find(s=>s.id===id)?.label || id;
+  const note  = msg ? ` <span style="color:var(--text3);font-size:11px">— ${msg}</span>` : '';
+  el.innerHTML = `<span class="si">${icons[state]||'○'}</span>${label}${note}`;
 }
 
 // ── Main audit runner ─────────────────────────────────────────────────────────
@@ -686,10 +688,11 @@ async function runDomain(domain) {
     setMV('tr', (traffic||0).toLocaleString(),  traffic  > 75);
     AD.da = da; AD.keywords = keywords; AD.traffic = traffic;
     if (da > 5) ck('c-da5');
-    setStep('domain', 'done');
+    // d.note carries the DataForSEO status when no usable data came back.
+    setStep('domain', 'done', d.note || (!keywords && !traffic ? 'no organic data returned' : ''));
   } catch(e) {
     console.error('Domain error:', e.message);
-    setStep('domain', 'error');
+    setStep('domain', 'error', e.message);
   }
 }
 
@@ -713,7 +716,8 @@ async function runLighthouse(url) {
     if (d.isMobile)    ck('c-mob');
     if (d.isIndexable) ck('c-idx');
     if (d.hasMeta)     ck('c-meta');
-    if (d.hasSitemap)  ck('c-sm');
+    // sitemap is driven by the real /sitemap.xml fetch in runSiteCheck, not by
+    // robots.txt presence — so don't set c-sm here.
     if (d.speedPass)   ck('c-spd');
     if (d.sizePass)    ck('c-szp');
     if (d.imagesOk)    ck('c-img');
@@ -727,10 +731,10 @@ async function runLighthouse(url) {
           'Oversized images (' + d.imgList.length + '):\n' + d.imgList.join('\n');
       }
     }
-    setStep('lighthouse', 'done');
+    setStep('lighthouse', 'done', (d.speed || d.sizeMB) ? '' : 'no PageSpeed metrics returned');
   } catch(e) {
     console.error('Lighthouse error:', e.message);
-    setStep('lighthouse', 'error');
+    setStep('lighthouse', 'error', e.message);
   }
 }
 
@@ -750,8 +754,8 @@ async function runGBP(name, url) {
     block.style.display = '';
 
     if (!d.found) {
-      details.innerHTML = '<span class="badge br">GBP not found</span>';
-      setStep('gbp', 'done');
+      details.innerHTML = '<span class="badge br">GBP not found'+(d.note?' — '+d.note:'')+'</span>';
+      setStep('gbp', 'done', d.note || 'no match');
       return;
     }
 
@@ -811,14 +815,20 @@ async function claudeStream(prompt, panelId, statusId, textId) {
 // ── Parse JSON from AI response ───────────────────────────────────────────────
 function extractJSON(text) {
   if (!text) return null;
-  const match = text.match(/---JSON---[\s\S]*?({[\s\S]*?})[\s\S]*?---END---/);
-  if (!match) return null;
+  // Prefer the delimited block, fall back to the whole response.
+  const block = text.match(/---JSON---([\s\S]*?)---END---/);
+  const raw   = (block ? block[1] : text).replace(/```json|```/g, '');
+  // Take the first "{" to the LAST "}" so NESTED objects (e.g. the social
+  // block with facebook/linkedin/... sub-objects) parse correctly. The old
+  // non-greedy regex stopped at the first inner "}", which silently broke the
+  // entire Social tab.
+  const start = raw.indexOf('{');
+  const end   = raw.lastIndexOf('}');
+  if (start === -1 || end === -1 || end <= start) return null;
   try {
-    // Strip any markdown code fences
-    const clean = match[1].replace(/```json|```/g, '').trim();
-    return JSON.parse(clean);
+    return JSON.parse(raw.slice(start, end + 1));
   } catch(e) {
-    console.error('JSON parse error:', e.message, match[1].slice(0, 200));
+    console.error('JSON parse error:', e.message, raw.slice(start, start + 200));
     return null;
   }
 }

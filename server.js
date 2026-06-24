@@ -70,12 +70,19 @@ app.get('/domain/overview', async (req, res) => {
       { target: domain, location_code: 2840, language_code: 'en' }
     ]);
     console.log('DFS domain full response:', JSON.stringify(d)?.slice(0, 500));
-    const item = d?.tasks?.[0]?.result?.[0]?.items?.[0];
+    const task = d?.tasks?.[0];
+    // Surface a real reason when DataForSEO didn't return usable data.
+    if (task && task.status_code !== 20000) {
+      return res.json({ da: 0, keywords: 0, traffic: 0, note: 'DataForSEO ' + task.status_code + ': ' + task.status_message });
+    }
+    const item = task?.result?.[0]?.items?.[0];
     console.log('DFS domain raw item:', JSON.stringify(item)?.slice(0, 300));
-    if (!item) return res.json({ da: 0, keywords: 0, traffic: 0 });
+    if (!item) return res.json({ da: 0, keywords: 0, traffic: 0, note: 'no data for this domain' });
     const organic = item.metrics?.organic || item.organic || {};
+    // NOTE: domain_rank_overview does NOT return a domain-authority "rank" field,
+    // so `da` is essentially always 0 here. Real DA needs the Backlinks API.
     const da = item.rank || item.domain_rank || 0;
-    const keywords = organic.count || organic.pos_1 + organic.pos_2_3 + organic.pos_4_10 || 0;
+    const keywords = organic.count || ((organic.pos_1||0) + (organic.pos_2_3||0) + (organic.pos_4_10||0)) || 0;
     const traffic = Math.round(organic.etv || organic.estimated_traffic || 0);
     res.json({ da, keywords, traffic });
   } catch (e) {
@@ -156,19 +163,30 @@ app.get('/site/check', async (req, res) => {
   try {
     const results = {};
     const base = url.replace(/\/$/, '');
+    const UA   = { 'User-Agent': 'Mozilla/5.0 (compatible; GrowthLineAudit/1.0)' };
 
-    // Check sitemap
+    // Check sitemap — entered URL + /sitemap.xml. Use GET (many servers reject
+    // HEAD with 403/405) and sniff the body so a soft-404 HTML page doesn't
+    // count as a sitemap.
+    const sitemapUrl = base + '/sitemap.xml';
     try {
-      const sr = await fetch(base + '/sitemap.xml', { method: 'HEAD', signal: AbortSignal.timeout(8000) });
-      results.sitemap = sr.ok || sr.status === 200;
-    } catch(e) { results.sitemap = false; }
+      const sr = await fetch(sitemapUrl, { headers: UA, redirect: 'follow', signal: AbortSignal.timeout(10000) });
+      if (sr.ok) {
+        const body = (await sr.text()).slice(0, 4000).toLowerCase();
+        results.sitemap = body.includes('<urlset') || body.includes('<sitemapindex') || body.includes('<?xml');
+      } else {
+        results.sitemap = false;
+      }
+      results.sitemapStatus = sr.status;
+    } catch(e) { results.sitemap = false; results.sitemapError = e.message; }
+    results.sitemapUrl = sitemapUrl;
 
     // Check HTTPS
     results.https = url.startsWith('https');
 
-    // Check robots.txt
+    // Check robots.txt — GET + UA, same reasons as the sitemap check
     try {
-      const rr = await fetch(base + '/robots.txt', { method: 'HEAD', signal: AbortSignal.timeout(5000) });
+      const rr = await fetch(base + '/robots.txt', { headers: UA, redirect: 'follow', signal: AbortSignal.timeout(8000) });
       results.robotsTxt = rr.ok;
     } catch(e) { results.robotsTxt = false; }
 
@@ -193,7 +211,11 @@ app.get('/gbp/info', async (req, res) => {
         language_name: 'English'
       }
     ]);
-    const items = d?.tasks?.[0]?.result?.[0]?.items;
+    const task = d?.tasks?.[0];
+    if (task && task.status_code !== 20000) {
+      return res.json({ found: false, note: 'DataForSEO ' + task.status_code + ': ' + task.status_message });
+    }
+    const items = task?.result?.[0]?.items;
     if (!items || items.length === 0) return res.json({ found: false });
 
     // Find the best matching result
