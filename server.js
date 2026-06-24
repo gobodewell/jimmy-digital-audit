@@ -57,7 +57,7 @@ async function dfsPost(path, body) {
 }
 
 // ── Health ────────────────────────────────────────────────────────────────────
-app.get('/health', (req, res) => res.json({ ok: true, dfs: !!DFS_LOGIN, sf: !!SF_KEY, ai: !!ANTHROPIC_KEY, at: !!AIRTABLE_TOKEN, locked: !!AUDIT_KEY }));
+app.get('/health', (req, res) => res.json({ ok: true, dfs: !!DFS_LOGIN, sf: !!SF_KEY, ai: !!ANTHROPIC_KEY, at: !!AIRTABLE_TOKEN, google: !!GOOGLE_KEY, locked: !!AUDIT_KEY }));
 
 // ── 1. Domain overview — DA, keywords, traffic ────────────────────────────────
 // Endpoint: /v3/dataforseo_labs/google/domain_rank_overview/live
@@ -105,10 +105,11 @@ app.get('/site/lighthouse', async (req, res) => {
     const r = await fetch(psUrl, { signal: controller.signal });
     clearTimeout(timeout);
     const d = await r.json();
-    console.log('PageSpeed response status:', d?.lighthouseResult ? 'ok' : JSON.stringify(d?.error || d?.message || 'no lighthouse result'));
+    const gMsg = d?.error?.message || (typeof d?.error === 'string' ? d.error : '') || d?.message || '';
+    console.log('PageSpeed response status:', d?.lighthouseResult ? 'ok' : (gMsg || 'no lighthouse result'));
     const audits = d?.lighthouseResult?.audits;
     const cats   = d?.lighthouseResult?.categories;
-    if (!audits) return res.status(500).json({ error: 'No PageSpeed data returned', detail: d?.error || d?.message });
+    if (!audits) return res.status(502).json({ error: 'PageSpeed: ' + (gMsg || 'no data') + (GOOGLE_KEY ? '' : ' — no GOOGLE_API_KEY set') });
 
     // Extract the metrics we need for the audit checklist
     const lcp      = audits['largest-contentful-paint']?.numericValue;
@@ -322,7 +323,7 @@ app.post('/ai/message', async (req, res) => {
         },
         body: JSON.stringify({
           model:      'claude-sonnet-4-6',
-          max_tokens: 2000,
+          max_tokens: 4096,  // social block is large + nested; 2000 risked truncating the JSON
           tools:      [{ type: 'web_search_20250305', name: 'web_search', max_uses: 5 }],
           messages
         }),
