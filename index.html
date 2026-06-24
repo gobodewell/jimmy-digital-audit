@@ -850,7 +850,7 @@ async function runAIVisibility(name, url) {
 Use web_fetch to read the real pages and web_search for off-site signals — do not guess:
 1. web_search "Who is ${name}" and "${name} financial advisor" - does the firm appear prominently? Would an AI tool like ChatGPT know about them?
 2. web_fetch ${url}/sitemap.xml - does it return a valid XML sitemap (contains <urlset> or <sitemapindex>)?
-3. web_fetch ${url} and read the <head> / page source - are real meta descriptions present? Is the site indexable?
+3. web_fetch ${url} and read the <head> - does a meta description tag simply EXIST (any non-empty <meta name="description">)? It only needs to exist to count as a pass — do NOT judge its quality, length, or wording. Also note whether the site is indexable.
 4. web_fetch ${url} (and the contact/about pages) and look specifically for any Google Review link, button, or CTA - quote it if found.
 5. web_fetch ${url} and look for award badges, certifications, or industry recognition displayed - name the specific award if found.
 
