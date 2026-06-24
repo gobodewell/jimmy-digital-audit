@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: jimmy-digital-audit
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      # Secret that the app must send (set the same value as the app's
+      # Settings → "Proxy access key"). Locks the proxy so randoms who find
+      # the URL can't spend your DataForSEO / Anthropic credits.
+      - key: AUDIT_KEY
+        sync: false
+      # AI reviews (Anthropic key now lives here, not in the browser)
+      - key: ANTHROPIC_KEY
+        sync: false
+      # Airtable push (personal access token now lives here, not in the browser)
+      - key: AIRTABLE_TOKEN
+        sync: false
+      # DataForSEO — domain metrics, Lighthouse, GBP
+      - key: DATAFORSEO_LOGIN
+        sync: false
+      - key: DATAFORSEO_PASSWORD
+        sync: false
+      # SocialFetch — follower counts (optional)
+      - key: SOCIALFETCH_KEY
+        sync: false
+      # Google PageSpeed (optional; works without it at a lower rate limit)
+      - key: GOOGLE_API_KEY
+        sync: false

@@ -447,27 +447,21 @@ textarea{resize:vertical;min-height:60px}
       <div class="sl">Proxy server URL</div>
       <div class="kr"><input type="text" id="s-proxy" placeholder="https://jimmy-digital-audit.onrender.com" style="font-family:'DM Mono',monospace;font-size:12px"/></div>
 
-      <div class="sl" style="margin-top:12px">Anthropic (AI reviews)</div>
-      <div class="kr"><input type="password" id="s-ant" placeholder="sk-ant-..."/><span class="ks" id="ks-ant">not set</span></div>
-
-      <div class="sl" style="margin-top:12px">DataForSEO (domain, Lighthouse, GBP)</div>
-      <div class="kr"><input type="text" id="s-dfs-login" placeholder="DataForSEO login email" style="font-family:'DM Mono',monospace;font-size:12px"/></div>
-      <div class="kr"><input type="password" id="s-dfs-pass" placeholder="DataForSEO API password"/><span class="ks" id="ks-dfs">not set</span></div>
-
-      <div class="sl" style="margin-top:12px">SocialFetch (follower counts)</div>
-      <div class="kr"><input type="password" id="s-sf" placeholder="sfk_..."/><span class="ks" id="ks-sf">not set</span></div>
+      <div class="sl" style="margin-top:12px">Proxy access key</div>
+      <div class="kr"><input type="password" id="s-audit" placeholder="must match AUDIT_KEY on the proxy"/><span class="ks" id="ks-audit">not set</span></div>
+      <div style="font-size:11px;color:var(--text3);margin-top:6px;line-height:1.5">Anthropic, DataForSEO, SocialFetch and Airtable keys now live on the proxy server (Render env vars), not in the browser. Only this access key is stored here — it just unlocks your proxy.</div>
     </div>
 
     <div class="card">
       <div class="ct">Airtable</div>
       <div class="fr fr2">
-        <div class="fg"><label>Personal access token</label><input type="password" id="s-at-tok" placeholder="pat..."/></div>
         <div class="fg"><label>Base ID</label><input type="text" id="s-at-base" placeholder="app..." style="font-family:'DM Mono',monospace;font-size:12px"/></div>
+        <div class="fg"><label>Table name</label><input type="text" id="s-at-tbl" placeholder="Audits Intake All"/></div>
       </div>
       <div class="fr fr2">
-        <div class="fg"><label>Table name</label><input type="text" id="s-at-tbl" placeholder="Audits Intake All"/></div>
         <div class="fg"><label>View (optional)</label><input type="text" id="s-at-view" placeholder="Grid view"/></div>
       </div>
+      <div style="font-size:11px;color:var(--text3);margin-top:2px">The Airtable personal access token lives on the proxy (AIRTABLE_TOKEN env var), not here.</div>
       <div class="sl">Field name mapping</div>
       <div class="fm">
         <div class="fg"><label>Client name</label><input type="text" id="f-name" placeholder="Name"/></div>
@@ -498,7 +492,6 @@ textarea{resize:vertical;min-height:60px}
 <script>
 // ── Constants & state ─────────────────────────────────────────────────────────
 const DEFAULT_PROXY = 'https://jimmy-digital-audit.onrender.com';
-const DEFAULT_SF    = 'sfk_NGdIuFimdTIkNSaVyBgZLvyRrRMMXagmvbLHXKSbfWSfUiersakacAkxmSmsAdQW';
 let AD = {}; // audit data store
 
 const STEP_DEFS = [
@@ -555,7 +548,7 @@ function st(n) {
 }
 
 // ── Settings ──────────────────────────────────────────────────────────────────
-const S_KEYS = ['proxy','ant','dfs-login','dfs-pass','sf','at-tok','at-base','at-tbl','at-view'];
+const S_KEYS = ['proxy','audit','at-base','at-tbl','at-view'];
 const F_KEYS = ['name','url','vis','web','soc','da','spd','nts','ai','dte'];
 
 function saveSettings() {
@@ -568,20 +561,27 @@ function saveSettings() {
 
 function loadSettings() {
   if (!lg('cfg_proxy')) ls('cfg_proxy', DEFAULT_PROXY);
-  if (!lg('cfg_sf'))    ls('cfg_sf',    DEFAULT_SF);
   S_KEYS.forEach(k => { const e=document.getElementById('s-'+k); if(e) e.value=lg('cfg_'+k); });
   F_KEYS.forEach(k => { const e=document.getElementById('f-'+k); if(e) e.value=lg('fld_'+k); });
   updateKeyStatus();
 }
 
 function updateKeyStatus() {
-  [['ant','Anthropic'],['dfs','DataForSEO'],['sf','SocialFetch']].forEach(([k,label]) => {
-    const el = document.getElementById('ks-'+k);
-    if (!el) return;
-    const val = k==='dfs' ? lg('cfg_dfs-login') : lg('cfg_'+k);
-    el.textContent = val ? '✓ set' : 'not set';
-    el.style.color = val ? 'var(--green)' : 'var(--text3)';
-  });
+  const el = document.getElementById('ks-audit');
+  if (!el) return;
+  const val = lg('cfg_audit');
+  el.textContent = val ? '✓ set' : 'not set';
+  el.style.color = val ? 'var(--green)' : 'var(--text3)';
+}
+
+// ── Proxy fetch helper — injects the shared audit key on every proxy call ─────
+function pf(path, opts) {
+  opts = opts || {};
+  const proxy   = lg('cfg_proxy') || DEFAULT_PROXY;
+  const key     = lg('cfg_audit') || '';
+  const headers = Object.assign({}, opts.headers || {});
+  if (key) headers['X-Audit-Key'] = key;
+  return fetch(proxy + path, Object.assign({}, opts, { headers }));
 }
 
 async function testProxy() {
@@ -589,7 +589,7 @@ async function testProxy() {
   const msg = document.getElementById('s-msg');
   msg.textContent = 'Testing proxy...';
   try {
-    const r = await fetch(proxy + '/health');
+    const r = await pf('/health');
     const d = await r.json();
     msg.textContent = d.ok
       ? '✓ Proxy live - DFS: ' + (d.dfs?'configured':'not set') + ' · SF: ' + (d.sf?'configured':'not set')
@@ -661,7 +661,7 @@ async function runAudit() {
 async function runSiteCheck(url) {
   const proxy = lg('cfg_proxy') || DEFAULT_PROXY;
   try {
-    const r = await fetch(`${proxy}/site/check?url=${encodeURIComponent(url)}`);
+    const r = await pf(`/site/check?url=${encodeURIComponent(url)}`);
     const d = await r.json();
     console.log('SITE CHECK:', JSON.stringify(d));
     if (d.sitemap) ck('c-sm');
@@ -676,7 +676,7 @@ async function runDomain(domain) {
   setStep('domain', 'running');
   const proxy = lg('cfg_proxy') || DEFAULT_PROXY;
   try {
-    const r = await fetch(`${proxy}/domain/overview?domain=${encodeURIComponent(domain)}`);
+    const r = await pf(`/domain/overview?domain=${encodeURIComponent(domain)}`);
     const d = await r.json();
     console.log('DOMAIN RESPONSE:', JSON.stringify(d));
     if (d.error) throw new Error(d.error);
@@ -698,7 +698,7 @@ async function runLighthouse(url) {
   setStep('lighthouse', 'running');
   const proxy = lg('cfg_proxy') || DEFAULT_PROXY;
   try {
-    const r = await fetch(`${proxy}/site/lighthouse?url=${encodeURIComponent(url)}`);
+    const r = await pf(`/site/lighthouse?url=${encodeURIComponent(url)}`);
     const d = await r.json();
     console.log('LIGHTHOUSE RESPONSE:', JSON.stringify(d));
     if (d.error) throw new Error(d.error);
@@ -740,7 +740,7 @@ async function runGBP(name, url) {
   if (!name) { setStep('gbp', 'error'); return; }
   const proxy = lg('cfg_proxy') || DEFAULT_PROXY;
   try {
-    const r = await fetch(`${proxy}/gbp/info?name=${encodeURIComponent(name)}&url=${encodeURIComponent(url)}`);
+    const r = await pf(`/gbp/info?name=${encodeURIComponent(name)}&url=${encodeURIComponent(url)}`);
     const d = await r.json();
     console.log('GBP RESPONSE:', JSON.stringify(d));
     if (d.error) throw new Error(d.error);
@@ -781,44 +781,23 @@ async function runGBP(name, url) {
 
 // ── Claude streaming helper ───────────────────────────────────────────────────
 async function claudeStream(prompt, panelId, statusId, textId) {
-  const antKey = lg('cfg_ant');
   const textEl = document.getElementById(textId);
   const statEl = document.getElementById(statusId);
-
-  if (!antKey) {
-    textEl.innerHTML = '<p style="color:var(--red)">Add your Anthropic API key in Settings.</p>';
-    statEl.textContent = 'no key'; statEl.className = 'badge br';
-    return null;
-  }
 
   statEl.textContent = 'analyzing…'; statEl.className = 'badge ba';
   textEl.innerHTML = '<span class="spin">⟳</span> Analyzing...';
 
   try {
-    const resp = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': antKey,
-        'anthropic-version': '2023-06-01',
-        'anthropic-dangerous-direct-browser-access': 'true'
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 2000,
-        tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 5 }],
-        messages: [{ role: 'user', content: prompt }]
-      })
+    // AI runs through the proxy — the Anthropic key stays server-side.
+    const resp = await pf('/ai/message', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ prompt })
     });
-
     const d = await resp.json();
+    if (d.error) throw new Error(d.error);
 
-    // Extract text from response
-    const fullText = d.content
-      .filter(b => b.type === 'text')
-      .map(b => b.text)
-      .join('\n');
-
+    const fullText = d.text || '';
     textEl.innerHTML = mdToHtml(fullText);
     statEl.textContent = 'done'; statEl.className = 'badge bg';
     return fullText;
@@ -1099,7 +1078,7 @@ async function _doSocialFetch(fb, li, ig, yt) {
   if (yt) params.set('yt', yt);
 
   try {
-    const r = await fetch(`${proxy}/social/profiles?${params}`);
+    const r = await pf(`/social/profiles?${params}`);
     const d = await r.json();
     let found = 0;
 
@@ -1286,8 +1265,8 @@ function copyOut() {
 // ── Airtable push ─────────────────────────────────────────────────────────────
 async function pushAirtable() {
   buildOut();
-  const tok  = lg('cfg_at-tok'), base = lg('cfg_at-base'), tbl = lg('cfg_at-tbl');
-  if (!tok||!base||!tbl) { toast('Configure Airtable in Settings first'); showPage('settings'); return; }
+  const base = lg('cfg_at-base'), tbl = lg('cfg_at-tbl');
+  if (!base||!tbl) { toast('Set Airtable Base ID + table in Settings first'); showPage('settings'); return; }
 
   const s     = AD.scores||{};
   const notes = [getVal('n-vis'), getVal('n-web'), getVal('n-soc')].filter(Boolean).join(' | ')||'';
@@ -1307,18 +1286,15 @@ async function pushAirtable() {
   if(fv('dte')) fields[fv('dte')] = new Date().toISOString().split('T')[0];
 
   const recId = getVal('atRecordId');
-  const apiUrl = recId
-    ? `https://api.airtable.com/v0/${base}/${encodeURIComponent(tbl)}/${recId}`
-    : `https://api.airtable.com/v0/${base}/${encodeURIComponent(tbl)}`;
 
   const btn = document.getElementById('pushBtn');
   btn.disabled = true; btn.textContent = 'Pushing...';
 
   try {
-    const r = await fetch(apiUrl, {
-      method: recId ? 'PATCH' : 'POST',
-      headers: { 'Authorization': 'Bearer '+tok, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ fields })
+    const r = await pf('/airtable', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ base, table: tbl, recordId: recId || null, fields })
     });
     const d = await r.json();
     if (d.id) {

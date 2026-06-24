@@ -11,9 +11,27 @@ const GOOGLE_KEY   = process.env.GOOGLE_API_KEY       || '';
 const SF_BASE      = 'https://api.socialfetch.dev/v1';
 const DFS_BASE     = 'https://api.dataforseo.com/v3';
 
-app.use(cors({ origin: '*', methods: ['GET','POST','OPTIONS'], allowedHeaders: ['Content-Type','Authorization'] }));
+const AUDIT_KEY     = process.env.AUDIT_KEY      || '';   // shared secret the app must send
+const ANTHROPIC_KEY = process.env.ANTHROPIC_KEY  || '';   // AI reviews, server-side
+const AIRTABLE_TOKEN= process.env.AIRTABLE_TOKEN || '';   // Airtable push, server-side
+
+app.use(cors({ origin: '*', methods: ['GET','POST','OPTIONS'], allowedHeaders: ['Content-Type','Authorization','X-Audit-Key'] }));
 app.options('*', cors());
 app.use(express.json());
+
+// ── Auth gate ─────────────────────────────────────────────────────────────────
+// If AUDIT_KEY is set, every request (except /health and CORS preflight) must
+// send a matching X-Audit-Key header. Keeps the proxy — and your paid DataForSEO
+// and Anthropic usage — private even though CORS is open. If AUDIT_KEY is unset
+// the gate is skipped (back-compatible), so set it in Render to lock things down.
+app.use((req, res, next) => {
+  if (req.method === 'OPTIONS' || req.path === '/health') return next();
+  if (!AUDIT_KEY) return next();
+  if ((req.get('X-Audit-Key') || '') !== AUDIT_KEY) {
+    return res.status(401).json({ error: 'unauthorized' });
+  }
+  next();
+});
 
 // ── Auth helper ───────────────────────────────────────────────────────────────
 function dfsAuth() {
@@ -39,7 +57,7 @@ async function dfsPost(path, body) {
 }
 
 // ── Health ────────────────────────────────────────────────────────────────────
-app.get('/health', (req, res) => res.json({ ok: true, dfs: !!DFS_LOGIN, sf: !!SF_KEY }));
+app.get('/health', (req, res) => res.json({ ok: true, dfs: !!DFS_LOGIN, sf: !!SF_KEY, ai: !!ANTHROPIC_KEY, at: !!AIRTABLE_TOKEN, locked: !!AUDIT_KEY }));
 
 // ── 1. Domain overview — DA, keywords, traffic ────────────────────────────────
 // Endpoint: /v3/dataforseo_labs/google/domain_rank_overview/live
@@ -258,6 +276,78 @@ app.get('/social/profiles', async (req, res) => {
 
   await Promise.allSettled(calls);
   res.json(out);
+});
+
+// ── 5. AI review — proxied Anthropic (key stays server-side) ─────────────────
+// Also handles the web-search pause_turn loop so long searches don't come back
+// with partial content and a missing ---JSON--- block.
+app.post('/ai/message', async (req, res) => {
+  if (!ANTHROPIC_KEY) return res.status(500).json({ error: 'Anthropic not configured' });
+  const { prompt } = req.body || {};
+  if (!prompt) return res.status(400).json({ error: 'prompt required' });
+  try {
+    let messages = [{ role: 'user', content: prompt }];
+    let data = null;
+    for (let i = 0; i < 6; i++) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 60000);
+      const r = await fetch('https://api.anthropic.com/v1/messages', {
+        method:  'POST',
+        headers: {
+          'Content-Type':      'application/json',
+          'x-api-key':         ANTHROPIC_KEY,
+          'anthropic-version': '2023-06-01'
+        },
+        body: JSON.stringify({
+          model:      'claude-sonnet-4-6',
+          max_tokens: 2000,
+          tools:      [{ type: 'web_search_20250305', name: 'web_search', max_uses: 5 }],
+          messages
+        }),
+        signal: controller.signal
+      });
+      clearTimeout(timeout);
+      data = await r.json();
+      if (data.type === 'error') {
+        return res.status(502).json({ error: data.error?.message || 'Anthropic error' });
+      }
+      // Web-search server loop paused — append the assistant turn and continue.
+      if (data.stop_reason === 'pause_turn' && Array.isArray(data.content)) {
+        messages = messages.concat([{ role: 'assistant', content: data.content }]);
+        continue;
+      }
+      break;
+    }
+    const text = (data?.content || [])
+      .filter(b => b.type === 'text')
+      .map(b => b.text)
+      .join('\n');
+    res.json({ text, stop_reason: data?.stop_reason || null });
+  } catch (e) {
+    console.error('AI proxy error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── 6. Airtable push — proxied (token stays server-side) ─────────────────────
+app.post('/airtable', async (req, res) => {
+  if (!AIRTABLE_TOKEN) return res.status(500).json({ error: 'Airtable not configured' });
+  const { base, table, recordId, fields } = req.body || {};
+  if (!base || !table || !fields) return res.status(400).json({ error: 'base, table, fields required' });
+  try {
+    const url = 'https://api.airtable.com/v0/' + base + '/' + encodeURIComponent(table) +
+                (recordId ? '/' + recordId : '');
+    const r = await fetch(url, {
+      method:  recordId ? 'PATCH' : 'POST',
+      headers: { 'Authorization': 'Bearer ' + AIRTABLE_TOKEN, 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ fields })
+    });
+    const d = await r.json();
+    res.status(r.status).json(d);
+  } catch (e) {
+    console.error('Airtable proxy error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.listen(PORT, () => console.log('Proxy running on port ' + PORT));
