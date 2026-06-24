@@ -847,12 +847,12 @@ async function runAIVisibility(name, url) {
   setStep('ai-vis', 'running');
   const prompt = `You are a thorough digital marketing auditor for financial advisory firms. Audit the online visibility of "${name}" (${url}).
 
-Use web search to check each item - do not guess, actually search and verify:
-1. Search "Who is ${name}" and also "${name} financial advisor" - does the firm appear prominently? Would an AI tool like ChatGPT know about them?
-2. Actually fetch ${url}/sitemap.xml - does it return a valid sitemap page?
-3. Search "${name} site:totuswm.com" style query using the domain from ${url} - check indexing and meta descriptions
-4. Browse ${url} and look specifically for any Google Review link, button, or CTA
-5. Browse ${url} and look for any award badges, certifications, or industry recognition displayed
+Use web_fetch to read the real pages and web_search for off-site signals — do not guess:
+1. web_search "Who is ${name}" and "${name} financial advisor" - does the firm appear prominently? Would an AI tool like ChatGPT know about them?
+2. web_fetch ${url}/sitemap.xml - does it return a valid XML sitemap (contains <urlset> or <sitemapindex>)?
+3. web_fetch ${url} and read the <head> / page source - are real meta descriptions present? Is the site indexable?
+4. web_fetch ${url} (and the contact/about pages) and look specifically for any Google Review link, button, or CTA - quote it if found.
+5. web_fetch ${url} and look for award badges, certifications, or industry recognition displayed - name the specific award if found.
 
 Write a brief summary of your findings, then end with this EXACT block:
 
@@ -887,7 +887,10 @@ async function runAIWebsite(name, url) {
   setStep('ai-web', 'running');
   const prompt = `You are a thorough digital marketing auditor for financial advisory firms. Do a deep visual review of "${name}" at ${url}.
 
-Browse the ENTIRE site - not just the homepage. Check the homepage, about page, services pages, contact page, and any resources/blog section. For each item below, actually look for evidence before marking true or false - do not guess.
+CRITICAL — read the real site, do not rely on search snippets or memory:
+- Use the web_fetch tool to load ${url} and READ THE ACTUAL HTML, including the navigation menu and footer.
+- Then follow the links you see in the nav/footer and web_fetch the key pages: About, Services, Contact, and especially any Blog / Insights / Resources / News page (a nav link like "Explore our blog", "Insights", or "Resources" counts as a blog/resources section even if it is just one click away).
+- Base every answer below ONLY on content you actually fetched from the site. Quote the specific nav labels, headlines, or buttons you saw as your evidence. Never guess or assume — if you did not fetch evidence for an item, mark it false.
 
 Write a brief summary of specific things you found on the site, then end with this EXACT block:
 
@@ -950,12 +953,21 @@ async function runAISocial(name, url) {
 
 IMPORTANT: Many financial firms have similar names. Do NOT just take the first result - you must VERIFY each profile actually belongs to this specific firm by cross-referencing the website URL, business description, location, and branding.
 
-For each platform, follow this process:
-1. Search for the profile
+START HERE — check the website itself first: web_fetch ${url} and carefully read the page HEADER/NAVIGATION and especially the FOOTER. Advisory firms almost always place their social icons/links (Facebook, LinkedIn, Instagram, YouTube, X/Twitter) in the footer, and those links are often NOT indexed by search engines — so this is your single most reliable source. Pull every social profile URL you find there. If the homepage footer is thin, also web_fetch the Contact and About pages and read their footers/headers. Set "socialLinksOnSite": true if the site links to ANY social profile.
+
+Then for each platform, follow this process:
+1. Prefer the profile URL you found in the site's footer/nav; only if none is on the site, search for the profile
 2. Check if the profile URL, business description, or website link matches ${url} or "${name}"
 3. If uncertain, search again with the domain name: search the firm's domain name on Facebook, or look for a link to their website on the profile
 4. If you find multiple profiles with similar names, pick the one that links to ${url} or matches the firm's description/location
 5. If you genuinely cannot confirm a profile belongs to this firm, mark it as not found rather than guessing
+
+VERIFICATION RULES (strict — this prevents false positives):
+- Set "found": true ONLY if you located the actual profile URL and opened/fetched it to confirm it is this firm. A search result alone is NOT confirmation.
+- If "found" is true you MUST include the real profile "url". If you have no URL, set "found": false.
+- "followers"/"subscribers": use the real number from the profile. If you opened the profile but the count isn't visible, use null — never invent or estimate a number.
+- The checkboxes (postingFrequently, brandedHeader, etc.) must each be based on something you actually saw on the profile; if you didn't see it, mark false.
+- Also web_fetch ${url} and read the footer/header for links to social profiles — those on-site links are the most reliable confirmation.
 
 Search each platform:
 - Facebook: search "${name} Facebook" then verify by checking if the page links back to the firm's website or matches the firm's description/location
@@ -964,7 +976,10 @@ Search each platform:
 - YouTube: search "${name} YouTube channel" then verify
 - Check ${url} footer/header for social links - these are the most reliable confirmation
 
-For each confirmed profile check: last post date, posting frequency, branded header, logo as profile pic, contact info, custom URL, tagging other pages.
+For each CONFIRMED profile, look at its recent posts / activity feed and judge:
+- "postingFrequently": are they posting about 2-3 times per week or more? Use the dates of the most recent posts. Set true ONLY if the recent cadence is ~2-3x/week or higher; if posts are sparse, stale (months old), or you cannot actually see the feed, set false.
+- "tagging": do their posts @mention or tag OTHER pages/accounts (partners, clients, communities, events, custodians)? Set true ONLY if you actually see tags/mentions in the posts; otherwise false.
+Also note last post date, branded header, logo as profile pic, complete contact info, and a custom branded URL — each true ONLY if you actually saw it on the profile.
 
 Write a brief summary of what you found and how you verified each profile, then end with this EXACT block:
 
@@ -1002,6 +1017,7 @@ Write a brief summary of what you found and how you verified each profile, then 
     "followers": number or null,
     "lastPost": "date string or null",
     "postingFrequently": true or false,
+    "tagging": true or false,
     "logo": true or false
   },
   "youtube": {
@@ -1009,7 +1025,8 @@ Write a brief summary of what you found and how you verified each profile, then 
     "url": "full URL or null",
     "subscribers": number or null,
     "lastPost": "date string or null",
-    "postingFrequently": true or false
+    "postingFrequently": true or false,
+    "tagging": true or false
   },
   "socialLinksOnSite": true or false
 }
@@ -1022,7 +1039,7 @@ Write a brief summary of what you found and how you verified each profile, then 
     // Parse JSON and fill fields immediately
     const socJ = extractJSON(result);
     if (socJ) {
-      if (socJ.facebook?.found) {
+      if (socJ.facebook?.found && socJ.facebook?.url) {
         ck('c-hfb');
         if (socJ.facebook.url)       sv('h-fb', socJ.facebook.url);
         if (socJ.facebook.followers) sv('m-fb', String(socJ.facebook.followers));
@@ -1034,7 +1051,7 @@ Write a brief summary of what you found and how you verified each profile, then 
         if (socJ.facebook.tagging)           ck('c-tag');
         if (socJ.facebook.summary)           ck('c-sum');
       }
-      if (socJ.linkedin?.found) {
+      if (socJ.linkedin?.found && socJ.linkedin?.url) {
         ck('c-hli');
         if (socJ.linkedin.url)       sv('h-li', socJ.linkedin.url);
         if (socJ.linkedin.followers) sv('m-lif', String(socJ.linkedin.followers));
@@ -1042,16 +1059,23 @@ Write a brief summary of what you found and how you verified each profile, then 
         if (socJ.linkedin.brandedHeader)     ck('c-bhd');
         if (socJ.linkedin.customURL)         ck('c-url');
       }
-      if (socJ.instagram?.found) {
+      if (socJ.instagram?.found && socJ.instagram?.url) {
         ck('c-hig');
         if (socJ.instagram.url) sv('h-ig', socJ.instagram.url.replace(/^@/, ''));
         if (socJ.instagram.followers) sv('m-ig', String(socJ.instagram.followers));
       }
-      if (socJ.youtube?.found) {
+      if (socJ.youtube?.found && socJ.youtube?.url) {
         ck('c-hyt');
         if (socJ.youtube.url)         sv('h-yt', socJ.youtube.url);
         if (socJ.youtube.subscribers) sv('m-yt', String(socJ.youtube.subscribers));
       }
+      // Posting cadence (2-3x/week): Facebook + LinkedIn only (not YouTube/Instagram)
+      const _posting = [socJ.facebook, socJ.linkedin].filter(p => p && p.found && p.url);
+      if (_posting.some(p => p.postingFrequently)) ck('c-pst');
+      // Tagging other pages: any verified profile
+      const _plats = [socJ.facebook, socJ.linkedin, socJ.instagram, socJ.youtube].filter(p => p && p.found && p.url);
+      if (_plats.some(p => p.tagging)) ck('c-tag');
+
       if (socJ.socialLinksOnSite) ck('c-sln');
       console.log('Social JSON parsed OK:', JSON.stringify(socJ).slice(0, 200));
     } else {

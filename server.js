@@ -324,7 +324,10 @@ app.post('/ai/message', async (req, res) => {
         body: JSON.stringify({
           model:      'claude-sonnet-4-6',
           max_tokens: 4096,  // social block is large + nested; 2000 risked truncating the JSON
-          tools:      [{ type: 'web_search_20250305', name: 'web_search', max_uses: 5 }],
+          tools: [
+            { type: 'web_search_20260209', name: 'web_search', max_uses: 6 },
+            { type: 'web_fetch_20260209',  name: 'web_fetch',  max_uses: 6 }  // actually READ the site, not just search snippets
+          ],
           messages
         }),
         signal: controller.signal
