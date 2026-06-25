@@ -17,7 +17,11 @@ services:
       # Airtable push (personal access token now lives here, not in the browser)
       - key: AIRTABLE_TOKEN
         sync: false
-      # DataForSEO — domain metrics, Lighthouse, GBP
+      # SEMrush — SEO numbers (DA / keywords / traffic). When set, the proxy
+      # prefers SEMrush over DataForSEO for the domain overview.
+      - key: SEMRUSH_KEY
+        sync: false
+      # DataForSEO — domain metrics (fallback), Lighthouse, GBP
       - key: DATAFORSEO_LOGIN
         sync: false
       - key: DATAFORSEO_PASSWORD

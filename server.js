@@ -8,6 +8,7 @@ const DFS_LOGIN    = process.env.DATAFORSEO_LOGIN    || '';
 const DFS_PASSWORD = process.env.DATAFORSEO_PASSWORD || '';
 const SF_KEY       = process.env.SOCIALFETCH_KEY     || '';
 const GOOGLE_KEY   = process.env.GOOGLE_API_KEY       || '';
+const SEM_KEY      = process.env.SEMRUSH_KEY          || '';   // SEO numbers (DA/keywords/traffic)
 const SF_BASE      = 'https://api.socialfetch.dev/v1';
 const DFS_BASE     = 'https://api.dataforseo.com/v3';
 
@@ -56,15 +57,79 @@ async function dfsPost(path, body) {
   }
 }
 
+// ── SEMrush helper ────────────────────────────────────────────────────────────
+// SEMrush returns CSV-ish text (semicolon-delimited, header row first). Hard
+// failures come back as a line beginning with "ERROR ## :: message".
+async function semFetch(url) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20000);
+  try {
+    const r = await fetch(url, { signal: controller.signal });
+    clearTimeout(timeout);
+    return await r.text();
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+// Returns { da, keywords, traffic } on success, or { error } when SEMrush
+// reports a problem (bad key, no data) so the caller can fall back.
+async function semrushOverview(domain) {
+  // domain_rank → organic keywords (Or) + organic traffic (Ot)
+  const txt = await semFetch(
+    `https://api.semrush.com/?type=domain_rank&key=${SEM_KEY}&export_columns=Dn,Rk,Or,Ot&domain=${encodeURIComponent(domain)}&database=us`
+  );
+  const trimmed = (txt || '').trim();
+  if (/^ERROR/i.test(trimmed)) return { error: trimmed };
+
+  const rows = trimmed.split('\n');
+  let keywords = 0, traffic = 0;
+  if (rows.length >= 2) {
+    const cols = rows[1].split(';');           // Dn;Rk;Or;Ot
+    keywords = parseInt(cols[2], 10) || 0;
+    traffic  = parseInt(cols[3], 10) || 0;
+  }
+
+  // backlinks_overview → Authority Score, the real "DA" (best-effort; its own
+  // billed call, so a failure here just leaves da = 0 rather than aborting).
+  let da = 0;
+  try {
+    const bl = await semFetch(
+      `https://api.semrush.com/analytics/v1/?type=backlinks_overview&key=${SEM_KEY}&target=${encodeURIComponent(domain)}&target_type=root_domain&export_columns=ascore`
+    );
+    const blRows = (bl || '').trim().split('\n');
+    if (blRows.length >= 2 && !/^ERROR/i.test(blRows[0])) {
+      da = parseInt(blRows[1].split(';')[0], 10) || 0;
+    }
+  } catch (_) { /* authority score is optional */ }
+
+  return { da, keywords, traffic };
+}
+
 // ── Health ────────────────────────────────────────────────────────────────────
-app.get('/health', (req, res) => res.json({ ok: true, dfs: !!DFS_LOGIN, sf: !!SF_KEY, ai: !!ANTHROPIC_KEY, at: !!AIRTABLE_TOKEN, google: !!GOOGLE_KEY, locked: !!AUDIT_KEY }));
+app.get('/health', (req, res) => res.json({ ok: true, dfs: !!DFS_LOGIN, sem: !!SEM_KEY, sf: !!SF_KEY, ai: !!ANTHROPIC_KEY, at: !!AIRTABLE_TOKEN, google: !!GOOGLE_KEY, locked: !!AUDIT_KEY }));
 
 // ── 1. Domain overview — DA, keywords, traffic ────────────────────────────────
 // Endpoint: /v3/dataforseo_labs/google/domain_rank_overview/live
 app.get('/domain/overview', async (req, res) => {
   const { domain } = req.query;
   if (!domain) return res.status(400).json({ error: 'domain required' });
-  if (!DFS_LOGIN) return res.status(500).json({ error: 'DataForSEO not configured' });
+
+  // Prefer SEMrush when a key is configured — it returns a real Authority Score
+  // for DA plus organic keywords/traffic. Fall back to DataForSEO on error.
+  if (SEM_KEY) {
+    try {
+      const s = await semrushOverview(domain);
+      if (s && !s.error) return res.json({ da: s.da, keywords: s.keywords, traffic: s.traffic, source: 'semrush' });
+      if (s && s.error && !DFS_LOGIN) return res.json({ da: 0, keywords: 0, traffic: 0, note: 'SEMrush: ' + s.error });
+      // else fall through to DataForSEO
+    } catch (e) {
+      if (!DFS_LOGIN) return res.status(500).json({ error: 'SEMrush: ' + e.message });
+      // else fall through to DataForSEO
+    }
+  }
+
+  if (!DFS_LOGIN) return res.status(500).json({ error: 'No SEO source configured (set SEMRUSH_KEY or DataForSEO)' });
   try {
     const d = await dfsPost('/dataforseo_labs/google/domain_rank_overview/live', [
       { target: domain, location_code: 2840, language_code: 'en' }

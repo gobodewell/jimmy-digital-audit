@@ -693,8 +693,10 @@ async function runDomain(domain) {
     setMV('tr', (traffic||0).toLocaleString(),  traffic  > 75);
     AD.da = da; AD.keywords = keywords; AD.traffic = traffic;
     if (da > 5) ck('c-da5');
-    // d.note carries the DataForSEO status when no usable data came back.
-    setStep('domain', 'done', d.note || (!keywords && !traffic ? 'no organic data returned' : ''));
+    // d.source = 'semrush' when SEMrush fed the numbers; d.note carries the
+    // provider status when no usable data came back.
+    const src = d.source === 'semrush' ? 'via SEMrush' : 'via DataForSEO';
+    setStep('domain', 'done', d.note || (!keywords && !traffic ? 'no organic data returned' : src));
   } catch(e) {
     console.error('Domain error:', e.message);
     setStep('domain', 'error', e.message);

@@ -27,7 +27,8 @@ header — which the app does automatically once you enter the key in Settings.
    | `AUDIT_KEY` | Shared secret that locks the proxy. Pick any random string. | Recommended |
    | `ANTHROPIC_KEY` | AI reviews (`sk-ant-...`) | Yes |
    | `AIRTABLE_TOKEN` | Airtable push (`pat...`) | For Airtable push |
-   | `DATAFORSEO_LOGIN` | DataForSEO account email | Yes |
+   | `SEMRUSH_KEY` | SEO numbers — DA / keywords / traffic. Preferred over DataForSEO when set. | Optional |
+   | `DATAFORSEO_LOGIN` | DataForSEO account email (SEO fallback + Lighthouse + GBP) | Yes |
    | `DATAFORSEO_PASSWORD` | DataForSEO API password | Yes |
    | `SOCIALFETCH_KEY` | Follower counts | Optional |
    | `GOOGLE_API_KEY` | PageSpeed (higher rate limit) | Optional |
