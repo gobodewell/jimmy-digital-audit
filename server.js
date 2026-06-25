@@ -311,60 +311,79 @@ app.get('/social/profiles', async (req, res) => {
   res.json(out);
 });
 
-// ── 5. AI review — proxied Anthropic (key stays server-side) ─────────────────
-// Also handles the web-search pause_turn loop so long searches don't come back
-// with partial content and a missing ---JSON--- block.
+// ── 5. AI review — proxied Anthropic, STREAMED ───────────────────────────────
+// Streams the response as newline-delimited JSON: a {"type":"ping"} on every
+// upstream event (keeps the browser connection alive while the AI searches/reads,
+// so the long request can't be dropped), then a final {"type":"done","text":...}.
 app.post('/ai/message', async (req, res) => {
   if (!ANTHROPIC_KEY) return res.status(500).json({ error: 'Anthropic not configured' });
   const { prompt } = req.body || {};
   if (!prompt) return res.status(400).json({ error: 'prompt required' });
+
+  res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('X-Accel-Buffering', 'no');   // ask any proxy not to buffer
+  res.flushHeaders?.();
+  const send = obj => { try { res.write(JSON.stringify(obj) + '\n'); } catch (e) {} };
+
   try {
-    let messages = [{ role: 'user', content: prompt }];
-    let data = null;
-    for (let i = 0; i < 6; i++) {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 150000);  // web_fetch reads real pages — needs more than 60s
-      const r = await fetch('https://api.anthropic.com/v1/messages', {
-        method:  'POST',
-        headers: {
-          'Content-Type':      'application/json',
-          'x-api-key':         ANTHROPIC_KEY,
-          'anthropic-version': '2023-06-01'
-        },
-        body: JSON.stringify({
-          model:      'claude-sonnet-4-6',
-          max_tokens: 4096,  // social block is large + nested; 2000 risked truncating the JSON
-          tools: [
-            { type: 'web_search_20260209', name: 'web_search', max_uses: 6 },
-            { type: 'web_fetch_20260209',  name: 'web_fetch',  max_uses: 6 }  // actually READ the site, not just search snippets
-          ],
-          messages
-        }),
-        signal: controller.signal
-      });
-      clearTimeout(timeout);
-      data = await r.json();
-      if (data.type === 'error') {
-        return res.status(502).json({ error: data.error?.message || 'Anthropic error' });
-      }
-      // Web-search server loop paused — append the assistant turn and continue.
-      if (data.stop_reason === 'pause_turn' && Array.isArray(data.content)) {
-        messages = messages.concat([{ role: 'assistant', content: data.content }]);
-        continue;
-      }
-      break;
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method:  'POST',
+      headers: {
+        'Content-Type':      'application/json',
+        'x-api-key':         ANTHROPIC_KEY,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model:      'claude-sonnet-4-6',
+        max_tokens: 4096,
+        stream:     true,
+        tools: [
+          { type: 'web_search_20260209', name: 'web_search', max_uses: 3 },
+          { type: 'web_fetch_20260209',  name: 'web_fetch',  max_uses: 3 }
+        ],
+        messages: [{ role: 'user', content: prompt }]
+      })
+    });
+
+    if (!r.ok || !r.body) {
+      const t = await r.text().catch(() => '');
+      send({ type: 'error', error: 'Anthropic ' + r.status + ': ' + t.slice(0, 200) });
+      return res.end();
     }
-    const text = (data?.content || [])
-      .filter(b => b.type === 'text')
-      .map(b => b.text)
-      .join('\n');
-    res.json({ text, stop_reason: data?.stop_reason || null });
+
+    const reader  = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '', fullText = '', stopReason = null;
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const payload = line.slice(6).trim();
+        if (!payload || payload === '[DONE]') continue;
+        let ev; try { ev = JSON.parse(payload); } catch { continue; }
+        send({ type: 'ping' });   // heartbeat — keeps the browser connection alive
+        if (ev.type === 'content_block_delta' && ev.delta?.type === 'text_delta') {
+          fullText += ev.delta.text;
+        } else if (ev.type === 'message_delta' && ev.delta?.stop_reason) {
+          stopReason = ev.delta.stop_reason;
+        } else if (ev.type === 'error') {
+          send({ type: 'error', error: ev.error?.message || 'stream error' });
+        }
+      }
+    }
+
+    send({ type: 'done', text: fullText, stop_reason: stopReason });
+    res.end();
   } catch (e) {
-    const msg = e.name === 'AbortError'
-      ? 'AI review timed out — the site review took too long. Try running it again.'
-      : e.message;
     console.error('AI proxy error:', e.message);
-    res.status(500).json({ error: msg });
+    send({ type: 'error', error: e.message });
+    res.end();
   }
 });
 

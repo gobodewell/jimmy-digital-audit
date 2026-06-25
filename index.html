@@ -798,16 +798,40 @@ async function claudeStream(prompt, panelId, statusId, textId) {
   textEl.innerHTML = '<span class="spin">⟳</span> Analyzing...';
 
   try {
-    // AI runs through the proxy — the Anthropic key stays server-side.
+    // AI runs through the proxy (key stays server-side) and is STREAMED back as
+    // newline-delimited JSON — pings keep the connection alive so long reviews
+    // don't get dropped; a final {type:"done"} carries the full text.
     const resp = await pf('/ai/message', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ prompt })
     });
-    const d = await resp.json();
-    if (d.error) throw new Error(d.error);
+    if (!resp.ok || !resp.body) {
+      const t = await resp.text().catch(() => '');
+      throw new Error('proxy ' + resp.status + (t ? ': ' + t.slice(0, 120) : ''));
+    }
 
-    const fullText = d.text || '';
+    const reader  = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '', fullText = '', errMsg = null, pings = 0;
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        let msg; try { msg = JSON.parse(line); } catch { continue; }
+        if (msg.type === 'done')       fullText = msg.text || '';
+        else if (msg.type === 'error') errMsg = msg.error;
+        else if (msg.type === 'ping') { pings++; textEl.innerHTML = '<span class="spin">⟳</span> Analyzing' + '.'.repeat(pings % 4); }
+      }
+    }
+
+    if (errMsg) throw new Error(errMsg);
+
     textEl.innerHTML = mdToHtml(fullText);
     statEl.textContent = 'done'; statEl.className = 'badge bg';
     return fullText;
