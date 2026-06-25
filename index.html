@@ -746,8 +746,9 @@ async function runGBP(name, url, city) {
   const proxy = lg('cfg_proxy') || DEFAULT_PROXY;
   try {
     // GBP listings are local — pass the city/state so the lookup resolves.
-    let loc = (city || '').trim();
-    if (loc && !/united states|usa|u\.s\.a?\.?/i.test(loc)) loc += ', United States';
+    // DataForSEO wants "Houston,Texas,United States" with NO spaces around commas.
+    let loc = (city || '').trim().replace(/\s*,\s*/g, ',');
+    if (loc && !/united states|usa/i.test(loc)) loc += ',United States';
     const locParam = loc ? '&location=' + encodeURIComponent(loc) : '';
     const r = await pf(`/gbp/info?name=${encodeURIComponent(name)}&url=${encodeURIComponent(url)}${locParam}`);
     const d = await r.json();
