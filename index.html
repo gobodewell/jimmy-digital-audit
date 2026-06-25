@@ -232,7 +232,8 @@ textarea{resize:vertical;min-height:60px}
           <div class="fg"><label>Client name</label><input type="text" id="clientName" placeholder="e.g. Convergent Financial Partners"/></div>
           <div class="fg"><label>Website URL</label><input type="url" id="clientURL" placeholder="https://www.example.com"/></div>
         </div>
-        <div class="fr" style="grid-template-columns:1fr">
+        <div class="fr fr2">
+          <div class="fg"><label>City, State (helps find the Google Business Profile)</label><input type="text" id="clientCity" placeholder="e.g. Houston, Texas"/></div>
           <div class="fg"><label>Airtable record ID (optional — patches existing record)</label><input type="text" id="atRecordId" placeholder="rec..."/></div>
         </div>
       </div>
@@ -641,7 +642,7 @@ async function runAudit() {
   await Promise.allSettled([
     runDomain(domain),
     runLighthouse(url),
-    runGBP(name, url),
+    runGBP(name, url, getVal('clientCity')),
     runSiteCheck(url)
   ]);
 
@@ -739,12 +740,16 @@ async function runLighthouse(url) {
 }
 
 // ── DataForSEO: GBP ───────────────────────────────────────────────────────────
-async function runGBP(name, url) {
+async function runGBP(name, url, city) {
   setStep('gbp', 'running');
   if (!name) { setStep('gbp', 'error'); return; }
   const proxy = lg('cfg_proxy') || DEFAULT_PROXY;
   try {
-    const r = await pf(`/gbp/info?name=${encodeURIComponent(name)}&url=${encodeURIComponent(url)}`);
+    // GBP listings are local — pass the city/state so the lookup resolves.
+    let loc = (city || '').trim();
+    if (loc && !/united states|usa|u\.s\.a?\.?/i.test(loc)) loc += ', United States';
+    const locParam = loc ? '&location=' + encodeURIComponent(loc) : '';
+    const r = await pf(`/gbp/info?name=${encodeURIComponent(name)}&url=${encodeURIComponent(url)}${locParam}`);
     const d = await r.json();
     console.log('GBP RESPONSE:', JSON.stringify(d));
     if (d.error) throw new Error(d.error);
@@ -1413,7 +1418,7 @@ function clearAll() {
   document.querySelectorAll('input[type=checkbox]').forEach(c => c.checked=false);
   document.querySelectorAll('input[type=number]').forEach(i => i.value='');
   document.querySelectorAll('textarea').forEach(t => t.value='');
-  ['clientName','clientURL','atRecordId','h-fb','h-li','h-ig','h-yt'].forEach(id => sv(id,''));
+  ['clientName','clientURL','clientCity','atRecordId','h-fb','h-li','h-ig','h-yt'].forEach(id => sv(id,''));
   ['da','kw','tr','spd','sz','ps'].forEach(id => setMV(id,'-',null));
   ['gbp-block','ai-vis-panel','ai-web-panel','ai-soc-panel','stepsWrap'].forEach(id => {
     const e = document.getElementById(id); if(e) e.style.display='none';

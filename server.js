@@ -70,6 +70,10 @@ app.get('/domain/overview', async (req, res) => {
       { target: domain, location_code: 2840, language_code: 'en' }
     ]);
     console.log('DFS domain full response:', JSON.stringify(d)?.slice(0, 500));
+    // Top-level DataForSEO error (auth, credits, access).
+    if (d && d.status_code && d.status_code !== 20000) {
+      return res.json({ da: 0, keywords: 0, traffic: 0, note: 'DataForSEO ' + d.status_code + ': ' + d.status_message });
+    }
     const task = d?.tasks?.[0];
     // Surface a real reason when DataForSEO didn't return usable data.
     if (task && task.status_code !== 20000) {
@@ -212,6 +216,12 @@ app.get('/gbp/info', async (req, res) => {
         language_name: 'English'
       }
     ]);
+    console.log('DFS GBP full response:', JSON.stringify(d)?.slice(0, 400));
+    // Top-level DataForSEO error (auth, credits, access) — catches what the
+    // task-level check below misses when there are no tasks at all.
+    if (d && d.status_code && d.status_code !== 20000) {
+      return res.json({ found: false, note: 'DataForSEO ' + d.status_code + ': ' + d.status_message });
+    }
     const task = d?.tasks?.[0];
     if (task && task.status_code !== 20000) {
       return res.json({ found: false, note: 'DataForSEO ' + task.status_code + ': ' + task.status_message });
