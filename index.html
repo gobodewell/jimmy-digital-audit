@@ -490,6 +490,77 @@ textarea{resize:vertical;min-height:60px}
 </div>
 <div id="toast"></div>
 
+<!-- ── AI Assistant slide-out drawer ─────────────────────────────────────── -->
+<style>
+  #ai-fab{position:fixed;right:0;top:50%;transform:translateY(-50%);z-index:55;
+    background:var(--purple);color:#fff;border:none;cursor:pointer;
+    writing-mode:vertical-rl;text-orientation:mixed;padding:14px 8px;
+    border-radius:10px 0 0 10px;font:600 12px/1 inherit;letter-spacing:.5px;
+    box-shadow:-2px 2px 10px rgba(0,0,0,.12)}
+  #ai-fab:hover{background:var(--purple2)}
+  #ai-backdrop{position:fixed;inset:0;background:rgba(20,22,30,.32);z-index:59;
+    opacity:0;pointer-events:none;transition:opacity .22s}
+  #ai-backdrop.open{opacity:1;pointer-events:auto}
+  #ai-drawer{position:fixed;top:0;right:0;height:100%;width:440px;max-width:94vw;
+    background:var(--surface);border-left:1px solid var(--border);z-index:60;
+    box-shadow:-8px 0 28px rgba(0,0,0,.14);transform:translateX(100%);
+    transition:transform .25s ease;display:flex;flex-direction:column}
+  #ai-drawer.open{transform:translateX(0)}
+  .aid-head{display:flex;align-items:center;gap:10px;padding:16px 18px;
+    border-bottom:1px solid var(--border)}
+  .aid-head h3{margin:0;font-size:15px;font-weight:700;flex:1}
+  .aid-x{background:none;border:none;font-size:20px;cursor:pointer;color:var(--text3);line-height:1}
+  .aid-ctx{font-size:11px;color:var(--text3);padding:8px 18px;background:var(--surface2);
+    border-bottom:1px solid var(--border);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .aid-body{flex:1;overflow-y:auto;padding:16px 18px;font-size:13px;line-height:1.55;color:var(--text2)}
+  .aid-body h1,.aid-body h2,.aid-body h3{color:var(--text);font-size:14px;margin:12px 0 6px}
+  .aid-apply{border-top:1px solid var(--border);background:var(--gbg);padding:12px 18px;display:none}
+  .aid-apply.show{display:block}
+  .aid-apply .aid-row{display:flex;align-items:center;gap:8px;font-size:12px;margin:6px 0;color:var(--text)}
+  .aid-apply .aid-row button{margin-left:auto;font-size:11px;padding:3px 10px;border-radius:6px;
+    border:1px solid var(--green);background:#fff;color:var(--green);cursor:pointer;white-space:nowrap}
+  .aid-apply .aid-row button:disabled{opacity:.5;cursor:default;border-color:var(--border2);color:var(--text3)}
+  .aid-foot{border-top:1px solid var(--border);padding:12px 18px;display:flex;flex-direction:column;gap:8px}
+  .aid-chips{display:flex;flex-wrap:wrap;gap:6px}
+  .aid-chip{font-size:11px;padding:4px 9px;border-radius:20px;border:1px solid var(--border2);
+    background:var(--surface2);color:var(--text2);cursor:pointer}
+  .aid-chip:hover{border-color:var(--purple);color:var(--purple)}
+  .aid-foot textarea{width:100%;resize:vertical;min-height:54px;border:1px solid var(--border2);
+    border-radius:8px;padding:9px;font:inherit;font-size:13px;box-sizing:border-box}
+  .aid-send{display:flex;gap:8px;align-items:center}
+  .aid-send .badge{font-size:11px}
+</style>
+<button id="ai-fab" onclick="openDrawer()">✦ AI Assistant</button>
+<div id="ai-backdrop" onclick="closeDrawer()"></div>
+<div id="ai-drawer" aria-hidden="true">
+  <div class="aid-head">
+    <h3>✦ AI Assistant</h3>
+    <button class="aid-x" onclick="closeDrawer()" title="Close">×</button>
+  </div>
+  <div class="aid-ctx" id="aid-ctx">No audit loaded — runs a general web search.</div>
+  <div class="aid-body" id="drawer-text">
+    <p style="color:var(--text3)">Ask Claude to check something specific about this client — it can search the web and read pages live. Examples below.</p>
+  </div>
+  <div class="aid-apply" id="aid-apply">
+    <div style="font-size:11px;font-weight:700;color:var(--green);margin-bottom:6px">SUGGESTED CHECKS — click to apply</div>
+    <div id="aid-apply-rows"></div>
+  </div>
+  <div class="aid-foot">
+    <div class="aid-chips" id="aid-chips">
+      <span class="aid-chip" onclick="drawerChip('Does this firm have a blog or resources/insights section? Check the nav and footer.')">Has a blog?</span>
+      <span class="aid-chip" onclick="drawerChip('Does the website have an FAQ page with real questions and answers?')">FAQ page?</span>
+      <span class="aid-chip" onclick="drawerChip('Has this firm won any industry awards (e.g. Forbes, Five Star, Barrons)? Are they shown on the site?')">Awards?</span>
+      <span class="aid-chip" onclick="drawerChip('Is there a clear review or testimonial call-to-action on the site?')">Review CTA?</span>
+      <span class="aid-chip" onclick="drawerChip('Does this firm appear in ChatGPT or AI assistant answers when asked about financial advisors in their area?')">In ChatGPT?</span>
+    </div>
+    <textarea id="aid-input" placeholder="Ask about this client… (Enter to send, Shift+Enter for newline)"></textarea>
+    <div class="aid-send">
+      <button class="btn btn-primary" style="flex:1;justify-content:center" id="aid-go" onclick="askDrawer()">Ask Claude</button>
+      <span class="badge" id="drawer-status"></span>
+    </div>
+  </div>
+</div>
+
 <script>
 // ── Constants & state ─────────────────────────────────────────────────────────
 const DEFAULT_PROXY = 'https://jimmy-digital-audit.onrender.com';
@@ -1456,6 +1527,149 @@ function clearAll() {
   document.getElementById('sf-status').textContent = '';
   AD = {}; recalc(); toast('Cleared');
 }
+
+// ── AI Assistant drawer ───────────────────────────────────────────────────────
+// Checkboxes the assistant may set from web research (presence / content checks).
+// Pure metric-derived boxes (DA, speed, size, mobile) are auto-measured elsewhere
+// and deliberately excluded so the AI can't override hard data.
+const AID_CATALOG = [
+  ['c-res','Blog / resources section'],['c-faq','FAQ page with Q&A'],
+  ['c-awd','Industry awards shown'],['c-rcta','Review/testimonial CTA'],
+  ['c-cgpt','Appears in ChatGPT/AI answers'],['c-nav','Simple navigation'],
+  ['c-lnk','Content links to other pages'],['c-pho','High-quality photos'],
+  ['c-hdl','Benefit-based headlines'],['c-cta','Descriptive CTAs'],
+  ['c-meta','Meta descriptions exist'],['c-ga','Google Analytics installed'],
+  ['c-https','HTTPS secure'],['c-sm','Has sitemap'],['c-idx','Site indexable'],
+  ['c-hfb','Has Facebook'],['c-hli','Has LinkedIn'],['c-hig','Has Instagram'],
+  ['c-hyt','Has YouTube'],['c-sln','Social links on site'],
+  ['c-bhd','Branded social headers'],['c-cni','Contact info complete'],
+  ['c-pst','Posting 2-3x/week'],['c-url','Custom branded social URL'],
+  ['c-sum','Profile summary written'],['c-tag','Tagging other pages'],
+  ['c-lgp','Logo as profile pic'],
+];
+const AID_LABEL = Object.fromEntries(AID_CATALOG);
+
+function openDrawer(){
+  drawerContext();
+  document.getElementById('ai-drawer').classList.add('open');
+  document.getElementById('ai-backdrop').classList.add('open');
+  document.getElementById('ai-drawer').setAttribute('aria-hidden','false');
+  setTimeout(()=>document.getElementById('aid-input').focus(),260);
+}
+function closeDrawer(){
+  document.getElementById('ai-drawer').classList.remove('open');
+  document.getElementById('ai-backdrop').classList.remove('open');
+  document.getElementById('ai-drawer').setAttribute('aria-hidden','true');
+}
+function drawerChip(text){ document.getElementById('aid-input').value = text; askDrawer(); }
+
+function drawerContext(){
+  const el = document.getElementById('aid-ctx');
+  if (AD && AD.url){
+    let s = (AD.name ? AD.name+' — ' : '') + AD.url;
+    if (AD.da!=null || AD.keywords!=null)
+      s += '  ·  DA '+(AD.da??'-')+', '+(AD.keywords||0)+' kw, '+(AD.traffic||0)+' visits/mo';
+    el.textContent = s;
+  } else {
+    el.textContent = 'No audit loaded — runs a general web search.';
+  }
+}
+function aidContextBlock(){
+  const lines = [];
+  if (AD && AD.url){
+    lines.push('Client: '+(AD.name||'(unknown)'));
+    lines.push('Website: '+AD.url);
+    if (AD.da!=null) lines.push('SEO: DA '+AD.da+', '+(AD.keywords||0)+' organic keywords, '+(AD.traffic||0)+' organic visits/mo');
+    const states = AID_CATALOG.map(([id,label])=>{
+      const e=document.getElementById(id); return label+': '+(e&&e.checked?'YES':'no');
+    }).join('; ');
+    lines.push('Current audit checks — '+states);
+  } else {
+    lines.push('(No audit has been run yet — no client website on file.)');
+  }
+  return lines.join('\n');
+}
+
+async function askDrawer(){
+  const q = document.getElementById('aid-input').value.trim();
+  if (!q){ document.getElementById('aid-input').focus(); return; }
+  const go = document.getElementById('aid-go'); go.disabled = true;
+  document.getElementById('aid-apply').classList.remove('show');
+  document.getElementById('aid-apply-rows').innerHTML = '';
+
+  const catalog = AID_CATALOG.map(([id,label])=>'  '+id+' = '+label).join('\n');
+  const prompt =
+`You are an AI assistant embedded in a digital-audit tool for financial advisory firms.
+Use web search and web_fetch to answer the user's question about the client below. Read the
+actual site (nav AND footer) and real social profiles when relevant — don't rely on snippets.
+Be concise and specific, and state the evidence you found (quote text or give the URL).
+
+CLIENT CONTEXT:
+${aidContextBlock()}
+
+USER QUESTION:
+${q}
+
+After your written answer, ONLY IF your findings give direct evidence to set any of the audit
+checkboxes below, append a block in EXACTLY this format (a JSON array), then stop:
+---APPLY---
+[{"id":"c-res","value":true,"why":"short reason with evidence"}]
+---END---
+Rules for the block:
+- Include a checkbox only when you have concrete evidence from the site or profile.
+- value is true (present / passes) or false (confirmed absent).
+- Use ONLY these ids:
+${catalog}
+If you have nothing to confidently apply, omit the block entirely.`;
+
+  const out = await claudeStream(prompt, 'drawer', 'drawer-status', 'drawer-text');
+  go.disabled = false;
+  if (!out) return;
+
+  // Strip the APPLY block out of the displayed prose, then surface it as buttons.
+  const m = out.match(/---APPLY---([\s\S]*?)---END---/);
+  const prose = out.replace(/---APPLY---[\s\S]*?---END---/, '').trim();
+  document.getElementById('drawer-text').innerHTML = mdToHtml(prose || out);
+  if (m){
+    let list=null; try{ list = JSON.parse(m[1].trim()); }catch{}
+    if (Array.isArray(list) && list.length) renderApply(list);
+  }
+  document.getElementById('aid-input').value='';
+}
+
+function renderApply(list){
+  const rows = document.getElementById('aid-apply-rows');
+  rows.innerHTML=''; let any=false;
+  list.forEach(it=>{
+    if(!it || !AID_LABEL[it.id]) return;
+    any=true;
+    const row=document.createElement('div'); row.className='aid-row';
+    const mark = it.value===false ? '✗' : '✓';
+    row.innerHTML = '<span>'+mark+' '+AID_LABEL[it.id]+(it.why?' — <span style="color:var(--text2)">'+escHtml(it.why)+'</span>':'')+'</span>';
+    const b=document.createElement('button');
+    b.textContent = it.value===false ? 'Uncheck' : 'Apply';
+    b.onclick=()=>{ aidApply(it.id, it.value!==false); b.disabled=true; b.textContent='Done ✓'; };
+    row.appendChild(b); rows.appendChild(row);
+  });
+  if(!any) return;
+  const all=document.createElement('button');
+  all.className='btn btn-green';
+  all.style.cssText='width:100%;justify-content:center;margin-top:8px;font-size:12px';
+  all.textContent='Apply all';
+  all.onclick=()=>{ list.forEach(it=>{ if(it&&AID_LABEL[it.id]) aidApply(it.id, it.value!==false); });
+    rows.querySelectorAll('button').forEach(x=>x.disabled=true); all.textContent='Applied ✓'; };
+  rows.appendChild(all);
+  document.getElementById('aid-apply').classList.add('show');
+  toast(list.length+' suggested check'+(list.length>1?'s':''));
+}
+function aidApply(id, val){ const e=document.getElementById(id); if(e){ e.checked=!!val; recalc(); } }
+function escHtml(s){ return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+// Enter sends (Shift+Enter = newline). Markup is above this script, so the
+// element already exists.
+(function(){ const ta=document.getElementById('aid-input');
+  if(ta) ta.addEventListener('keydown', e=>{ if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); askDrawer(); }});
+})();
 </script>
 </body>
 </html>
