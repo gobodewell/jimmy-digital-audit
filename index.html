@@ -653,12 +653,14 @@ async function runAudit() {
     runAISocial(name, url)
   ]);
 
-  // Phase 3 - SocialFetch with handles found by AI
+  // Phase 3 - the AI has filled the social handle fields; auto-pull live counts.
+  // Handles stay editable — correct any (e.g. a wrong Instagram username) and
+  // click "Pull follower counts" to recheck.
   await runSocialFetch();
 
   btn.disabled = false;
   btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg> Run audit';
-  toast('Audit complete - click AI Review tab to read results then Build Report');
+  toast('Audit complete - correct any social handles and click Pull to recheck');
   st('aireview');
 }
 
@@ -1180,26 +1182,25 @@ async function _doSocialFetch(fb, li, ig, yt) {
     const d = await r.json();
     let found = 0;
 
-    if (d.facebook) {
-      const c = d.facebook?.data?.metrics?.followers || d.facebook?.data?.metrics?.likes || 0;
-      if (c) { sv('m-fb', c); found++; }
-      sfProfileChecks(d.facebook?.data);
-    }
-    if (d.linkedin) {
-      const c = d.linkedin?.data?.metrics?.followers || 0;
-      if (c) { sv('m-lif', c); found++; }
-      sfProfileChecks(d.linkedin?.data);
-    }
-    if (d.instagram) {
-      const c = d.instagram?.data?.profile?.followersCount || d.instagram?.data?.metrics?.followers || 0;
-      if (c) { sv('m-ig', c); found++; }
-      sfProfileChecks(d.instagram?.data);
-    }
-    if (d.youtube) {
-      const c = d.youtube?.data?.channel?.subscriberCount || d.youtube?.data?.metrics?.subscribers || 0;
-      if (c) { sv('m-yt', c); found++; }
-      sfProfileChecks(d.youtube?.data);
-    }
+    // A platform counts as "found" when SocialFetch actually resolved a profile.
+    // When found we tick the matching "Has X" checkbox (so SocialFetch — not just
+    // the AI — can credit presence), set the follower count, and run the
+    // profile-level checks. metrics.followers is the real follower field across
+    // FB / LinkedIn / Instagram; YouTube exposes subscribers.
+    const sfFound = (pd, hasCk, mvId, count) => {
+      const data = pd && pd.data;
+      if (!data) return 0;
+      if (data.lookupStatus && data.lookupStatus !== 'found') return 0;
+      ck(hasCk);
+      if (count) sv(mvId, count);
+      sfProfileChecks(data);
+      return 1;
+    };
+
+    found += sfFound(d.facebook,  'c-hfb', 'm-fb',  d.facebook?.data?.metrics?.followers || d.facebook?.data?.metrics?.likes || 0);
+    found += sfFound(d.linkedin,  'c-hli', 'm-lif', d.linkedin?.data?.metrics?.followers || 0);
+    found += sfFound(d.instagram, 'c-hig', 'm-ig',  d.instagram?.data?.metrics?.followers || 0);
+    found += sfFound(d.youtube,   'c-hyt', 'm-yt',  d.youtube?.data?.channel?.subscriberCount || d.youtube?.data?.metrics?.subscribers || d.youtube?.data?.metrics?.followers || 0);
 
     const msg = found > 0 ? '✓ ' + found + ' platform' + (found>1?'s':'') + ' pulled' : '✗ No counts - check handles';
     document.getElementById('sf-status').textContent = msg;

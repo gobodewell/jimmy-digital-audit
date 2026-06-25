@@ -105,7 +105,7 @@ app.get('/site/lighthouse', async (req, res) => {
       encodeURIComponent(url) + '&strategy=mobile' + (GOOGLE_KEY ? '&key=' + GOOGLE_KEY : '');
     console.log('PageSpeed fetching:', psUrl.slice(0, 100));
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 30000);
+    const timeout = setTimeout(() => controller.abort(), 60000);  // slow sites can take >30s for a full Lighthouse run
     const r = await fetch(psUrl, { signal: controller.signal });
     clearTimeout(timeout);
     const d = await r.json();
@@ -156,8 +156,9 @@ app.get('/site/lighthouse', async (req, res) => {
       speedPass, sizePass, imagesOk, imgList, hasGA
     });
   } catch (e) {
-    console.error('DFS lighthouse error:', e.message);
-    res.status(500).json({ error: e.message });
+    const msg = e.name === 'AbortError' ? 'PageSpeed timed out — the site is slow to load' : e.message;
+    console.error('PageSpeed error:', e.message);
+    res.status(500).json({ error: msg });
   }
 });
 
