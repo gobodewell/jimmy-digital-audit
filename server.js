@@ -339,8 +339,8 @@ app.post('/ai/message', async (req, res) => {
         max_tokens: 4096,
         stream:     true,
         tools: [
-          { type: 'web_search_20260209', name: 'web_search', max_uses: 3 },
-          { type: 'web_fetch_20260209',  name: 'web_fetch',  max_uses: 3 }
+          { type: 'web_search_20250305', name: 'web_search', max_uses: 3 },
+          { type: 'web_fetch_20250910',  name: 'web_fetch',  max_uses: 4 }  // basic variants — NO code-exec layer, so the model fetches pages directly without the curl/rate-limit confusion
         ],
         messages: [{ role: 'user', content: prompt }]
       })

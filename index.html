@@ -646,10 +646,12 @@ async function runAudit() {
     runSiteCheck(url)
   ]);
 
-  // Phase 2 - AI reviews sequentially
-  await runAIVisibility(name, url);
-  await runAIWebsite(name, url);
-  await runAISocial(name, url);
+  // Phase 2 - AI reviews in PARALLEL (each writes its own section) — ~3x faster
+  await Promise.allSettled([
+    runAIVisibility(name, url),
+    runAIWebsite(name, url),
+    runAISocial(name, url)
+  ]);
 
   // Phase 3 - SocialFetch with handles found by AI
   await runSocialFetch();
