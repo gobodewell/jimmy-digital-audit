@@ -12,6 +12,20 @@ const SEM_KEY      = process.env.SEMRUSH_KEY          || '';   // SEO numbers (D
 const SF_BASE      = 'https://api.socialfetch.dev/v1';
 const DFS_BASE     = 'https://api.dataforseo.com/v3';
 
+const AI_MODEL      = process.env.AI_MODEL       || 'claude-sonnet-5';    // default when the app doesn't name one
+const MAX_RESUMES   = 5;                                  // cap on pause_turn continuations
+
+// The app can name a model per request (Settings -> Claude model) so a newly
+// released one can be used without redeploying the proxy. Kept to a plausible
+// model-id shape rather than a fixed allowlist, which would go stale — this is
+// the whole point of making it settable. Anything else falls back to the
+// server default; an unknown-but-well-formed id simply errors from Anthropic
+// with a clear message, which the app surfaces.
+function pickModel(requested) {
+  const m = String(requested || '').trim();
+  return /^[a-z0-9][a-z0-9.\-]{2,63}$/.test(m) ? m : AI_MODEL;
+}
+
 const AUDIT_KEY     = process.env.AUDIT_KEY      || '';   // shared secret the app must send
 const ANTHROPIC_KEY = process.env.ANTHROPIC_KEY  || '';   // AI reviews, server-side
 const AIRTABLE_TOKEN= process.env.AIRTABLE_TOKEN || '';   // Airtable push, server-side
@@ -90,24 +104,41 @@ async function semrushOverview(domain) {
     traffic  = parseInt(cols[3], 10) || 0;
   }
 
-  // backlinks_overview → Authority Score, the real "DA" (best-effort; its own
-  // billed call, so a failure here just leaves da = 0 rather than aborting).
-  let da = 0;
+  // backlinks_overview → Authority Score (the real "DA"), plus total backlinks
+  // and referring domains — all three come back in one billed call, so we may
+  // as well take them. Columns arrive in the order named in export_columns.
+  // Best-effort: a failure here leaves the values at 0 rather than aborting.
+  let da = 0, backlinks = 0, refDomains = 0;
   try {
     const bl = await semFetch(
-      `https://api.semrush.com/analytics/v1/?type=backlinks_overview&key=${SEM_KEY}&target=${encodeURIComponent(domain)}&target_type=root_domain&export_columns=ascore`
+      `https://api.semrush.com/analytics/v1/?type=backlinks_overview&key=${SEM_KEY}&target=${encodeURIComponent(domain)}&target_type=root_domain&export_columns=ascore,total,domains_num`
     );
     const blRows = (bl || '').trim().split('\n');
     if (blRows.length >= 2 && !/^ERROR/i.test(blRows[0])) {
-      da = parseInt(blRows[1].split(';')[0], 10) || 0;
+      const c = blRows[1].split(';');            // ascore;total;domains_num
+      da         = parseInt(c[0], 10) || 0;
+      backlinks  = parseInt(c[1], 10) || 0;
+      refDomains = parseInt(c[2], 10) || 0;
     }
-  } catch (_) { /* authority score is optional */ }
+  } catch (_) { /* backlink data is optional */ }
 
-  return { da, keywords, traffic };
+  return { da, keywords, traffic, backlinks, refDomains };
+}
+
+// ── Domain helper ─────────────────────────────────────────────────────────────
+// Normalises a URL or bare domain for comparison, so "https://www.example.com/x"
+// and "example.com" compare equal.
+function rootDomain(u) {
+  if (!u) return '';
+  return String(u).trim().toLowerCase()
+    .replace(/^https?:\/\//, '')
+    .replace(/^www\./, '')
+    .replace(/[\/?#].*$/, '')
+    .replace(/:\d+$/, '');
 }
 
 // ── Health ────────────────────────────────────────────────────────────────────
-app.get('/health', (req, res) => res.json({ ok: true, dfs: !!DFS_LOGIN, sem: !!SEM_KEY, sf: !!SF_KEY, ai: !!ANTHROPIC_KEY, at: !!AIRTABLE_TOKEN, google: !!GOOGLE_KEY, locked: !!AUDIT_KEY }));
+app.get('/health', (req, res) => res.json({ ok: true, dfs: !!DFS_LOGIN, sem: !!SEM_KEY, sf: !!SF_KEY, ai: !!ANTHROPIC_KEY, at: !!AIRTABLE_TOKEN, google: !!GOOGLE_KEY, locked: !!AUDIT_KEY, model: AI_MODEL }));
 
 // ── 1. Domain overview — DA, keywords, traffic ────────────────────────────────
 // Endpoint: /v3/dataforseo_labs/google/domain_rank_overview/live
@@ -120,7 +151,10 @@ app.get('/domain/overview', async (req, res) => {
   if (SEM_KEY) {
     try {
       const s = await semrushOverview(domain);
-      if (s && !s.error) return res.json({ da: s.da, keywords: s.keywords, traffic: s.traffic, source: 'semrush' });
+      if (s && !s.error) return res.json({
+        da: s.da, keywords: s.keywords, traffic: s.traffic,
+        backlinks: s.backlinks, refDomains: s.refDomains, source: 'semrush'
+      });
       if (s && s.error && !DFS_LOGIN) return res.json({ da: 0, keywords: 0, traffic: 0, note: 'SEMrush: ' + s.error });
       // else fall through to DataForSEO
     } catch (e) {
@@ -271,7 +305,7 @@ app.get('/site/check', async (req, res) => {
 // ── 4. GBP — claimed, rating, review count, photos ───────────────────────────
 // Endpoint: /v3/business_data/google/my_business_info/live  (no polling!)
 app.get('/gbp/info', async (req, res) => {
-  const { name, location } = req.query;
+  const { name, location, url } = req.query;
   if (!name) return res.status(400).json({ error: 'name required' });
   if (!DFS_LOGIN) return res.status(500).json({ error: 'DataForSEO not configured' });
   try {
@@ -295,17 +329,33 @@ app.get('/gbp/info', async (req, res) => {
     const items = task?.result?.[0]?.items;
     if (!items || items.length === 0) return res.json({ found: false });
 
-    // Find the best matching result
-    const biz = items[0];
+    // Match the listing to the firm by its website domain. Advisory firms share
+    // names constantly ("Cornerstone", "Integrity"), and Google returns them by
+    // keyword relevance — so the audited site is the only reliable way to tell
+    // this firm's listing from a neighbour's. When no listing matches we still
+    // return the top hit for a human to eyeball, but flag it unverified so the
+    // caller does not score it automatically.
+    const want = rootDomain(url);
+    let biz = null, verified = false;
+    if (want) {
+      biz = items.find(i => rootDomain(i.url || i.domain) === want) || null;
+      verified = !!biz;
+    }
+    if (!biz) biz = items[0];
+
     res.json({
       found:       true,
+      verified,                                    // listing's site matched the audited domain
+      candidates:  items.length,
+      matchedOn:   verified ? 'domain' : (want ? 'name-only' : 'no-url-supplied'),
       title:       biz.title        || '',
       address:     biz.address      || '',
       phone:       biz.phone        || '',
       rating:      biz.rating?.value               || null,
       reviewCount: biz.rating?.votes_count         || 0,
       claimed:     biz.is_claimed                  || false,
-      hasPhotos:   (biz.main_image || biz.images?.length > 0) || false,
+      hasLogo:     !!biz.logo,                     // the real logo field
+      hasPhotos:   !!(biz.main_image || (biz.images && biz.images.length > 0)),
       category:    biz.category                    || '',
       url:         biz.url                         || ''
     });
@@ -377,13 +427,122 @@ app.get('/social/profiles', async (req, res) => {
   res.json(out);
 });
 
-// ── 5. AI review — proxied Anthropic, STREAMED ───────────────────────────────
+// ── 5. Claude helpers — one streaming call, and one that resumes pauses ──────
+// Streams a single request, accumulating the visible text and a rebuilt copy of
+// the assistant's content blocks. The blocks matter for two reasons: resuming a
+// paused turn requires handing the whole turn back (text alone loses the
+// trailing server_tool_use block the server resumes from), and the web-search
+// result blocks are where the citation URLs live.
+async function claudeOnce({ messages, tools, maxTokens, effort, model, onEvent }) {
+  const body = {
+    model:      pickModel(model),
+    max_tokens: maxTokens || 8192,
+    stream:     true,
+    messages
+  };
+  if (tools && tools.length) body.tools = tools;
+  if (effort) body.output_config = { effort };
+
+  const r = await fetch('https://api.anthropic.com/v1/messages', {
+    method:  'POST',
+    headers: {
+      'Content-Type':      'application/json',
+      'x-api-key':         ANTHROPIC_KEY,
+      'anthropic-version': '2023-06-01'
+    },
+    body: JSON.stringify(body)
+  });
+
+  if (!r.ok || !r.body) {
+    const t = await r.text().catch(() => '');
+    return { error: 'Anthropic ' + r.status + ': ' + t.slice(0, 200) };
+  }
+
+  const reader  = r.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '', text = '', stopReason = null;
+  const blocks = [];        // assistant content, rebuilt in index order
+  const jsonBuf = {};       // index -> accumulating input_json_delta string
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const lines = buf.split('\n');
+    buf = lines.pop();
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue;
+      const payload = line.slice(6).trim();
+      if (!payload || payload === '[DONE]') continue;
+      let ev; try { ev = JSON.parse(payload); } catch { continue; }
+      if (onEvent) onEvent(ev);
+
+      if (ev.type === 'content_block_start') {
+        blocks[ev.index] = JSON.parse(JSON.stringify(ev.content_block || {}));
+        const t = blocks[ev.index].type;
+        if (t === 'tool_use' || t === 'server_tool_use') jsonBuf[ev.index] = '';
+      } else if (ev.type === 'content_block_delta') {
+        const bl = blocks[ev.index], d = ev.delta || {};
+        if (!bl) continue;
+        if (d.type === 'text_delta')           { bl.text = (bl.text || '') + d.text; text += d.text; }
+        else if (d.type === 'thinking_delta')  { bl.thinking = (bl.thinking || '') + d.thinking; }
+        else if (d.type === 'signature_delta') { bl.signature = d.signature; }
+        else if (d.type === 'input_json_delta'){ jsonBuf[ev.index] = (jsonBuf[ev.index] || '') + d.partial_json; }
+      } else if (ev.type === 'content_block_stop') {
+        const bl = blocks[ev.index];
+        if (bl && jsonBuf[ev.index] !== undefined) {
+          try { bl.input = jsonBuf[ev.index] ? JSON.parse(jsonBuf[ev.index]) : {}; } catch (_) { bl.input = {}; }
+        }
+      } else if (ev.type === 'message_delta' && ev.delta?.stop_reason) {
+        stopReason = ev.delta.stop_reason;
+      } else if (ev.type === 'error') {
+        return { error: ev.error?.message || 'stream error' };
+      }
+    }
+  }
+  return { text, stopReason, blocks: blocks.filter(Boolean) };
+}
+
+// Runs a prompt to completion, resuming paused turns. A server-side tool loop
+// pauses after 10 iterations with the answer genuinely unfinished; handing the
+// conversation back resumes it — the server spots the trailing server_tool_use
+// block and carries on by itself, so no "continue" message (adding one confuses
+// it). Left unhandled, a long review just stopped early and its closing
+// ---JSON--- block never arrived, which downstream looked like a parse failure.
+async function claudeRun({ prompt, tools, maxTokens, effort, model, onEvent, onResume }) {
+  const messages = [{ role: 'user', content: prompt }];
+  let text = '', stopReason = null, assistant = [];
+
+  for (let i = 0; i <= MAX_RESUMES; i++) {
+    const out = await claudeOnce({ messages, tools, maxTokens, effort, model, onEvent });
+    if (out.error) return { error: out.error };
+    text      += out.text;
+    stopReason = out.stopReason;
+    assistant  = assistant.concat(out.blocks);
+    if (stopReason !== 'pause_turn') break;
+    if (onResume) onResume();
+    messages[1] = { role: 'assistant', content: assistant };
+  }
+  return { text, stopReason, blocks: assistant };
+}
+
+const WEB_TOOLS = [
+  // Dynamic-filtering variants: Claude filters search results in a sandbox
+  // before they reach the context window, which is both more accurate and
+  // cheaper in tokens. The filtering is built into these tool versions — do NOT
+  // also declare code_execution, or the model ends up with two execution
+  // environments and gets confused.
+  { type: 'web_search_20260209', name: 'web_search', max_uses: 3 },
+  { type: 'web_fetch_20260209',  name: 'web_fetch',  max_uses: 4 }
+];
+
+// ── 5a. AI review — proxied Anthropic, STREAMED ──────────────────────────────
 // Streams the response as newline-delimited JSON: a {"type":"ping"} on every
 // upstream event (keeps the browser connection alive while the AI searches/reads,
 // so the long request can't be dropped), then a final {"type":"done","text":...}.
 app.post('/ai/message', async (req, res) => {
   if (!ANTHROPIC_KEY) return res.status(500).json({ error: 'Anthropic not configured' });
-  const { prompt } = req.body || {};
+  const { prompt, model } = req.body || {};
   if (!prompt) return res.status(400).json({ error: 'prompt required' });
 
   res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
@@ -393,61 +552,154 @@ app.post('/ai/message', async (req, res) => {
   const send = obj => { try { res.write(JSON.stringify(obj) + '\n'); } catch (e) {} };
 
   try {
-    const r = await fetch('https://api.anthropic.com/v1/messages', {
-      method:  'POST',
-      headers: {
-        'Content-Type':      'application/json',
-        'x-api-key':         ANTHROPIC_KEY,
-        'anthropic-version': '2023-06-01'
-      },
-      body: JSON.stringify({
-        model:      'claude-sonnet-4-6',
-        max_tokens: 4096,
-        stream:     true,
-        tools: [
-          { type: 'web_search_20250305', name: 'web_search', max_uses: 3 },
-          { type: 'web_fetch_20250910',  name: 'web_fetch',  max_uses: 4 }  // basic variants — NO code-exec layer, so the model fetches pages directly without the curl/rate-limit confusion
-        ],
-        messages: [{ role: 'user', content: prompt }]
-      })
+    const out = await claudeRun({
+      prompt, model, tools: WEB_TOOLS, maxTokens: 8192,
+      onEvent:  () => send({ type: 'ping' }),      // heartbeat
+      onResume: () => send({ type: 'resuming' })
     });
-
-    if (!r.ok || !r.body) {
-      const t = await r.text().catch(() => '');
-      send({ type: 'error', error: 'Anthropic ' + r.status + ': ' + t.slice(0, 200) });
-      return res.end();
-    }
-
-    const reader  = r.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = '', fullText = '', stopReason = null;
-
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      const lines = buf.split('\n');
-      buf = lines.pop();
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        const payload = line.slice(6).trim();
-        if (!payload || payload === '[DONE]') continue;
-        let ev; try { ev = JSON.parse(payload); } catch { continue; }
-        send({ type: 'ping' });   // heartbeat — keeps the browser connection alive
-        if (ev.type === 'content_block_delta' && ev.delta?.type === 'text_delta') {
-          fullText += ev.delta.text;
-        } else if (ev.type === 'message_delta' && ev.delta?.stop_reason) {
-          stopReason = ev.delta.stop_reason;
-        } else if (ev.type === 'error') {
-          send({ type: 'error', error: ev.error?.message || 'stream error' });
-        }
-      }
-    }
-
-    send({ type: 'done', text: fullText, stop_reason: stopReason });
+    if (out.error) { send({ type: 'error', error: out.error }); return res.end(); }
+    send({ type: 'done', text: out.text, stop_reason: out.stopReason, model: pickModel(model) });
     res.end();
   } catch (e) {
     console.error('AI proxy error:', e.message);
+    send({ type: 'error', error: e.message });
+    res.end();
+  }
+});
+
+// ── 5b. AI visibility — does Claude know this firm, and does it cite them? ────
+// Two measurements, both real rather than inferred:
+//   visibility — ask the questions a prospect's clients ask, with NO tools, and
+//                count how often the firm gets named from trained knowledge.
+//   citations  — ask the same questions WITH web search, and count how often the
+//                firm's own domain shows up in the sources Claude actually read.
+// Model output varies run to run and temperature was removed on current models,
+// so a single answer is not a measurement — each prompt is repeated and scored
+// as a rate.
+function visibilityPrompts(city) {
+  const where = city ? ' in ' + city : '';
+  return [
+    `Who are the best financial advisors${where}?`,
+    `I'm looking for a financial advisor${where} to help with retirement planning. Which firms should I consider?`,
+    `What are the top wealth management firms${where}?`,
+    `Who should I talk to about financial planning${where}?`,
+    `Recommend a few fee-only financial advisory firms${where}.`
+  ];
+}
+
+// Loose name match — case, punctuation and legal suffixes ignored, so
+// "Totus Wealth Management, LLC" still matches "totus wealth management".
+function normaliseName(s) {
+  return String(s || '').toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\b(llc|llp|inc|incorporated|corp|corporation|ltd|pllc|pc)\b/g, ' ')
+    .replace(/\s+/g, ' ').trim();
+}
+function mentionsName(text, name) {
+  const n = normaliseName(name);
+  return !!n && normaliseName(text).includes(n);
+}
+
+// Pull every URL Claude actually cited out of the web_search result blocks.
+// Errors come back on the same block with `content` as an OBJECT rather than a
+// list (and HTTP 200, no exception), so branch on that before iterating.
+function citedDomains(blocks) {
+  const out = new Set();
+  for (const b of blocks || []) {
+    if (b.type !== 'web_search_tool_result') continue;
+    if (!Array.isArray(b.content)) continue;          // error object, not results
+    for (const r of b.content) {
+      const d = rootDomain(r && r.url);
+      if (d) out.add(d);
+    }
+  }
+  return out;
+}
+
+// Small concurrency limiter — keeps a burst of prompts from hammering the API.
+async function mapLimit(items, limit, fn) {
+  const results = new Array(items.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await fn(items[i], i);
+    }
+  }));
+  return results;
+}
+
+app.post('/ai/visibility', async (req, res) => {
+  if (!ANTHROPIC_KEY) return res.status(500).json({ error: 'Anthropic not configured' });
+  const { name, domain, city, model } = req.body || {};
+  if (!name)   return res.status(400).json({ error: 'name required' });
+  if (!domain) return res.status(400).json({ error: 'domain required' });
+
+  const prompts = (Array.isArray(req.body.prompts) && req.body.prompts.length)
+    ? req.body.prompts.slice(0, 12)
+    : visibilityPrompts(city);
+  const repeats = Math.min(Math.max(parseInt(req.body.repeats, 10) || 2, 1), 5);
+  const want    = rootDomain(domain);
+
+  res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders?.();
+  const send = obj => { try { res.write(JSON.stringify(obj) + '\n'); } catch (e) {} };
+
+  // One job per prompt per repetition per mode.
+  const jobs = [];
+  for (const p of prompts) {
+    for (let i = 0; i < repeats; i++) {
+      jobs.push({ prompt: p, mode: 'knowledge' });
+      jobs.push({ prompt: p, mode: 'citation'  });
+    }
+  }
+
+  let finished = 0;
+  try {
+    const runs = await mapLimit(jobs, 4, async (job) => {
+      const out = await claudeRun({
+        prompt:    job.prompt,
+        model,
+        tools:     job.mode === 'citation' ? WEB_TOOLS : undefined,
+        maxTokens: job.mode === 'citation' ? 4096 : 2048,
+        effort:    'low'
+      });
+      finished++;
+      send({ type: 'progress', done: finished, total: jobs.length });
+      if (out.error) return { ...job, error: out.error };
+      return {
+        ...job,
+        named: mentionsName(out.text, name),
+        cited: job.mode === 'citation' ? citedDomains(out.blocks).has(want) : false
+      };
+    });
+
+    const knowledge = runs.filter(r => r.mode === 'knowledge' && !r.error);
+    const citation  = runs.filter(r => r.mode === 'citation'  && !r.error);
+    const errors    = runs.filter(r => r.error);
+    const pct = (n, d) => d ? Math.round((n / d) * 100) : null;
+
+    send({
+      type: 'done',
+      model: pickModel(model),
+      prompts: prompts.length,
+      repeats,
+      // % of no-tool answers that named the firm at all
+      visibilityScore: pct(knowledge.filter(r => r.named).length, knowledge.length),
+      visibilityHits:  knowledge.filter(r => r.named).length,
+      visibilityRuns:  knowledge.length,
+      // % of searched answers whose cited sources included the firm's domain
+      citationShare:   pct(citation.filter(r => r.cited).length, citation.length),
+      citationHits:    citation.filter(r => r.cited).length,
+      citationRuns:    citation.length,
+      errors: errors.length,
+      errorNote: errors.length ? (errors[0].error || '').slice(0, 160) : ''
+    });
+    res.end();
+  } catch (e) {
+    console.error('AI visibility error:', e.message);
     send({ type: 'error', error: e.message });
     res.end();
   }

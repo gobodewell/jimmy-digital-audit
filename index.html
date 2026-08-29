@@ -294,17 +294,28 @@ textarea{resize:vertical;min-height:60px}
 
     <!-- VISIBILITY TAB -->
     <div class="tp" id="tp-visibility">
-      <div class="sl">Domain metrics — DataForSEO Labs</div>
+      <div class="sl">Domain metrics — SEMrush (DataForSEO fallback)</div>
       <div class="mg">
         <div class="mc"><div class="ml">Domain authority</div><div class="mv" id="m-da">—</div><div class="mt">Above 5 is good</div></div>
         <div class="mc"><div class="ml">Organic keywords</div><div class="mv" id="m-kw">—</div><div class="mt">Above 50 is good</div></div>
         <div class="mc"><div class="ml">Monthly traffic</div><div class="mv" id="m-tr">—</div><div class="mt">Above 75 is good</div></div>
+        <div class="mc"><div class="ml">Backlinks</div><div class="mv" id="m-bl">—</div><div class="mt">SEMrush total</div></div>
+        <div class="mc"><div class="ml">Referring domains</div><div class="mv" id="m-rd">—</div><div class="mt">Above 10 is good</div></div>
       </div>
 
       <div class="sl">Google Business Profile — DataForSEO Business Data</div>
       <div id="gbp-block" class="card" style="display:none">
         <div class="ct">GBP result</div>
         <div id="gbp-details"></div>
+      </div>
+
+      <div id="aivis-block" class="card" style="display:none">
+        <div class="ct">AI visibility — measured on <span id="aivis-model">Claude</span></div>
+        <div class="mg">
+          <div class="mc"><div class="ml">Named in AI answers</div><div class="mv" id="m-aivis">—</div><div class="mt">Asked with no web search</div></div>
+          <div class="mc"><div class="ml">Cited as a source</div><div class="mv" id="m-aicite">—</div><div class="mt">Asked with web search on</div></div>
+        </div>
+        <div id="aivis-detail" style="font-size:11px;color:var(--text3);margin-top:8px"></div>
       </div>
 
       <div class="sl">Visibility checklist</div>
@@ -319,7 +330,7 @@ textarea{resize:vertical;min-height:60px}
           <label class="ci"><input type="checkbox" id="c-meta" onchange="recalc()"/><span class="ci-l">Meta descriptions<span class="aeo">AEO</span></span></label>
           <label class="ci"><input type="checkbox" id="c-ga" onchange="recalc()"/><span class="ci-l">Google Analytics</span></label>
           <label class="ci"><input type="checkbox" id="c-da5" onchange="recalc()"/><span class="ci-l">DA above 5<span class="aeo">AEO</span></span></label>
-          <label class="ci"><input type="checkbox" id="c-cgpt" onchange="recalc()"/><span class="ci-l">Appears in ChatGPT<span class="aeo">AEO</span></span></label>
+          <label class="ci"><input type="checkbox" id="c-cgpt" onchange="recalc()"/><span class="ci-l">Named or cited in AI answers<span class="aeo">AEO</span></span></label>
           <label class="ci"><input type="checkbox" id="c-rcta" onchange="recalc()"/><span class="ci-l">Review CTA on site<span class="aeo">AEO</span></span></label>
           <label class="ci"><input type="checkbox" id="c-awd" onchange="recalc()"/><span class="ci-l">Industry awards shown</span></label>
         </div>
@@ -451,6 +462,17 @@ textarea{resize:vertical;min-height:60px}
       <div class="sl" style="margin-top:12px">Proxy access key</div>
       <div class="kr"><input type="password" id="s-audit" placeholder="must match AUDIT_KEY on the proxy"/><span class="ks" id="ks-audit">not set</span></div>
       <div style="font-size:11px;color:var(--text3);margin-top:6px;line-height:1.5">Anthropic, DataForSEO, SocialFetch and Airtable keys now live on the proxy server (Render env vars), not in the browser. Only this access key is stored here — it just unlocks your proxy.</div>
+
+      <div class="sl" style="margin-top:12px">Claude model</div>
+      <div class="kr">
+        <input type="text" id="s-model" list="model-options" placeholder="leave blank to use the proxy default" style="font-family:'DM Mono',monospace;font-size:12px"/>
+        <datalist id="model-options">
+          <option value="claude-sonnet-5">Sonnet 5 — fast, cheapest of the current models</option>
+          <option value="claude-opus-5">Opus 5 — strongest judgement, ~2.5x the cost</option>
+          <option value="claude-haiku-4-5">Haiku 4.5 — cheapest, weakest judgement</option>
+        </datalist>
+      </div>
+      <div style="font-size:11px;color:var(--text3);margin-top:6px;line-height:1.5">Used for the AI reviews and the AI visibility check. The list is a shortcut, not a limit — type any model ID Anthropic has released and it will be used as-is, so a new model can be adopted without touching the proxy. Blank falls back to whatever the proxy is set to.</div>
     </div>
 
     <div class="card">
@@ -573,6 +595,7 @@ const STEP_DEFS = [
   { id: 'ai-vis',    label: 'AI visibility review' },
   { id: 'ai-web',    label: 'AI website deep review' },
   { id: 'ai-soc',    label: 'AI social media analysis' },
+  { id: 'ai-score',  label: 'AI visibility - named & cited' },
   { id: 'socialfetch',label: 'SocialFetch - live follower counts' },
 ];
 
@@ -620,7 +643,7 @@ function st(n) {
 }
 
 // ── Settings ──────────────────────────────────────────────────────────────────
-const S_KEYS = ['proxy','audit','at-base','at-tbl','at-view'];
+const S_KEYS = ['proxy','audit','at-base','at-tbl','at-view','model'];
 const F_KEYS = ['name','url','vis','web','soc','da','spd','nts','ai','dte'];
 
 function saveSettings() {
@@ -721,7 +744,8 @@ async function runAudit() {
   await Promise.allSettled([
     runAIVisibility(name, url),
     runAIWebsite(name, url),
-    runAISocial(name, url)
+    runAISocial(name, url),
+    runAIVisibilityScore(name, url, getVal('clientCity'))
   ]);
 
   // Phase 3 - the AI has filled the social handle fields; auto-pull live counts.
@@ -758,11 +782,15 @@ async function runDomain(domain) {
     const d = await r.json();
     console.log('DOMAIN RESPONSE:', JSON.stringify(d));
     if (d.error) throw new Error(d.error);
-    const { da, keywords, traffic } = d;
+    const { da, keywords, traffic, backlinks, refDomains } = d;
     setMV('da', da,                         da > 5);
     setMV('kw', (keywords||0).toLocaleString(), keywords > 50);
     setMV('tr', (traffic||0).toLocaleString(),  traffic  > 75);
+    // Backlink numbers only come from SEMrush; leave the tiles blank otherwise.
+    setMV('bl', backlinks  != null ? (backlinks||0).toLocaleString()  : '—', backlinks  > 0  ? true : null);
+    setMV('rd', refDomains != null ? (refDomains||0).toLocaleString() : '—', refDomains > 10 ? true : null);
     AD.da = da; AD.keywords = keywords; AD.traffic = traffic;
+    AD.backlinks = backlinks; AD.refDomains = refDomains;
     if (da > 5) ck('c-da5');
     // d.source = 'semrush' when SEMrush fed the numbers; d.note carries the
     // provider status when no usable data came back.
@@ -842,22 +870,33 @@ async function runGBP(name, url, city) {
       return;
     }
 
-    // Auto-check
-    ck('c-gbp-c');
-    if (d.claimed)          ck('c-gbp-v');
-    if (d.hasPhotos)        ck('c-gbp-l');
-    if (d.reviewCount > 0)  ck('c-gbp-r');
+    // Auto-check ONLY when the listing was matched to this firm's own domain.
+    // A name-only match gets shown for a human to confirm, never scored — four
+    // checks (a third of the Visibility grade) hang off this.
+    if (d.verified) {
+      ck('c-gbp-c');
+      if (d.claimed)          ck('c-gbp-v');
+      if (d.hasLogo)          ck('c-gbp-l');
+      if (d.reviewCount > 0)  ck('c-gbp-r');
+    }
 
-    AD.gbpRating  = d.rating;
-    AD.gbpReviews = d.reviewCount;
+    AD.gbpRating   = d.rating;
+    AD.gbpReviews  = d.reviewCount;
+    AD.gbpVerified = !!d.verified;
 
-    details.innerHTML =
+    const warn = d.verified ? '' : '<span class="badge br">Unverified match — not scored</span>&nbsp;';
+    details.innerHTML = warn +
+      '<span class="badge bgr">'+(d.title||'—')+'</span>&nbsp;' +
       '<span class="badge '+(d.claimed?'bg':'ba')+'">'+(d.claimed?'Claimed ✓':'Unclaimed')+'</span>&nbsp;' +
       '<span class="badge bp">'+(d.reviewCount||0)+' reviews</span>&nbsp;' +
       '<span class="badge bgr">'+(d.rating||'-')+' ★</span>&nbsp;' +
-      '<span class="badge bgr">'+(d.category||'-')+'</span>';
+      '<span class="badge bgr">'+(d.category||'-')+'</span>' +
+      (d.verified ? '' :
+        '<div style="font-size:12px;color:var(--text3);margin-top:6px">Matched on name only'+
+        (d.url ? ' — this listing\'s site is <b>'+d.url+'</b>' : '')+
+        '. Confirm it is the right firm, then tick the GBP boxes by hand.</div>');
 
-    setStep('gbp', 'done');
+    setStep('gbp', 'done', d.verified ? '' : 'unverified — name-only match');
   } catch(e) {
     console.error('GBP error:', e.message);
     document.getElementById('gbp-block').style.display = '';
@@ -881,7 +920,7 @@ async function claudeStream(prompt, panelId, statusId, textId) {
     const resp = await pf('/ai/message', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ prompt })
+      body:    JSON.stringify({ prompt, model: lg('cfg_model') || undefined })
     });
     if (!resp.ok || !resp.body) {
       const t = await resp.text().catch(() => '');
@@ -890,7 +929,7 @@ async function claudeStream(prompt, panelId, statusId, textId) {
 
     const reader  = resp.body.getReader();
     const decoder = new TextDecoder();
-    let buf = '', fullText = '', errMsg = null, pings = 0;
+    let buf = '', fullText = '', errMsg = null, pings = 0, resumes = 0, stopReason = null;
 
     while (true) {
       const { value, done } = await reader.read();
@@ -901,16 +940,29 @@ async function claudeStream(prompt, panelId, statusId, textId) {
       for (const line of lines) {
         if (!line.trim()) continue;
         let msg; try { msg = JSON.parse(line); } catch { continue; }
-        if (msg.type === 'done')       fullText = msg.text || '';
+        if (msg.type === 'done')       { fullText = msg.text || ''; stopReason = msg.stop_reason || null; }
         else if (msg.type === 'error') errMsg = msg.error;
+        else if (msg.type === 'resuming') { resumes++; textEl.innerHTML = '<span class="spin">⟳</span> Still searching (part ' + (resumes + 1) + ')…'; }
         else if (msg.type === 'ping') { pings++; textEl.innerHTML = '<span class="spin">⟳</span> Analyzing' + '.'.repeat(pings % 4); }
       }
     }
 
     if (errMsg) throw new Error(errMsg);
 
+    // An answer that ran out of room or is still paused is incomplete — its
+    // closing JSON block is probably missing, so say so rather than showing a
+    // truncated review as if it were finished.
+    const cut = stopReason === 'max_tokens' ? 'hit the length limit'
+              : stopReason === 'pause_turn' ? 'still had more searching to do'
+              : null;
     textEl.innerHTML = mdToHtml(fullText);
-    statEl.textContent = 'done'; statEl.className = 'badge bg';
+    if (cut) {
+      textEl.innerHTML += '<p style="color:var(--red);font-size:12px;margin-top:8px">Incomplete — the review ' + cut +
+        ', so some checks may not have been filled in. Re-run this client.</p>';
+      statEl.textContent = 'incomplete'; statEl.className = 'badge br';
+    } else {
+      statEl.textContent = 'done'; statEl.className = 'badge bg';
+    }
     return fullText;
   } catch(e) {
     textEl.innerHTML = '<p style="color:var(--red)">Error: '+e.message+'</p>';
@@ -979,7 +1031,8 @@ Write a brief summary of your findings, then end with this EXACT block:
     AD.aiVisibility = result;
     const j = extractJSON(result);
     if (j) {
-      if (j.chatgpt)   ck('c-cgpt');
+      // j.chatgpt is deliberately ignored - the AI-answers box is driven by
+      // runAIVisibilityScore(), which measures it instead of estimating it.
       if (j.sitemap)   ck('c-sm');
       if (j.meta)      ck('c-meta');
       if (j.reviewCTA) ck('c-rcta');
@@ -1192,6 +1245,73 @@ Write a brief summary of what you found and how you verified each profile, then 
   setStep('ai-soc', result ? 'done' : 'error');
 }
 
+// ── AI visibility - measured, not guessed ────────────────────────────────────
+// Asks Claude the questions this firm's prospects actually ask, twice over:
+// once with no tools (does the model know them?) and once with web search on
+// (does it cite their site?). Answers vary run to run and temperature was
+// removed on current models, so each prompt is repeated and scored as a rate.
+async function runAIVisibilityScore(name, url, city) {
+  setStep('ai-score', 'running');
+  const block = document.getElementById('aivis-block');
+  const det   = document.getElementById('aivis-detail');
+  block.style.display = '';
+  det.textContent = 'Asking Claude what this firm\'s prospects would ask...';
+
+  try {
+    const domain = url.replace(/^https?:\/\/(www\.)?/, '').replace(/\/.*$/, '');
+    const resp = await pf('/ai/visibility', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ name, domain, city, model: lg('cfg_model') || undefined })
+    });
+    if (!resp.ok || !resp.body) {
+      const t = await resp.text().catch(() => '');
+      throw new Error('proxy ' + resp.status + (t ? ': ' + t.slice(0, 120) : ''));
+    }
+
+    const reader = resp.body.getReader(), dec = new TextDecoder();
+    let buf = '', result = null, errMsg = null;
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        let m; try { m = JSON.parse(line); } catch { continue; }
+        if (m.type === 'progress')   det.textContent = 'Running prompts... ' + m.done + ' / ' + m.total;
+        else if (m.type === 'done')  result = m;
+        else if (m.type === 'error') errMsg = m.error;
+      }
+    }
+    if (errMsg) throw new Error(errMsg);
+    if (!result) throw new Error('no result returned');
+
+    AD.aiVisibilityScore = result.visibilityScore;
+    AD.aiCitationShare   = result.citationShare;
+
+    setMV('aivis',  result.visibilityScore == null ? '-' : result.visibilityScore + '%', result.visibilityScore > 0);
+    setMV('aicite', result.citationShare   == null ? '-' : result.citationShare   + '%', result.citationShare   > 0);
+    document.getElementById('aivis-model').textContent = result.model || 'Claude';
+
+    // This is now the only thing that ticks the AI-answers box - it fires on a
+    // firm actually being named or cited, not on the review's impression.
+    if (result.visibilityScore > 0 || result.citationShare > 0) ck('c-cgpt');
+
+    det.textContent =
+      result.visibilityHits + '/' + result.visibilityRuns + ' answers named them  ·  ' +
+      result.citationHits   + '/' + result.citationRuns   + ' cited their site  ·  ' +
+      result.prompts + ' prompts x ' + result.repeats + ' runs' +
+      (result.errors ? '  ·  ' + result.errors + ' failed' + (result.errorNote ? ': ' + result.errorNote : '') : '');
+    setStep('ai-score', 'done');
+  } catch (e) {
+    console.error('AI visibility error:', e.message);
+    det.innerHTML = '<span style="color:var(--red)">Could not measure: ' + escHtml(e.message) + '</span>';
+    setStep('ai-score', 'error', e.message);
+  }
+}
+
 // ── SocialFetch ───────────────────────────────────────────────────────────────
 async function runSocialFetch() {
   setStep('socialfetch', 'running');
@@ -1294,7 +1414,6 @@ function buildReport() {
   const visText = document.getElementById('ai-vis-text')?.innerText || '';
   const visJ = extractJSON(AD.aiVisibility || visText);
   if (visJ) {
-    if (visJ.chatgpt)   { ck('c-cgpt'); filled++; }
     if (visJ.sitemap)   { ck('c-sm');   filled++; }
     if (visJ.meta)      { ck('c-meta'); filled++; }
     if (visJ.reviewCTA) { ck('c-rcta'); filled++; }
@@ -1414,6 +1533,8 @@ Visibility: ${s.v||'-'} | Website: ${s.w||'-'} | Social: ${s.s||'-'}
 
 METRICS
 Domain Authority: ${AD.da||'-'} | Keywords: ${AD.keywords||'-'} | Traffic: ${AD.traffic||'-'}
+Backlinks: ${AD.backlinks??'-'} | Referring Domains: ${AD.refDomains??'-'}
+AI Visibility: ${AD.aiVisibilityScore??'-'}% named | ${AD.aiCitationShare??'-'}% cited
 Page Speed: ${AD.speed||'-'}s | Page Size: ${AD.size||'-'}MB
 GBP Reviews: ${AD.gbpReviews??'-'} | GBP Rating: ${AD.gbpRating||'-'}
 
@@ -1520,8 +1641,8 @@ function clearAll() {
   document.querySelectorAll('input[type=number]').forEach(i => i.value='');
   document.querySelectorAll('textarea').forEach(t => t.value='');
   ['clientName','clientURL','clientCity','atRecordId','h-fb','h-li','h-ig','h-yt'].forEach(id => sv(id,''));
-  ['da','kw','tr','spd','sz','ps'].forEach(id => setMV(id,'-',null));
-  ['gbp-block','ai-vis-panel','ai-web-panel','ai-soc-panel','stepsWrap'].forEach(id => {
+  ['da','kw','tr','bl','rd','spd','sz','ps','aivis','aicite'].forEach(id => setMV(id,'-',null));
+  ['gbp-block','aivis-block','ai-vis-panel','ai-web-panel','ai-soc-panel','stepsWrap'].forEach(id => {
     const e = document.getElementById(id); if(e) e.style.display='none';
   });
   document.getElementById('sf-status').textContent = '';
@@ -1535,7 +1656,7 @@ function clearAll() {
 const AID_CATALOG = [
   ['c-res','Blog / resources section'],['c-faq','FAQ page with Q&A'],
   ['c-awd','Industry awards shown'],['c-rcta','Review/testimonial CTA'],
-  ['c-cgpt','Appears in ChatGPT/AI answers'],['c-nav','Simple navigation'],
+  ['c-cgpt','Named or cited in AI answers'],['c-nav','Simple navigation'],
   ['c-lnk','Content links to other pages'],['c-pho','High-quality photos'],
   ['c-hdl','Benefit-based headlines'],['c-cta','Descriptive CTAs'],
   ['c-meta','Meta descriptions exist'],['c-ga','Google Analytics installed'],
