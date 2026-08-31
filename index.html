@@ -309,6 +309,16 @@ textarea{resize:vertical;min-height:60px}
         <div id="gbp-details"></div>
       </div>
 
+      <div id="dirs-block" class="card" style="display:none">
+        <div class="ct">Directory listings — where this firm is already listed</div>
+        <div id="dirs-body"></div>
+      </div>
+
+      <div id="schema-block" class="card" style="display:none">
+        <div class="ct">Structured data — what the homepage declares about itself</div>
+        <div id="schema-body"></div>
+      </div>
+
       <div id="aivis-block" class="card" style="display:none">
         <div class="ct">AI visibility — measured on <span id="aivis-model">Claude</span></div>
         <div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin:2px 0 6px">Found without being named</div>
@@ -327,7 +337,7 @@ textarea{resize:vertical;min-height:60px}
       <div class="sl">Visibility checklist</div>
       <div class="card">
         <div class="cl">
-          <label class="ci"><input type="checkbox" id="c-gbp-c" onchange="recalc()"/><span class="ci-l">GBP created<span class="aeo">AEO</span></span></label>
+          <label class="ci"><input type="checkbox" id="c-gbp-f" onchange="recalc()"/><span class="ci-l">GBP listing visible<span class="aeo">AEO</span></span></label>
           <label class="ci"><input type="checkbox" id="c-gbp-v" onchange="recalc()"/><span class="ci-l">GBP verified/claimed<span class="aeo">AEO</span></span></label>
           <label class="ci"><input type="checkbox" id="c-gbp-l" onchange="recalc()"/><span class="ci-l">Logo on GBP</span></label>
           <label class="ci"><input type="checkbox" id="c-gbp-r" onchange="recalc()"/><span class="ci-l">Has GBP reviews<span class="aeo">AEO</span></span></label>
@@ -336,9 +346,11 @@ textarea{resize:vertical;min-height:60px}
           <label class="ci"><input type="checkbox" id="c-meta" onchange="recalc()"/><span class="ci-l">Meta descriptions<span class="aeo">AEO</span></span></label>
           <label class="ci"><input type="checkbox" id="c-ga" onchange="recalc()"/><span class="ci-l">Google Analytics</span></label>
           <label class="ci"><input type="checkbox" id="c-da5" onchange="recalc()"/><span class="ci-l">DA above 5<span class="aeo">AEO</span></span></label>
-          <label class="ci"><input type="checkbox" id="c-cgpt" onchange="recalc()"/><span class="ci-l">Named or cited in AI answers<span class="aeo">AEO</span></span></label>
+          <label class="ci"><input type="checkbox" id="c-cgpt" onchange="recalc()"/><span class="ci-l">Named or cited by Claude<span class="aeo">AEO</span></span></label>
           <label class="ci"><input type="checkbox" id="c-rcta" onchange="recalc()"/><span class="ci-l">Review CTA on site<span class="aeo">AEO</span></span></label>
           <label class="ci"><input type="checkbox" id="c-awd" onchange="recalc()"/><span class="ci-l">Industry awards shown</span></label>
+          <label class="ci"><input type="checkbox" id="c-sch-biz" onchange="recalc()"/><span class="ci-l">Business schema markup<span class="aeo">AEO</span></span></label>
+          <label class="ci"><input type="checkbox" id="c-sch-loc" onchange="recalc()"/><span class="ci-l">Location schema markup<span class="aeo">AEO</span></span></label>
         </div>
       </div>
       <div class="fg"><label>Visibility notes</label><textarea id="n-vis" placeholder="e.g. GBP listed under wrong name..."></textarea></div>
@@ -351,6 +363,11 @@ textarea{resize:vertical;min-height:60px}
         <div class="mc"><div class="ml">Page speed (LCP)</div><div class="mv" id="m-spd">—</div><div class="mt">Under 3s is good</div></div>
         <div class="mc"><div class="ml">Homepage size</div><div class="mv" id="m-sz">—</div><div class="mt">Under 3MB is good</div></div>
         <div class="mc"><div class="ml">Performance score</div><div class="mv" id="m-ps">—</div><div class="mt">Google score 0–100</div></div>
+      </div>
+
+      <div id="weight-block" class="card" style="display:none">
+        <div class="ct">Page weight — what is loading, and from where</div>
+        <div id="weight-body"></div>
       </div>
 
       <div class="sl">Technology checklist — auto-filled by Lighthouse</div>
@@ -396,6 +413,7 @@ textarea{resize:vertical;min-height:60px}
           </button>
           <span id="sf-status" style="font-size:12px;color:var(--text3)"></span>
         </div>
+        <div id="sf-lastpost" style="font-size:11px;color:var(--text3);margin-top:8px"></div>
       </div>
 
       <div class="sl">Follower counts</div>
@@ -607,6 +625,8 @@ const STEP_DEFS = [
   { id: 'domain',    label: 'Domain metrics - DataForSEO Labs' },
   { id: 'lighthouse',label: 'Technical audit - Google PageSpeed' },
   { id: 'gbp',       label: 'Google Business Profile - DataForSEO' },
+  { id: 'schema',    label: 'Structured data - schema.org markup' },
+  { id: 'dirs',      label: 'Directory listings - backlink profile' },
   { id: 'ai-vis',    label: 'AI visibility review' },
   { id: 'ai-web',    label: 'AI website deep review' },
   { id: 'ai-soc',    label: 'AI social media analysis' },
@@ -753,7 +773,9 @@ async function runAudit() {
     runDomain(domain),
     runLighthouse(url),
     runGBP(name, url, getVal('clientCity')),
-    runSiteCheck(url)
+    runSiteCheck(url),
+    runSchema(url),
+    runDirectories(domain)
   ]);
 
   // Phase 2 - AI reviews in PARALLEL (each writes its own section) — ~3x faster
@@ -818,6 +840,150 @@ async function runDomain(domain) {
   }
 }
 
+// ── Directory listings ───────────────────────────────────────────────────────
+// Read from the firm's backlink profile: a directory with a public profile page
+// links back to them, so their referring domains say which listings exist. One
+// call rather than twenty searches, and a fact rather than a judgement.
+async function runDirectories(domain) {
+  setStep('dirs', 'running');
+  const block = document.getElementById('dirs-block');
+  const body  = document.getElementById('dirs-body');
+  try {
+    const r = await pf(`/directories?domain=${encodeURIComponent(domain)}`);
+    const d = await r.json();
+    if (d.error) throw new Error(d.error);
+    AD.directories = d;
+    block.style.display = '';
+
+    const row = x =>
+      '<div style="display:flex;gap:10px;align-items:baseline;font-size:12px;padding:4px 0;border-bottom:1px solid var(--line)">' +
+        '<span style="min-width:38px;text-align:center;font-weight:700;color:' + (x.found ? '#16a34a' : '#dc2626') + '">' +
+          (x.found ? 'yes' : 'no') + '</span>' +
+        '<span style="flex:1">' + escHtml(x.name) + '</span>' +
+        '<span style="font-family:\'DM Mono\',monospace;color:var(--text3);min-width:34px;text-align:right">' + x.as + '</span>' +
+      '</div>';
+
+    const group = (title, items, note) => items.length ?
+      '<div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin:14px 0 4px">' +
+        escHtml(title) + '</div>' +
+      (note ? '<div style="font-size:11px;color:var(--text3);margin-bottom:6px">' + escHtml(note) + '</div>' : '') +
+      items.map(row).join('') : '';
+
+    const byAs = (a, b) => b.as - a.as;
+    const free = d.directories.filter(x => x.cost === 'free').sort(byAs);
+    const cred = d.directories.filter(x => x.cost === 'credential').sort(byAs);
+    const paid = d.directories.filter(x => x.cost === 'paid').sort(byAs);
+
+    let html = '<div style="font-size:13px;font-weight:600;margin-bottom:2px">' +
+      d.freeFound + ' of ' + d.freeTotal + ' free directories claimed</div>' +
+      '<div style="font-size:11px;color:var(--text3)">' + d.found + ' of ' + d.checked +
+      ' overall · read from ' + d.refDomainsScanned.toLocaleString() + ' referring domains</div>';
+
+    html += group('Free to claim — the priority list', free);
+    html += group('Free with a credential they may already hold', cred,
+                  'No extra cost if they hold the CFP mark or the membership.');
+    html += group('Paid listings and lead generation', paid,
+                  'Paid placement is a separate compliance conversation from a free claimed listing.');
+
+    html += '<div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin:14px 0 4px">Check by hand</div>' +
+      '<div style="font-size:11px;color:var(--text3)">' +
+      d.unverifiable.map(u => escHtml(u.name) + ' (' + escHtml(u.why) + ')').join(' · ') +
+      '. A backlink profile cannot show these — no public page links back.</div>';
+
+    if (d.capped) {
+      html += '<div style="font-size:11px;color:var(--text3);margin-top:8px">Referring domains were capped at 1,000 (sorted by authority), so a listing on a very low-authority domain could be missed.</div>';
+    }
+
+    body.innerHTML = html;
+    AD.dirSummary = d.freeFound + '/' + d.freeTotal + ' free, ' + d.found + '/' + d.checked + ' overall — missing: ' +
+      (free.filter(x => !x.found).map(x => x.name).join(', ') || 'none');
+    setStep('dirs', 'done', d.found + '/' + d.checked + ' found');
+  } catch (e) {
+    console.error('Directories error:', e.message);
+    block.style.display = '';
+    body.innerHTML = '<span style="color:var(--red);font-size:12px">Could not check: ' + escHtml(e.message) + '</span>';
+    setStep('dirs', 'error', e.message);
+  }
+}
+
+// ── Structured data ──────────────────────────────────────────────────────────
+// What schema.org markup the homepage declares. For an advisory firm the two
+// that matter are a business type (FinancialService being the specific one) and
+// location detail — those are what let a search or AI engine state plainly what
+// this firm is and where it operates.
+async function runSchema(url) {
+  setStep('schema', 'running');
+  const block = document.getElementById('schema-block');
+  const body  = document.getElementById('schema-body');
+  try {
+    const r = await pf(`/site/schema?url=${encodeURIComponent(url)}`);
+    const d = await r.json();
+    if (d.error) throw new Error(d.error);
+    AD.schema = d;
+    block.style.display = '';
+
+    const yes = '<span style="color:#16a34a;font-weight:600">yes</span>';
+    const no  = '<span style="color:#dc2626;font-weight:600">no</span>';
+    const line = (label, ok, extra) =>
+      '<div style="display:flex;gap:8px;font-size:12px;padding:4px 0;border-bottom:1px solid var(--line)">' +
+        '<span style="min-width:190px;color:var(--text2)">' + label + '</span>' +
+        (ok ? yes : no) + (extra ? '<span style="color:var(--text3)">' + escHtml(extra) + '</span>' : '') +
+      '</div>';
+
+    // Business type declared at all ticks the first box; the panel carries the
+    // stronger/weaker distinction (FinancialService vs a generic Organization).
+    if (d.hasBusinessType) ck('c-sch-biz');
+    if (d.hasAddress)      ck('c-sch-loc');
+
+    if (!d.found) {
+      body.innerHTML = '<div style="font-size:13px;color:#dc2626;font-weight:600">No structured data found on the homepage.</div>' +
+        '<div style="font-size:11px;color:var(--text3);margin-top:6px">Nothing tells a search or AI engine what this business is, where it is, or who works there. ' +
+        'Note this reads the HTML as served — markup injected later by JavaScript would not be seen here.</div>';
+      setStep('schema', 'done', 'none found');
+      return;
+    }
+
+    let html = '<div style="margin-bottom:10px">' + d.types.map(t =>
+      '<span style="display:inline-block;font-size:11px;font-family:\'DM Mono\',monospace;background:var(--bg2);border:1px solid var(--line);border-radius:4px;padding:2px 7px;margin:0 4px 4px 0">' +
+      escHtml(t) + '</span>').join('') + '</div>';
+
+    html += line('Business type declared', d.hasBusinessType,
+                 d.businessTypes.join(', ') + (d.businessName ? ' — ' + d.businessName : ''));
+    html += line('FinancialService (the specific one)', d.isFinancialService,
+                 d.isFinancialService ? '' : 'a generic Organization is weaker');
+    html += line('Postal address', d.hasAddress,
+                 [d.addressLocality, d.addressRegion].filter(Boolean).join(', '));
+    html += line('Telephone',      d.hasPhone);
+    html += line('Geo coordinates', d.hasGeo);
+    html += line('Opening hours',   d.hasHours);
+    html += line('Area served',     d.hasAreaServed);
+    html += line('FAQ markup',      d.hasFAQ);
+    html += line('People / advisors', d.hasPerson);
+    html += line('Ratings or reviews', d.hasRating);
+    html += line('Social profiles (sameAs)', d.sameAs.length > 0,
+                 d.sameAs.length ? d.sameAs.length + ' linked' : '');
+
+    if (d.parseErrors) {
+      html += '<div style="font-size:11px;color:#dc2626;margin-top:8px">' + d.parseErrors +
+        ' JSON-LD block' + (d.parseErrors > 1 ? 's' : '') + ' failed to parse — malformed markup is ignored by search engines.</div>';
+    }
+    if (d.microdataOnly) {
+      html += '<div style="font-size:11px;color:var(--text3);margin-top:8px">Older microdata only, no JSON-LD. Still read, but JSON-LD is what Google recommends.</div>';
+    }
+
+    body.innerHTML = html;
+    AD.schemaSummary = d.types.join(', ') +
+      (d.hasAddress ? ' | address' : ' | NO address') +
+      (d.isFinancialService ? ' | FinancialService' : '');
+    setStep('schema', 'done', d.businessTypes[0] || 'no business type');
+  } catch (e) {
+    console.error('Schema error:', e.message);
+    block.style.display = '';
+    body.innerHTML = '<span style="color:var(--red);font-size:12px">Could not check: ' + escHtml(e.message) + '</span>';
+    setStep('schema', 'error', e.message);
+  }
+}
+
 // ── DataForSEO: Lighthouse ────────────────────────────────────────────────────
 async function runLighthouse(url) {
   setStep('lighthouse', 'running');
@@ -851,14 +1017,7 @@ async function runLighthouse(url) {
     if (d.imagesOk)    ck('c-img');
     if (d.hasGA)       ck('c-ga');
 
-    // If oversized images found, add to notes
-    if (d.imgList && d.imgList.length > 0) {
-      const notesEl = document.getElementById('n-web');
-      if (notesEl && !notesEl.value.includes('Oversized')) {
-        notesEl.value = (notesEl.value ? notesEl.value + '\n\n' : '') +
-          'Oversized images (' + d.imgList.length + '):\n' + d.imgList.join('\n');
-      }
-    }
+    renderPageWeight(d);
     setStep('lighthouse', 'done', (d.speed || d.sizeMB) ? '' : 'no PageSpeed metrics returned');
   } catch(e) {
     console.error('Lighthouse error:', e.message);
@@ -896,7 +1055,10 @@ async function runGBP(name, url, city) {
     // A name-only match gets shown for a human to confirm, never scored — four
     // checks (a third of the Visibility grade) hang off this.
     if (d.verified) {
-      ck('c-gbp-c');
+      // A listing exists and its website matches this firm. Separate from
+      // whether they have claimed it — an unclaimed listing is a real and
+      // reportable state, and without this box it looked like no listing.
+      ck('c-gbp-f');
       if (d.claimed)          ck('c-gbp-v');
       if (d.hasLogo)          ck('c-gbp-l');
       if (d.reviewCount > 0)  ck('c-gbp-r');
@@ -925,6 +1087,63 @@ async function runGBP(name, url, city) {
     document.getElementById('gbp-details').innerHTML = '<span class="badge br">GBP error: '+e.message+'</span>';
     setStep('gbp', 'error');
   }
+}
+
+// ── Page weight — which files, from where ────────────────────────────────────
+// The heaviest resources with their real URLs, plus where the weight sits by
+// host. On these sites the answer is usually a single vendor CDN serving
+// unresized originals, which is a finding that repeats across every client on
+// the same platform — so it is worth showing the host totals, not just files.
+function renderPageWeight(d) {
+  const block = document.getElementById('weight-block');
+  const body  = document.getElementById('weight-body');
+  if (!block || !body) return;
+
+  const heavy = d.heavy || [];
+  const imgs  = d.imgList || [];
+  if (!heavy.length && !imgs.length && !(d.byType || []).length) { block.style.display = 'none'; return; }
+  block.style.display = '';
+
+  const kb = n => n == null ? '' : (n >= 1024 ? (n / 1024).toFixed(2) + ' MB' : n + ' KB');
+  const row = r =>
+    '<div style="display:flex;gap:10px;align-items:baseline;padding:5px 0;border-bottom:1px solid var(--line)">' +
+      '<span style="font-family:\'DM Mono\',monospace;font-size:12px;font-weight:600;min-width:74px;text-align:right;flex-shrink:0">' + kb(r.kb) + '</span>' +
+      '<a href="' + escHtml(r.url) + '" target="_blank" rel="noopener" style="font-size:12px;color:#2563eb;word-break:break-all;text-decoration:none">' + escHtml(r.url || r.name) + '</a>' +
+    '</div>';
+
+  let html = '';
+
+  if ((d.byType || []).length) {
+    html += '<div style="font-size:11px;color:var(--text3);margin-bottom:8px">' +
+      d.byType.map(t => escHtml(t.type) + ' ' + kb(t.kb) + (t.count ? ' (' + t.count + ')' : '')).join('   ·   ') +
+      '</div>';
+  }
+
+  if ((d.hosts || []).length) {
+    html += '<div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin:10px 0 4px">Weight by host</div>';
+    html += d.hosts.map(h =>
+      '<div style="display:flex;gap:10px;font-size:12px;padding:3px 0">' +
+        '<span style="font-family:\'DM Mono\',monospace;font-weight:600;min-width:74px;text-align:right">' + kb(h.kb) + '</span>' +
+        '<span>' + escHtml(h.host) + '</span></div>').join('');
+  }
+
+  if (imgs.length) {
+    html += '<div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin:14px 0 4px">Oversized images (' + imgs.length + ')</div>';
+    html += imgs.map(row).join('');
+  }
+
+  if (heavy.length) {
+    html += '<div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin:14px 0 4px">Heaviest files on the page</div>';
+    html += heavy.map(row).join('');
+  }
+
+  body.innerHTML = html;
+
+  // Keep a plain-text copy for the export, where links are no use.
+  const lines = [];
+  (d.hosts || []).forEach(h => lines.push('  ' + kb(h.kb) + '  ' + h.host));
+  imgs.slice(0, 5).forEach(r => lines.push('  ' + kb(r.kb) + '  ' + r.url));
+  AD.pageWeight = lines.join('\n');
 }
 
 // ── Claude streaming helper ───────────────────────────────────────────────────
@@ -1056,6 +1275,12 @@ Write a brief summary of your findings, then end with this EXACT block:
       // j.chatgpt is deliberately ignored - the AI-answers box is driven by
       // runAIVisibilityScore(), which measures it instead of estimating it.
       if (j.sitemap)   ck('c-sm');
+      // The summary used to land only if you pressed Build Report, so the
+      // Visibility notes box looked empty after a normal run.
+      if (j.summary) {
+        const n = document.getElementById('n-vis');
+        if (n && !n.value) n.value = j.summary;
+      }
       if (j.meta)      ck('c-meta');
       if (j.reviewCTA) ck('c-rcta');
       if (j.awards)    ck('c-awd');
@@ -1210,7 +1435,8 @@ Write a brief summary of what you found and how you verified each profile, then 
     "postingFrequently": true or false,
     "tagging": true or false
   },
-  "socialLinksOnSite": true or false
+  "socialLinksOnSite": true or false,
+  "notes": "2-3 sentences on this firm's overall social presence and how you verified it"
 }
 ---END---`;
 
@@ -1221,44 +1447,7 @@ Write a brief summary of what you found and how you verified each profile, then 
     // Parse JSON and fill fields immediately
     const socJ = extractJSON(result);
     if (socJ) {
-      if (socJ.facebook?.found && socJ.facebook?.url) {
-        ck('c-hfb');
-        if (socJ.facebook.url)       sv('h-fb', socJ.facebook.url);
-        if (socJ.facebook.followers) sv('m-fb', String(socJ.facebook.followers));
-        if (socJ.facebook.postingFrequently) ck('c-pst');
-        if (socJ.facebook.brandedHeader)     ck('c-bhd');
-        if (socJ.facebook.customURL)         ck('c-url');
-        if (socJ.facebook.logo)              ck('c-lgp');
-        if (socJ.facebook.contactInfo)       ck('c-cni');
-        if (socJ.facebook.tagging)           ck('c-tag');
-        if (socJ.facebook.summary)           ck('c-sum');
-      }
-      if (socJ.linkedin?.found && socJ.linkedin?.url) {
-        ck('c-hli');
-        if (socJ.linkedin.url)       sv('h-li', socJ.linkedin.url);
-        if (socJ.linkedin.followers) sv('m-lif', String(socJ.linkedin.followers));
-        if (socJ.linkedin.postingFrequently) ck('c-pst');
-        if (socJ.linkedin.brandedHeader)     ck('c-bhd');
-        if (socJ.linkedin.customURL)         ck('c-url');
-      }
-      if (socJ.instagram?.found && socJ.instagram?.url) {
-        ck('c-hig');
-        if (socJ.instagram.url) sv('h-ig', socJ.instagram.url.replace(/^@/, ''));
-        if (socJ.instagram.followers) sv('m-ig', String(socJ.instagram.followers));
-      }
-      if (socJ.youtube?.found && socJ.youtube?.url) {
-        ck('c-hyt');
-        if (socJ.youtube.url)         sv('h-yt', socJ.youtube.url);
-        if (socJ.youtube.subscribers) sv('m-yt', String(socJ.youtube.subscribers));
-      }
-      // Posting cadence (2-3x/week): Facebook + LinkedIn only (not YouTube/Instagram)
-      const _posting = [socJ.facebook, socJ.linkedin].filter(p => p && p.found && p.url);
-      if (_posting.some(p => p.postingFrequently)) ck('c-pst');
-      // Tagging other pages: any verified profile
-      const _plats = [socJ.facebook, socJ.linkedin, socJ.instagram, socJ.youtube].filter(p => p && p.found && p.url);
-      if (_plats.some(p => p.tagging)) ck('c-tag');
-
-      if (socJ.socialLinksOnSite) ck('c-sln');
+      applySocialJSON(socJ);
       console.log('Social JSON parsed OK:', JSON.stringify(socJ).slice(0, 200));
     } else {
       console.error('Social JSON parse FAILED - raw result snippet:', result.slice(-500));
@@ -1339,6 +1528,64 @@ async function runAIVisibilityScore(name, url, city) {
     det.innerHTML = '<span style="color:var(--red)">Could not measure: ' + escHtml(e.message) + '</span>';
     setStep('ai-score', 'error', e.message);
   }
+}
+
+// ── Applying a parsed social review to the tabs ──────────────────────────────
+// runAISocial and buildReport used to carry near-duplicate copies of this, and
+// they drifted: only Facebook's logo/contactInfo/summary were ever read, so a
+// firm with a strong LinkedIn and no Facebook failed three checks the AI had
+// explicitly confirmed. One implementation now, used by both.
+const SOCIAL_PLATFORMS = [
+  { key: 'facebook',  has: 'c-hfb', handle: 'h-fb', metric: 'm-fb',  count: 'followers'   },
+  { key: 'linkedin',  has: 'c-hli', handle: 'h-li', metric: 'm-lif', count: 'followers'   },
+  { key: 'instagram', has: 'c-hig', handle: 'h-ig', metric: 'm-ig',  count: 'followers'   },
+  { key: 'youtube',   has: 'c-hyt', handle: 'h-yt', metric: 'm-yt',  count: 'subscribers' }
+];
+
+function applySocialJSON(socJ) {
+  if (!socJ) return 0;
+  let filled = 0;
+  const found = [];
+
+  for (const p of SOCIAL_PLATFORMS) {
+    const d = socJ[p.key];
+    if (!d || !d.found || !d.url) continue;
+    found.push(Object.assign({}, d, { key: p.key }));
+    ck(p.has); filled++;
+    sv(p.handle, p.key === 'instagram' ? String(d.url).replace(/^@/, '') : d.url);
+    const n = d[p.count];
+    if (n != null) { sv(p.metric, Number(n)); filled++; }
+  }
+
+  // These are single shared checkboxes, not one per platform, so any verified
+  // profile can satisfy them — which is how the SocialFetch path has always
+  // behaved. Reading them from Facebook alone was the inconsistency.
+  if (found.some(p => p.logo))          ck('c-lgp');
+  if (found.some(p => p.brandedHeader)) ck('c-bhd');
+  if (found.some(p => p.contactInfo))   ck('c-cni');
+  if (found.some(p => p.summary))       ck('c-sum');
+  if (found.some(p => p.customURL))     ck('c-url');
+  if (found.some(p => p.tagging))       ck('c-tag');
+
+  // Cadence stays Facebook + LinkedIn on purpose: Instagram and YouTube
+  // rhythms are not comparable to the 2-3x/week bar this check describes.
+  if (found.some(p => (p.key === 'facebook' || p.key === 'linkedin') && p.postingFrequently)) ck('c-pst');
+
+  if (socJ.socialLinksOnSite) ck('c-sln');
+
+  // Last post dates were requested for every platform and then discarded.
+  const dates = found.filter(p => p.lastPost).map(p => p.key + ': ' + p.lastPost);
+  const lp = document.getElementById('sf-lastpost');
+  if (lp) lp.textContent = dates.length ? 'Last post — ' + dates.join('   ·   ') : '';
+  AD.socialLastPost = dates.join('; ');
+
+  // Nothing used to write the Social notes box at all — the prompt had no
+  // field for it, so the exported notes line was missing a third of itself.
+  if (socJ.notes) {
+    const n = document.getElementById('n-soc');
+    if (n && !n.value) { n.value = socJ.notes; filled++; }
+  }
+  return filled;
 }
 
 // ── SocialFetch ───────────────────────────────────────────────────────────────
@@ -1472,41 +1719,9 @@ function buildReport() {
     }
   }
 
-  // Parse social JSON
-  const socJ = extractJSON(AD.aiSocial || '');
-  if (socJ) {
-    if (socJ.facebook?.found) {
-      ck('c-hfb'); filled++;
-      if (socJ.facebook.url)       sv('h-fb', socJ.facebook.url);
-      if (socJ.facebook.followers != null) { sv('m-fb', Number(socJ.facebook.followers)); filled++; }
-      if (socJ.facebook.postingFrequently) ck('c-pst');
-      if (socJ.facebook.brandedHeader)     ck('c-bhd');
-      if (socJ.facebook.customURL)         ck('c-url');
-      if (socJ.facebook.logo)              ck('c-lgp');
-      if (socJ.facebook.contactInfo)       ck('c-cni');
-      if (socJ.facebook.tagging)           ck('c-tag');
-      if (socJ.facebook.summary)           ck('c-sum');
-    }
-    if (socJ.linkedin?.found) {
-      ck('c-hli'); filled++;
-      if (socJ.linkedin.url)       sv('h-li', socJ.linkedin.url);
-      if (socJ.linkedin.followers != null) { sv('m-lif', Number(socJ.linkedin.followers)); filled++; }
-      if (socJ.linkedin.postingFrequently) ck('c-pst');
-      if (socJ.linkedin.brandedHeader)     ck('c-bhd');
-      if (socJ.linkedin.customURL)         ck('c-url');
-    }
-    if (socJ.instagram?.found) {
-      ck('c-hig'); filled++;
-      if (socJ.instagram.url)       sv('h-ig', socJ.instagram.url);
-      if (socJ.instagram.followers != null) { sv('m-ig', Number(socJ.instagram.followers)); filled++; }
-    }
-    if (socJ.youtube?.found) {
-      ck('c-hyt'); filled++;
-      if (socJ.youtube.url)         sv('h-yt', socJ.youtube.url);
-      if (socJ.youtube.subscribers != null) { sv('m-yt', Number(socJ.youtube.subscribers)); filled++; }
-    }
-    if (socJ.socialLinksOnSite) ck('c-sln');
-  }
+  // Parse social JSON — same applier the automatic run uses, so the two
+  // paths cannot drift apart again.
+  filled += applySocialJSON(extractJSON(AD.aiSocial || ''));
 
   if (filled === 0) {
     msg.textContent = 'No AI data found - make sure the audit has run first.';
@@ -1531,7 +1746,11 @@ function grade(n, t) {
 function gc(ids) { return ids.filter(id => document.getElementById(id)?.checked).length; }
 
 function recalc() {
-  const vIs = ['c-gbp-c','c-gbp-v','c-gbp-l','c-gbp-r','c-idx','c-sm','c-meta','c-ga','c-da5','c-cgpt','c-rcta','c-awd'];
+  // Visibility is 14: the two schema checks, plus "GBP listing visible" — which
+  // is NOT implied by the other GBP boxes. An unclaimed listing with no logo
+  // and no reviews leaves all three of those false, and without this one that
+  // firm scores identically to a firm with no listing at all.
+  const vIs = ['c-gbp-f','c-gbp-v','c-gbp-l','c-gbp-r','c-idx','c-sm','c-meta','c-ga','c-da5','c-cgpt','c-rcta','c-awd','c-sch-biz','c-sch-loc'];
   const wIs = ['c-https','c-mob','c-img','c-spd','c-szp','c-faq','c-nav','c-lnk','c-pho','c-hdl','c-cta','c-res'];
   const sIs = ['c-hfb','c-hli','c-hig','c-hyt','c-sln','c-bhd','c-cni','c-pst','c-url','c-sum','c-tag','c-lgp'];
   const v=grade(gc(vIs),vIs.length), w=grade(gc(wIs),wIs.length), s=grade(gc(sIs),sIs.length);
@@ -1567,6 +1786,16 @@ AI Visibility (unprompted): ${AD.aiVisibilityScore??'-'}% named | ${AD.aiCitatio
 AI Visibility (by name):    ${AD.aiBrandedScore??'-'}% knew them | ${AD.aiBrandedCitation??'-'}% cited own site
 Page Speed (${AD.psiStrategy||'desktop'} LCP): ${AD.speed||'-'}s | Page Size: ${AD.size||'-'}MB
 GBP Reviews: ${AD.gbpReviews??'-'} | GBP Rating: ${AD.gbpRating||'-'}
+Last social post: ${AD.socialLastPost||'-'}
+
+PAGE WEIGHT
+${AD.pageWeight||'  (not measured)'}
+
+STRUCTURED DATA
+${AD.schemaSummary||'  none found'}
+
+DIRECTORY LISTINGS
+${AD.dirSummary||'  not checked'}
 
 AI - VISIBILITY
 ${strip(AD.aiVisibility) || '(not run)'}
@@ -1672,10 +1901,11 @@ function clearAll() {
   document.querySelectorAll('textarea').forEach(t => t.value='');
   ['clientName','clientURL','clientCity','atRecordId','h-fb','h-li','h-ig','h-yt'].forEach(id => sv(id,''));
   ['da','kw','tr','bl','rd','spd','sz','ps','aivis','aicite','aibrand','aibcite'].forEach(id => setMV(id,'-',null));
-  ['gbp-block','aivis-block','ai-vis-panel','ai-web-panel','ai-soc-panel','stepsWrap'].forEach(id => {
+  ['gbp-block','schema-block','dirs-block','aivis-block','weight-block','ai-vis-panel','ai-web-panel','ai-soc-panel','stepsWrap'].forEach(id => {
     const e = document.getElementById(id); if(e) e.style.display='none';
   });
   document.getElementById('sf-status').textContent = '';
+  const _lp = document.getElementById('sf-lastpost'); if (_lp) _lp.textContent = '';
   AD = {}; recalc(); toast('Cleared');
 }
 
@@ -1686,7 +1916,9 @@ function clearAll() {
 const AID_CATALOG = [
   ['c-res','Blog / resources section'],['c-faq','FAQ page with Q&A'],
   ['c-awd','Industry awards shown'],['c-rcta','Review/testimonial CTA'],
-  ['c-cgpt','Named or cited in AI answers'],['c-nav','Simple navigation'],
+  ['c-cgpt','Named or cited by Claude'],['c-nav','Simple navigation'],
+  ['c-sch-biz','Business schema markup'],['c-sch-loc','Location schema markup'],
+  ['c-gbp-f','GBP listing visible'],
   ['c-lnk','Content links to other pages'],['c-pho','High-quality photos'],
   ['c-hdl','Benefit-based headlines'],['c-cta','Descriptive CTAs'],
   ['c-meta','Meta descriptions exist'],['c-ga','Google Analytics installed'],

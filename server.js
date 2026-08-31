@@ -250,11 +250,44 @@ app.get('/site/lighthouse', async (req, res) => {
     const imgItems  = audits['uses-optimized-images']?.details?.items || 
                       audits['uses-responsive-images']?.details?.items || [];
     const imagesOk  = imgItems.length === 0;
-    const imgList   = imgItems.slice(0, 5).map(i => {
-      const name = (i.url || '').split('/').pop().split('?')[0] || 'unknown';
-      const kb   = i.totalBytes ? Math.round(i.totalBytes / 1024) + 'KB' : '';
-      return name + (kb ? ' (' + kb + ')' : '');
-    });
+    // The filename alone was kept and the URL thrown away, which left no way to
+    // see WHERE the weight comes from — and on these sites it is nearly always
+    // one vendor CDN serving unresized originals, which is the finding worth
+    // having, because it repeats across every client on that platform.
+    const imgList   = imgItems.slice(0, 10).map(i => ({
+      url:  i.url || '',
+      name: (i.url || '').split('/').pop().split('?')[0] || 'unknown',
+      kb:   i.totalBytes ? Math.round(i.totalBytes / 1024) : null,
+      host: rootDomain(i.url)
+    }));
+
+    // total-byte-weight is the audit behind "avoid enormous network payloads":
+    // every resource the page pulled, with its real transfer size.
+    const heavy = (audits['total-byte-weight']?.details?.items || [])
+      .slice(0, 10)
+      .map(i => ({
+        url:  i.url || '',
+        name: (i.url || '').split('/').pop().split('?')[0] || 'unknown',
+        kb:   i.totalBytes ? Math.round(i.totalBytes / 1024) : null,
+        host: rootDomain(i.url)
+      }));
+
+    // Where the weight sits, by host.
+    const byHost = {};
+    for (const r of heavy) {
+      if (!r.host || !r.kb) continue;
+      byHost[r.host] = (byHost[r.host] || 0) + r.kb;
+    }
+    const hosts = Object.entries(byHost)
+      .map(([host, kbTotal]) => ({ host, kb: kbTotal }))
+      .sort((a, b) => b.kb - a.kb)
+      .slice(0, 5);
+
+    // Weight by resource type, straight from Lighthouse's resource summary.
+    const byType = (audits['resource-summary']?.details?.items || [])
+      .filter(i => i.resourceType && i.resourceType !== 'total' && i.transferSize)
+      .map(i => ({ type: i.resourceType, kb: Math.round(i.transferSize / 1024), count: i.requestCount }))
+      .sort((a, b) => b.kb - a.kb);
 
     // Google Analytics — check third-party summary
     const thirdParty = audits['third-party-summary']?.details?.items || [];
@@ -266,7 +299,8 @@ app.get('/site/lighthouse', async (req, res) => {
       strategy,
       speed, sizeMB, perfScore, seoScore,
       isHttps, isMobile, isIndexable, hasMeta, hasSitemap,
-      speedPass, sizePass, imagesOk, imgList, hasGA
+      speedPass, sizePass, imagesOk, imgList, hasGA,
+      heavy, hosts, byType
     });
   } catch (e) {
     const msg = e.name === 'AbortError' ? 'PageSpeed timed out — the site is slow to load' : e.message;
@@ -312,6 +346,221 @@ app.get('/site/check', async (req, res) => {
     console.log('Site check results:', JSON.stringify(results));
     res.json(results);
   } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── 3b. Structured data — what schema.org markup the homepage declares ───────
+// Parsed here rather than through a validator service: schema.org has no public
+// API, Google's Rich Results Test has none either and is being wound down
+// through 2026, and JSON-LD is only JSON inside a script tag. Doing it here is
+// deterministic, free, and cannot be deprecated out from under the audit.
+
+// The types that matter for an advisory firm. FinancialService is the correct
+// specific type; the others are progressively weaker but still count as having
+// identified the business.
+const BUSINESS_TYPES = [
+  'FinancialService', 'AccountingService', 'InsuranceAgency', 'ProfessionalService',
+  'LocalBusiness', 'Corporation', 'Organization'
+];
+
+// Walk a parsed JSON-LD document into a flat list of nodes. Handles a bare
+// object, an array at the root, and @graph — all three are common in the wild.
+function flattenLd(node, out) {
+  if (!node || typeof node !== 'object') return out;
+  if (Array.isArray(node)) { node.forEach(n => flattenLd(n, out)); return out; }
+  if (Array.isArray(node['@graph'])) node['@graph'].forEach(n => flattenLd(n, out));
+  if (node['@type']) out.push(node);
+  for (const k of Object.keys(node)) {
+    if (k === '@graph') continue;
+    const v = node[k];
+    if (v && typeof v === 'object') flattenLd(v, out);
+  }
+  return out;
+}
+
+const typesOf = n => [].concat(n['@type'] || []).map(t => String(t).replace(/^https?:\/\/schema\.org\//, ''));
+
+app.get('/site/schema', async (req, res) => {
+  const { url } = req.query;
+  if (!url) return res.status(400).json({ error: 'url required' });
+  try {
+    const r = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; GrowthLineAudit/1.0)' },
+      redirect: 'follow',
+      signal: AbortSignal.timeout(15000)
+    });
+    if (!r.ok) return res.json({ found: false, note: 'page returned HTTP ' + r.status });
+    const html = await r.text();
+
+    // JSON-LD blocks
+    const blocks = [...html.matchAll(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)]
+      .map(m => m[1]);
+
+    const nodes = [];
+    let parseErrors = 0;
+    for (const raw of blocks) {
+      // CDATA is usually comment-wrapped inside a script tag — //<![CDATA[ or
+      // /*<![CDATA[*/ — so the marker alone is not enough to strip.
+      const cleaned = raw
+        .replace(/^\s*(?:\/\/|\/\*)?\s*<!\[CDATA\[\s*(?:\*\/)?/, '')
+        .replace(/(?:\/\*)?\s*\]\]>\s*(?:\*\/|\/\/)?\s*$/, '')
+        .trim();
+      if (!cleaned) continue;
+      try { flattenLd(JSON.parse(cleaned), nodes); } catch (_) { parseErrors++; }
+    }
+
+    // Microdata / RDFa, still common on older builds
+    const micro = [...html.matchAll(/itemtype=["']https?:\/\/schema\.org\/([A-Za-z]+)["']/gi)]
+      .map(m => m[1]);
+
+    const ldTypes = nodes.flatMap(typesOf);
+    const types = [...new Set(ldTypes.concat(micro))].sort();
+
+    const has = t => types.includes(t);
+    const businessTypes = BUSINESS_TYPES.filter(has);
+
+    // Location signals, read off whichever node carries them.
+    const withAddr = nodes.filter(n => n.address);
+    const addrNode = withAddr[0];
+    const addr = addrNode && typeof addrNode.address === 'object' ? addrNode.address : null;
+
+    const sameAs = [...new Set(nodes.flatMap(n => [].concat(n.sameAs || [])).filter(Boolean).map(String))];
+
+    res.json({
+      found: types.length > 0,
+      types,
+      jsonLdBlocks: blocks.length,
+      parseErrors,
+      microdataOnly: blocks.length === 0 && micro.length > 0,
+
+      // Is the business itself described, and how specifically?
+      businessTypes,
+      isFinancialService: has('FinancialService'),
+      hasBusinessType: businessTypes.length > 0,
+      businessName: (nodes.find(n => businessTypes.some(b => typesOf(n).includes(b))) || {}).name || '',
+
+      // Location
+      hasAddress:   !!addrNode,
+      addressLocality: addr ? (addr.addressLocality || '') : '',
+      addressRegion:   addr ? (addr.addressRegion   || '') : '',
+      hasGeo:       nodes.some(n => n.geo),
+      hasPhone:     nodes.some(n => n.telephone),
+      hasHours:     nodes.some(n => n.openingHours || n.openingHoursSpecification),
+      hasAreaServed:nodes.some(n => n.areaServed),
+
+      // Other things worth knowing about
+      hasFAQ:    has('FAQPage'),
+      hasPerson: has('Person'),
+      hasRating: nodes.some(n => n.aggregateRating) || has('AggregateRating'),
+      sameAs
+    });
+  } catch (e) {
+    const msg = e.name === 'TimeoutError' ? 'timed out fetching the page' : e.message;
+    console.error('schema error:', msg);
+    res.status(500).json({ error: msg });
+  }
+});
+
+// ── 3c. Directory listings ───────────────────────────────────────────────────
+// Checked through the firm's own backlink profile rather than by searching each
+// site. A directory listing with a public profile page links back to the firm,
+// so if yelp.com is among their referring domains they have a Yelp listing —
+// one SEMrush call settles every directory at once, deterministically, instead
+// of twenty scrapes or twenty AI searches.
+//
+// Authority Scores below were measured once against SEMrush and are stored
+// rather than fetched per audit: they move slowly, and paying for twenty
+// lookups on every run to watch a number drift by one point is not worth it.
+const DIRECTORIES = [
+  // Free to anyone — the ones worth claiming first.
+  { key: 'yelp',    name: 'Yelp',                  domain: 'yelp.com',                   as: 100, cost: 'free' },
+  { key: 'bbb',     name: 'Better Business Bureau', domain: 'bbb.org',                   as: 78,  cost: 'free' },
+  { key: 'nextdr',  name: 'Nextdoor',              domain: 'nextdoor.com',               as: 74,  cost: 'free' },
+  { key: 'yp',      name: 'Yellow Pages',          domain: 'yellowpages.com',            as: 68,  cost: 'free' },
+  { key: 'manta',   name: 'Manta',                 domain: 'manta.com',                  as: 49,  cost: 'free' },
+  { key: 'coc',     name: 'ChamberOfCommerce.com', domain: 'chamberofcommerce.com',      as: 48,  cost: 'free' },
+  { key: 'fsq',     name: 'Foursquare',            domain: 'foursquare.com',             as: 47,  cost: 'free' },
+  { key: 'align',   name: 'Alignable',             domain: 'alignable.com',              as: 43,  cost: 'free' },
+
+  // Free, but only because the firm already pays for the credential.
+  { key: 'cfp',     name: "CFP Board — Let's Make a Plan", domain: 'letsmakeaplan.org',  as: 39,  cost: 'credential' },
+  { key: 'fpa',     name: 'FPA PlannerSearch',     domain: 'plannersearch.org',          as: 38,  cost: 'credential' },
+  { key: 'napfa',   name: 'NAPFA',                 domain: 'napfa.org',                  as: 44,  cost: 'credential' },
+  { key: 'xypn',    name: 'XY Planning Network',   domain: 'xyplanningnetwork.com',      as: 36,  cost: 'credential' },
+  { key: 'garrett', name: 'Garrett Planning Network', domain: 'garrettplanningnetwork.com', as: 31, cost: 'credential' },
+
+  // Paid listings or per-lead. Separate bucket — compliance treats paid
+  // placement differently from a claimed free listing.
+  { key: 'smart',   name: 'SmartAsset',            domain: 'smartasset.com',             as: 68,  cost: 'paid' },
+  { key: 'wt',      name: 'Wealthtender',          domain: 'wealthtender.com',           as: 42,  cost: 'paid' },
+  { key: 'feeonly', name: 'Fee-Only Network',      domain: 'feeonlynetwork.com',         as: 34,  cost: 'paid' },
+  { key: 'zoe',     name: 'Zoe Financial',         domain: 'zoefinancial.com',           as: 30,  cost: 'paid' },
+  { key: 'paladin', name: 'Paladin Registry',      domain: 'paladinregistry.com',        as: 27,  cost: 'paid' },
+  { key: 'wiser',   name: 'WiserAdvisor',          domain: 'wiseradvisor.com',           as: 25,  cost: 'paid' }
+];
+
+// These are map/profile products with no public page linking back to the firm,
+// so a backlink profile can never show them. Reported as "check by hand" rather
+// than silently as absent.
+const UNVERIFIABLE = [
+  { name: 'Bing Places',    cost: 'free', why: 'map listing, no linking page' },
+  { name: 'Apple Business', cost: 'free', why: 'map listing, no linking page' }
+];
+
+app.get('/directories', async (req, res) => {
+  const { domain } = req.query;
+  if (!domain) return res.status(400).json({ error: 'domain required' });
+  if (!SEM_KEY) return res.status(500).json({ error: 'SEMRUSH_KEY not set — directory checks read the backlink profile' });
+
+  const target = rootDomain(domain);
+  const base = `https://api.semrush.com/analytics/v1/?type=backlinks_refdomains&key=${SEM_KEY}` +
+               `&target=${encodeURIComponent(target)}&target_type=root_domain` +
+               `&export_columns=domain,domain_ascore&display_limit=1000`;
+
+  try {
+    // Sorted by authority so the directories that matter surface first if the
+    // firm has more referring domains than the limit. Column and sort naming
+    // differs across SEMrush report families, so fall back to an unsorted
+    // request rather than failing the whole check on a rejected parameter.
+    let txt = await semFetch(base + '&display_sort=domain_ascore_desc');
+    if (/^ERROR/i.test((txt || '').trim())) txt = await semFetch(base);
+
+    const trimmed = (txt || '').trim();
+    if (/^ERROR/i.test(trimmed)) {
+      return res.json({ error: 'SEMrush: ' + trimmed.slice(0, 120) });
+    }
+
+    // Find the domain column by header name — its position is not guaranteed.
+    const rows = trimmed.split('\n');
+    const headers = (rows[0] || '').split(';').map(h => h.trim().toLowerCase());
+    const di = headers.indexOf('domain') >= 0 ? headers.indexOf('domain') : 0;
+
+    const seen = new Set();
+    for (const line of rows.slice(1)) {
+      const d = rootDomain((line.split(';')[di] || '').trim());
+      if (d) seen.add(d);
+    }
+
+    // A listing may sit on a subdomain (eg. austin.bbb.org), so match the
+    // referring domain by suffix as well as exactly.
+    const has = dom => seen.has(dom) || [...seen].some(s => s.endsWith('.' + dom));
+
+    const results = DIRECTORIES.map(d => ({ ...d, found: has(d.domain) }));
+    const free = results.filter(d => d.cost === 'free');
+
+    res.json({
+      checked: results.length,
+      found: results.filter(d => d.found).length,
+      freeFound: free.filter(d => d.found).length,
+      freeTotal: free.length,
+      refDomainsScanned: seen.size,
+      capped: seen.size >= 1000,
+      directories: results,
+      unverifiable: UNVERIFIABLE
+    });
+  } catch (e) {
+    console.error('directories error:', e.message);
     res.status(500).json({ error: e.message });
   }
 });
