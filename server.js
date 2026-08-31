@@ -199,9 +199,14 @@ app.get('/domain/overview', async (req, res) => {
 app.get('/site/lighthouse', async (req, res) => {
   const { url } = req.query;
   if (!url) return res.status(400).json({ error: 'url required' });
+  // Desktop by default. PageSpeed's mobile run simulates a mid-range phone on a
+  // throttled connection with a 4x CPU slowdown, which produces LCP figures
+  // several times worse than a desktop test — accurate, but not comparable to
+  // the desktop numbers these reports are read against.
+  const strategy = req.query.strategy === 'mobile' ? 'mobile' : 'desktop';
   try {
     const psUrl = 'https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=' +
-      encodeURIComponent(url) + '&strategy=mobile' + (GOOGLE_KEY ? '&key=' + GOOGLE_KEY : '');
+      encodeURIComponent(url) + '&strategy=' + strategy + (GOOGLE_KEY ? '&key=' + GOOGLE_KEY : '');
     console.log('PageSpeed fetching:', psUrl.slice(0, 100));
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 60000);  // slow sites can take >30s for a full Lighthouse run
@@ -226,7 +231,15 @@ app.get('/site/lighthouse', async (req, res) => {
 
     // Boolean checks
     const isHttps     = url.startsWith('https');
-    const isMobile    = perfScore != null && perfScore >= 50;
+    // "Mobile optimized" used to mean "performance score >= 50", which measured
+    // speed rather than mobile-friendliness — and under a desktop run it would
+    // mean nothing at all. Lighthouse's `viewport` audit is the real signal
+    // (does the page declare a mobile viewport?) and it is returned under both
+    // strategies. Falls back to the old rule only if the audit is missing.
+    const viewportAudit = audits['viewport']?.score;
+    const isMobile    = viewportAudit != null
+                      ? viewportAudit >= 0.9
+                      : (perfScore != null && perfScore >= 50);
     const isIndexable = (audits['is-crawlable']?.score ?? 0) >= 0.9;
     const hasMeta     = (audits['meta-description']?.score ?? 0) >= 0.9;
     const hasSitemap  = (audits['robots-txt']?.score ?? 0) >= 0.9;
@@ -250,6 +263,7 @@ app.get('/site/lighthouse', async (req, res) => {
     );
 
     res.json({
+      strategy,
       speed, sizeMB, perfScore, seoScore,
       isHttps, isMobile, isIndexable, hasMeta, hasSitemap,
       speedPass, sizePass, imagesOk, imgList, hasGA

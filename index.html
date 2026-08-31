@@ -340,7 +340,7 @@ textarea{resize:vertical;min-height:60px}
 
     <!-- WEBSITE TAB -->
     <div class="tp" id="tp-website">
-      <div class="sl">Technical — DataForSEO Lighthouse</div>
+      <div class="sl">Technical — Google PageSpeed <span id="psi-strat" style="text-transform:none;font-weight:500">(desktop)</span></div>
       <div class="mg">
         <div class="mc"><div class="ml">Page speed (LCP)</div><div class="mv" id="m-spd">—</div><div class="mt">Under 3s is good</div></div>
         <div class="mc"><div class="ml">Homepage size</div><div class="mv" id="m-sz">—</div><div class="mt">Under 3MB is good</div></div>
@@ -462,6 +462,15 @@ textarea{resize:vertical;min-height:60px}
       <div class="sl" style="margin-top:12px">Proxy access key</div>
       <div class="kr"><input type="password" id="s-audit" placeholder="must match AUDIT_KEY on the proxy"/><span class="ks" id="ks-audit">not set</span></div>
       <div style="font-size:11px;color:var(--text3);margin-top:6px;line-height:1.5">Anthropic, DataForSEO, SocialFetch and Airtable keys now live on the proxy server (Render env vars), not in the browser. Only this access key is stored here — it just unlocks your proxy.</div>
+
+      <div class="sl" style="margin-top:12px">Page speed test</div>
+      <div class="kr">
+        <select id="s-psi" class="field-select" style="width:100%;padding:8px;border:1px solid var(--line);border-radius:6px;font-family:inherit;font-size:13px">
+          <option value="desktop">Desktop — comparable to GTmetrix and similar tools</option>
+          <option value="mobile">Mobile — throttled phone; much slower LCP</option>
+        </select>
+      </div>
+      <div style="font-size:11px;color:var(--text3);margin-top:6px;line-height:1.5">Google runs the same Lighthouse either way. The mobile run simulates a mid-range phone on a throttled connection with a 4x CPU slowdown, so its LCP is typically several times the desktop figure for the same page — both are true, they just are not comparable.</div>
 
       <div class="sl" style="margin-top:12px">Claude model</div>
       <div class="kr">
@@ -590,7 +599,7 @@ let AD = {}; // audit data store
 
 const STEP_DEFS = [
   { id: 'domain',    label: 'Domain metrics - DataForSEO Labs' },
-  { id: 'lighthouse',label: 'Technical audit - DataForSEO Lighthouse' },
+  { id: 'lighthouse',label: 'Technical audit - Google PageSpeed' },
   { id: 'gbp',       label: 'Google Business Profile - DataForSEO' },
   { id: 'ai-vis',    label: 'AI visibility review' },
   { id: 'ai-web',    label: 'AI website deep review' },
@@ -643,7 +652,7 @@ function st(n) {
 }
 
 // ── Settings ──────────────────────────────────────────────────────────────────
-const S_KEYS = ['proxy','audit','at-base','at-tbl','at-view','model'];
+const S_KEYS = ['proxy','audit','at-base','at-tbl','at-view','model','psi'];
 const F_KEYS = ['name','url','vis','web','soc','da','spd','nts','ai','dte'];
 
 function saveSettings() {
@@ -656,6 +665,7 @@ function saveSettings() {
 
 function loadSettings() {
   if (!lg('cfg_proxy')) ls('cfg_proxy', DEFAULT_PROXY);
+  if (!lg('cfg_psi'))   ls('cfg_psi', 'desktop');
   S_KEYS.forEach(k => { const e=document.getElementById('s-'+k); if(e) e.value=lg('cfg_'+k); });
   F_KEYS.forEach(k => { const e=document.getElementById('f-'+k); if(e) e.value=lg('fld_'+k); });
   updateKeyStatus();
@@ -807,7 +817,8 @@ async function runLighthouse(url) {
   setStep('lighthouse', 'running');
   const proxy = lg('cfg_proxy') || DEFAULT_PROXY;
   try {
-    const r = await pf(`/site/lighthouse?url=${encodeURIComponent(url)}`);
+    const strat = lg('cfg_psi') || 'desktop';
+    const r = await pf(`/site/lighthouse?url=${encodeURIComponent(url)}&strategy=${strat}`);
     const d = await r.json();
     console.log('LIGHTHOUSE RESPONSE:', JSON.stringify(d));
     if (d.error) throw new Error(d.error);
@@ -816,6 +827,11 @@ async function runLighthouse(url) {
     if (d.speed)    { setMV('spd', d.speed+'s', parseFloat(d.speed)<3); AD.speed=d.speed; }
     if (d.sizeMB)   { setMV('sz',  d.sizeMB+'MB', parseFloat(d.sizeMB)<3); AD.size=d.sizeMB; }
     if (d.perfScore!=null) setMV('ps', d.perfScore, d.perfScore>=50);
+    // Say which run these numbers came from — a mobile run is throttled and its
+    // LCP is several times a desktop figure, so the two are not comparable.
+    const stratEl = document.getElementById('psi-strat');
+    if (stratEl && d.strategy) stratEl.textContent = '(' + d.strategy + ')';
+    AD.psiStrategy = d.strategy;
 
     // Auto-check boxes
     if (d.isHttps)     ck('c-https');
@@ -1535,7 +1551,7 @@ METRICS
 Domain Authority: ${AD.da||'-'} | Keywords: ${AD.keywords||'-'} | Traffic: ${AD.traffic||'-'}
 Backlinks: ${AD.backlinks??'-'} | Referring Domains: ${AD.refDomains??'-'}
 AI Visibility: ${AD.aiVisibilityScore??'-'}% named | ${AD.aiCitationShare??'-'}% cited
-Page Speed: ${AD.speed||'-'}s | Page Size: ${AD.size||'-'}MB
+Page Speed (${AD.psiStrategy||'desktop'} LCP): ${AD.speed||'-'}s | Page Size: ${AD.size||'-'}MB
 GBP Reviews: ${AD.gbpReviews??'-'} | GBP Rating: ${AD.gbpRating||'-'}
 
 AI - VISIBILITY
