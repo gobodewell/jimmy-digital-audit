@@ -311,9 +311,15 @@ textarea{resize:vertical;min-height:60px}
 
       <div id="aivis-block" class="card" style="display:none">
         <div class="ct">AI visibility — measured on <span id="aivis-model">Claude</span></div>
+        <div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin:2px 0 6px">Found without being named</div>
         <div class="mg">
           <div class="mc"><div class="ml">Named in AI answers</div><div class="mv" id="m-aivis">—</div><div class="mt">Asked with no web search</div></div>
           <div class="mc"><div class="ml">Cited as a source</div><div class="mv" id="m-aicite">—</div><div class="mt">Asked with web search on</div></div>
+        </div>
+        <div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin:14px 0 6px">Asked about by name</div>
+        <div class="mg">
+          <div class="mc"><div class="ml">Known by name</div><div class="mv" id="m-aibrand">—</div><div class="mt">Answered rather than "no information"</div></div>
+          <div class="mc"><div class="ml">Own site cited</div><div class="mv" id="m-aibcite">—</div><div class="mt">Their site vs third-party listings</div></div>
         </div>
         <div id="aivis-detail" style="font-size:11px;color:var(--text3);margin-top:8px"></div>
       </div>
@@ -1307,18 +1313,25 @@ async function runAIVisibilityScore(name, url, city) {
     AD.aiVisibilityScore = result.visibilityScore;
     AD.aiCitationShare   = result.citationShare;
 
-    setMV('aivis',  result.visibilityScore == null ? '-' : result.visibilityScore + '%', result.visibilityScore > 0);
-    setMV('aicite', result.citationShare   == null ? '-' : result.citationShare   + '%', result.citationShare   > 0);
+    setMV('aivis',   result.visibilityScore == null ? '-' : result.visibilityScore + '%', result.visibilityScore > 0);
+    setMV('aicite',  result.citationShare   == null ? '-' : result.citationShare   + '%', result.citationShare   > 0);
+    setMV('aibrand', result.brandedScore    == null ? '-' : result.brandedScore    + '%', result.brandedScore    > 0);
+    setMV('aibcite', result.brandedCitation == null ? '-' : result.brandedCitation + '%', result.brandedCitation > 0);
+    AD.aiBrandedScore    = result.brandedScore;
+    AD.aiBrandedCitation = result.brandedCitation;
     document.getElementById('aivis-model').textContent = result.model || 'Claude';
 
-    // This is now the only thing that ticks the AI-answers box - it fires on a
-    // firm actually being named or cited, not on the review's impression.
+    // Deliberately driven by the DISCOVERY numbers only. Being known once you
+    // are named is a useful sanity check, but it is not visibility - a firm
+    // nobody finds unprompted has not earned this box.
     if (result.visibilityScore > 0 || result.citationShare > 0) ck('c-cgpt');
 
     det.textContent =
-      result.visibilityHits + '/' + result.visibilityRuns + ' answers named them  ·  ' +
-      result.citationHits   + '/' + result.citationRuns   + ' cited their site  ·  ' +
-      result.prompts + ' prompts x ' + result.repeats + ' runs' +
+      'Unprompted: ' + result.visibilityHits + '/' + result.visibilityRuns + ' named, ' +
+      result.citationHits + '/' + result.citationRuns + ' cited  ·  ' +
+      'By name: ' + (result.brandedRuns ? result.brandedHits + '/' + result.brandedRuns + ' knew them, ' +
+        result.brandedCiteHits + '/' + result.brandedCiteRuns + ' cited their site' : 'not run') + '  ·  ' +
+      (result.prompts + result.brandedPrompts) + ' prompts x ' + result.repeats + ' runs' +
       (result.errors ? '  ·  ' + result.errors + ' failed' + (result.errorNote ? ': ' + result.errorNote : '') : '');
     setStep('ai-score', 'done');
   } catch (e) {
@@ -1550,7 +1563,8 @@ Visibility: ${s.v||'-'} | Website: ${s.w||'-'} | Social: ${s.s||'-'}
 METRICS
 Domain Authority: ${AD.da||'-'} | Keywords: ${AD.keywords||'-'} | Traffic: ${AD.traffic||'-'}
 Backlinks: ${AD.backlinks??'-'} | Referring Domains: ${AD.refDomains??'-'}
-AI Visibility: ${AD.aiVisibilityScore??'-'}% named | ${AD.aiCitationShare??'-'}% cited
+AI Visibility (unprompted): ${AD.aiVisibilityScore??'-'}% named | ${AD.aiCitationShare??'-'}% cited
+AI Visibility (by name):    ${AD.aiBrandedScore??'-'}% knew them | ${AD.aiBrandedCitation??'-'}% cited own site
 Page Speed (${AD.psiStrategy||'desktop'} LCP): ${AD.speed||'-'}s | Page Size: ${AD.size||'-'}MB
 GBP Reviews: ${AD.gbpReviews??'-'} | GBP Rating: ${AD.gbpRating||'-'}
 
@@ -1657,7 +1671,7 @@ function clearAll() {
   document.querySelectorAll('input[type=number]').forEach(i => i.value='');
   document.querySelectorAll('textarea').forEach(t => t.value='');
   ['clientName','clientURL','clientCity','atRecordId','h-fb','h-li','h-ig','h-yt'].forEach(id => sv(id,''));
-  ['da','kw','tr','bl','rd','spd','sz','ps','aivis','aicite'].forEach(id => setMV(id,'-',null));
+  ['da','kw','tr','bl','rd','spd','sz','ps','aivis','aicite','aibrand','aibcite'].forEach(id => setMV(id,'-',null));
   ['gbp-block','aivis-block','ai-vis-panel','ai-web-panel','ai-soc-panel','stepsWrap'].forEach(id => {
     const e = document.getElementById(id); if(e) e.style.display='none';
   });

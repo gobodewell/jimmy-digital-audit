@@ -601,6 +601,29 @@ function visibilityPrompts(city) {
   ];
 }
 
+// Branded prompts name the firm outright. These answer a different and more
+// basic question than the discovery prompts: not "would a prospect stumble on
+// them" but "does the model know who they are at all, and does it treat their
+// own site as the source about them".
+function brandedPrompts(name, city) {
+  const where = city ? ' in ' + city : '';
+  return [
+    `What can you tell me about ${name}, a financial advisory firm${where}?`,
+    `Is ${name}${where} a reputable financial advisory firm? What are they known for?`,
+    `Who works at ${name}${where}, and what services do they offer?`
+  ];
+}
+
+// Because a branded prompt contains the firm's name, "did the answer mention
+// them" is meaningless — it always does. What matters is whether the model
+// actually knew anything or disclaimed. This catches the usual disclaimer
+// shapes; it is a heuristic, not a certainty, so the panel reports the raw
+// counts alongside the percentage.
+const NO_KNOWLEDGE = /(i (do ?n'?t|do not) have|i'?m not familiar|not familiar with|don'?t have (any |specific |reliable )?(information|details)|no (specific |reliable |publicly available )?information|could ?n'?t find|could not find|unable to find|not aware of|i don'?t know|no record of|can ?n'?t find|cannot find|limited information)/i;
+function recognised(text) {
+  return !!text && !NO_KNOWLEDGE.test(text);
+}
+
 // Loose name match — case, punctuation and legal suffixes ignored, so
 // "Totus Wealth Management, LLC" still matches "totus wealth management".
 function normaliseName(s) {
@@ -652,6 +675,9 @@ app.post('/ai/visibility', async (req, res) => {
   const prompts = (Array.isArray(req.body.prompts) && req.body.prompts.length)
     ? req.body.prompts.slice(0, 12)
     : visibilityPrompts(city);
+  const branded = (Array.isArray(req.body.brandedPrompts) && req.body.brandedPrompts.length)
+    ? req.body.brandedPrompts.slice(0, 6)
+    : (req.body.branded === false ? [] : brandedPrompts(name, city));
   const repeats = Math.min(Math.max(parseInt(req.body.repeats, 10) || 2, 1), 5);
   const want    = rootDomain(domain);
 
@@ -661,12 +687,18 @@ app.post('/ai/visibility', async (req, res) => {
   res.flushHeaders?.();
   const send = obj => { try { res.write(JSON.stringify(obj) + '\n'); } catch (e) {} };
 
-  // One job per prompt per repetition per mode.
+  // One job per prompt per repetition per mode, across both prompt sets.
   const jobs = [];
   for (const p of prompts) {
     for (let i = 0; i < repeats; i++) {
-      jobs.push({ prompt: p, mode: 'knowledge' });
-      jobs.push({ prompt: p, mode: 'citation'  });
+      jobs.push({ prompt: p, kind: 'discovery', mode: 'knowledge' });
+      jobs.push({ prompt: p, kind: 'discovery', mode: 'citation'  });
+    }
+  }
+  for (const p of branded) {
+    for (let i = 0; i < repeats; i++) {
+      jobs.push({ prompt: p, kind: 'branded', mode: 'knowledge' });
+      jobs.push({ prompt: p, kind: 'branded', mode: 'citation'  });
     }
   }
 
@@ -685,13 +717,19 @@ app.post('/ai/visibility', async (req, res) => {
       if (out.error) return { ...job, error: out.error };
       return {
         ...job,
-        named: mentionsName(out.text, name),
+        // A discovery answer counts if it names the firm unprompted. A branded
+        // answer already contains the name, so it counts only if the model
+        // knew something rather than disclaiming.
+        hit: job.kind === 'branded' ? recognised(out.text) : mentionsName(out.text, name),
         cited: job.mode === 'citation' ? citedDomains(out.blocks).has(want) : false
       };
     });
 
-    const knowledge = runs.filter(r => r.mode === 'knowledge' && !r.error);
-    const citation  = runs.filter(r => r.mode === 'citation'  && !r.error);
+    const ok        = runs.filter(r => !r.error);
+    const knowledge = ok.filter(r => r.kind === 'discovery' && r.mode === 'knowledge');
+    const citation  = ok.filter(r => r.kind === 'discovery' && r.mode === 'citation');
+    const bKnow     = ok.filter(r => r.kind === 'branded'   && r.mode === 'knowledge');
+    const bCite     = ok.filter(r => r.kind === 'branded'   && r.mode === 'citation');
     const errors    = runs.filter(r => r.error);
     const pct = (n, d) => d ? Math.round((n / d) * 100) : null;
 
@@ -700,14 +738,24 @@ app.post('/ai/visibility', async (req, res) => {
       model: pickModel(model),
       prompts: prompts.length,
       repeats,
+      brandedPrompts: branded.length,
+      // Discovery — the firm is never named in the question.
       // % of no-tool answers that named the firm at all
-      visibilityScore: pct(knowledge.filter(r => r.named).length, knowledge.length),
-      visibilityHits:  knowledge.filter(r => r.named).length,
+      visibilityScore: pct(knowledge.filter(r => r.hit).length, knowledge.length),
+      visibilityHits:  knowledge.filter(r => r.hit).length,
       visibilityRuns:  knowledge.length,
       // % of searched answers whose cited sources included the firm's domain
       citationShare:   pct(citation.filter(r => r.cited).length, citation.length),
       citationHits:    citation.filter(r => r.cited).length,
       citationRuns:    citation.length,
+      // Branded — the firm IS named in the question. Did the model know them,
+      // and did it treat their own site as the source about them?
+      brandedScore:    pct(bKnow.filter(r => r.hit).length, bKnow.length),
+      brandedHits:     bKnow.filter(r => r.hit).length,
+      brandedRuns:     bKnow.length,
+      brandedCitation: pct(bCite.filter(r => r.cited).length, bCite.length),
+      brandedCiteHits: bCite.filter(r => r.cited).length,
+      brandedCiteRuns: bCite.length,
       errors: errors.length,
       errorNote: errors.length ? (errors[0].error || '').slice(0, 160) : ''
     });
