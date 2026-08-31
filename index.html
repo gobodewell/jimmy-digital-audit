@@ -331,6 +331,7 @@ textarea{resize:vertical;min-height:60px}
           <div class="mc"><div class="ml">Known by name</div><div class="mv" id="m-aibrand">—</div><div class="mt">Answered rather than "no information"</div></div>
           <div class="mc"><div class="ml">Own site cited</div><div class="mv" id="m-aibcite">—</div><div class="mt">Their site vs third-party listings</div></div>
         </div>
+        <div id="aivis-evidence" style="margin-top:10px"></div>
         <div id="aivis-detail" style="font-size:11px;color:var(--text3);margin-top:8px"></div>
       </div>
 
@@ -1514,6 +1515,27 @@ async function runAIVisibilityScore(name, url, city) {
     // are named is a useful sanity check, but it is not visibility - a firm
     // nobody finds unprompted has not earned this box.
     if (result.visibilityScore > 0 || result.citationShare > 0) ck('c-cgpt');
+
+    // Show what the model said it knew. A percentage on its own is not
+    // checkable; the facts behind it are.
+    const ev = document.getElementById('aivis-evidence');
+    if (ev) {
+      let e = '';
+      if (result.brandedConflict) {
+        e += '<div style="font-size:11px;color:#b45309;margin-bottom:6px">' +
+             'Scored as not knowing them, yet every searched answer cited their own site. ' +
+             'Treat the "known by name" figure as unreliable for this firm and read the specifics below.</div>';
+      }
+      if ((result.brandedSpecifics || []).length) {
+        e += '<div style="font-size:11px;color:var(--text3)">What Claude said it knew: ' +
+             result.brandedSpecifics.map(s => escHtml(s)).join(' · ') + '</div>';
+      }
+      if (result.brandedFallbacks) {
+        e += '<div style="font-size:11px;color:var(--text3);margin-top:4px">' +
+             result.brandedFallbacks + ' of the by-name runs returned no verdict block and fell back to text matching.</div>';
+      }
+      ev.innerHTML = e;
+    }
 
     det.textContent =
       'Unprompted: ' + result.visibilityHits + '/' + result.visibilityRuns + ' named, ' +

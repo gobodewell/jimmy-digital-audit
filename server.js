@@ -854,23 +854,59 @@ function visibilityPrompts(city) {
 // basic question than the discovery prompts: not "would a prospect stumble on
 // them" but "does the model know who they are at all, and does it treat their
 // own site as the source about them".
+// Each branded prompt asks for a verdict alongside the prose, because inferring
+// "did it know them" from the prose does not work. The first version of this
+// matched disclaimer phrases anywhere in the answer, and a good answer routinely
+// ends with a narrow caveat — "I don't have anything on their AUM" — which
+// scored a detailed, accurate answer identically to "I have never heard of
+// them". The better the answer, the more likely it caveated, the more likely it
+// was marked as ignorance. The model reporting on its own knowledge, and listing
+// what it knew so a human can check, is both more reliable and auditable.
+const VERDICT_BLOCK = `
+
+After your answer, end with this EXACT block and nothing after it:
+---VERDICT---
+{"knewFirm": true or false, "specifics": ["one short fact you knew about THIS firm", "..."]}
+---END---
+Rules:
+- knewFirm is true if you could state anything specific about THIS firm from your
+  own knowledge — a location, a parent or custodian, a service line, a person.
+- Caveats about details you happen to lack (AUM, fees, regulatory history) do
+  NOT make it false. Lacking some details is not the same as not knowing them.
+- knewFirm is false only if you genuinely cannot place this firm at all, or the
+  only things you can say would be true of any advisory firm.
+- specifics: up to 4 short facts, drawn only from what you actually knew. Empty
+  array when knewFirm is false.`;
+
 function brandedPrompts(name, city) {
   const where = city ? ' in ' + city : '';
   return [
-    `What can you tell me about ${name}, a financial advisory firm${where}?`,
-    `Is ${name}${where} a reputable financial advisory firm? What are they known for?`,
-    `Who works at ${name}${where}, and what services do they offer?`
+    `What can you tell me about ${name}, a financial advisory firm${where}?` + VERDICT_BLOCK,
+    `Is ${name}${where} a reputable financial advisory firm? What are they known for?` + VERDICT_BLOCK,
+    `Who works at ${name}${where}, and what services do they offer?` + VERDICT_BLOCK
   ];
 }
 
-// Because a branded prompt contains the firm's name, "did the answer mention
-// them" is meaningless — it always does. What matters is whether the model
-// actually knew anything or disclaimed. This catches the usual disclaimer
-// shapes; it is a heuristic, not a certainty, so the panel reports the raw
-// counts alongside the percentage.
-const NO_KNOWLEDGE = /(i (do ?n'?t|do not) have|i'?m not familiar|not familiar with|don'?t have (any |specific |reliable )?(information|details)|no (specific |reliable |publicly available )?information|could ?n'?t find|could not find|unable to find|not aware of|i don'?t know|no record of|can ?n'?t find|cannot find|limited information)/i;
-function recognised(text) {
-  return !!text && !NO_KNOWLEDGE.test(text);
+// Fallback only, for when the verdict block is missing or unparseable. Narrowed
+// so it cannot repeat the original mistake: a disclaimer is only read as "does
+// not know them" in a SHORT answer. A long answer full of specifics is not
+// ignorance, whatever caveat it happens to close with.
+const NO_KNOWLEDGE = /(i (do ?n'?t|do not) have|i'?m not familiar|not familiar with|don'?t have (any |specific |reliable )?(information|details)|no (specific |reliable |publicly available )?information|could ?n'?t find|could not find|unable to find|not aware of|i don'?t know|no record of|can ?n'?t find|cannot find)/i;
+const SHORT_ANSWER = 400;
+
+function readVerdict(text) {
+  const m = /---VERDICT---([\s\S]*?)---END---/.exec(text || '');
+  if (m) {
+    try {
+      const v = JSON.parse(m[1].trim());
+      if (typeof v.knewFirm === 'boolean') {
+        return { knew: v.knewFirm, specifics: (v.specifics || []).slice(0, 4).map(String), source: 'verdict' };
+      }
+    } catch (_) { /* fall through to the heuristic */ }
+  }
+  const prose = (text || '').replace(/---VERDICT---[\s\S]*/, '').trim();
+  const knew = !(prose.length < SHORT_ANSWER && NO_KNOWLEDGE.test(prose));
+  return { knew, specifics: [], source: 'heuristic' };
 }
 
 // Loose name match — case, punctuation and legal suffixes ignored, so
@@ -964,12 +1000,15 @@ app.post('/ai/visibility', async (req, res) => {
       finished++;
       send({ type: 'progress', done: finished, total: jobs.length });
       if (out.error) return { ...job, error: out.error };
+      const v = job.kind === 'branded' ? readVerdict(out.text) : { knew: false, specifics: [], source: null };
       return {
         ...job,
         // A discovery answer counts if it names the firm unprompted. A branded
         // answer already contains the name, so it counts only if the model
         // knew something rather than disclaiming.
-        hit: job.kind === 'branded' ? recognised(out.text) : mentionsName(out.text, name),
+        hit: job.kind === 'branded' ? v.knew : mentionsName(out.text, name),
+        specifics: job.kind === 'branded' ? v.specifics : [],
+        verdictSource: job.kind === 'branded' ? v.source : null,
         cited: job.mode === 'citation' ? citedDomains(out.blocks).has(want) : false
       };
     });
@@ -1005,6 +1044,14 @@ app.post('/ai/visibility', async (req, res) => {
       brandedCitation: pct(bCite.filter(r => r.cited).length, bCite.length),
       brandedCiteHits: bCite.filter(r => r.cited).length,
       brandedCiteRuns: bCite.length,
+      // What the model actually said it knew, so the number can be checked
+      // rather than taken on faith.
+      brandedSpecifics: [...new Set(bKnow.concat(bCite).flatMap(r => r.specifics || []))].slice(0, 6),
+      brandedFallbacks: bKnow.filter(r => r.verdictSource === 'heuristic').length,
+      // A firm the model cites but is scored as not knowing is a contradiction,
+      // and it was exactly this shape that exposed the first scoring bug.
+      brandedConflict: pct(bKnow.filter(r => r.hit).length, bKnow.length) === 0 &&
+                       pct(bCite.filter(r => r.cited).length, bCite.length) > 0,
       errors: errors.length,
       errorNote: errors.length ? (errors[0].error || '').slice(0, 160) : ''
     });
