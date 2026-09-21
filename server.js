@@ -26,7 +26,11 @@ function pickModel(requested) {
   return /^[a-z0-9][a-z0-9.\-]{2,63}$/.test(m) ? m : AI_MODEL;
 }
 
-const AUDIT_KEY     = process.env.AUDIT_KEY      || '';   // shared secret the app must send
+// Trimmed deliberately. A key pasted into Render's dashboard easily picks up a
+// trailing space or newline; HTTP strips that whitespace from the header in
+// transit, so the two would never match and every request would 401 with no
+// clue why. The same trim is applied to the key the app sends.
+const AUDIT_KEY     = (process.env.AUDIT_KEY   || '').trim();   // shared secret the app must send
 const ANTHROPIC_KEY = process.env.ANTHROPIC_KEY  || '';   // AI reviews, server-side
 const AIRTABLE_TOKEN= process.env.AIRTABLE_TOKEN || '';   // Airtable push, server-side
 
@@ -42,7 +46,7 @@ app.use(express.json());
 app.use((req, res, next) => {
   if (req.method === 'OPTIONS' || req.path === '/health') return next();
   if (!AUDIT_KEY) return next();
-  if ((req.get('X-Audit-Key') || '') !== AUDIT_KEY) {
+  if ((req.get('X-Audit-Key') || '').trim() !== AUDIT_KEY) {
     return res.status(401).json({ error: 'unauthorized' });
   }
   next();
@@ -240,11 +244,23 @@ app.get('/site/lighthouse', async (req, res) => {
     const isMobile    = viewportAudit != null
                       ? viewportAudit >= 0.9
                       : (perfScore != null && perfScore >= 50);
-    const isIndexable = (audits['is-crawlable']?.score ?? 0) >= 0.9;
-    const hasMeta     = (audits['meta-description']?.score ?? 0) >= 0.9;
-    const hasSitemap  = (audits['robots-txt']?.score ?? 0) >= 0.9;
-    const speedPass   = speed != null && parseFloat(speed) < 3;
-    const sizePass    = sizeMB != null && parseFloat(sizeMB) < 3;
+    // `?? 0` here used to turn a missing audit into a failed one: Lighthouse
+    // reports score `null` when it could not evaluate a check, and that null
+    // became `0 >= 0.9` -> false -> an unchecked box, indistinguishable from a
+    // real failure. Absence of evidence is not evidence of absence, so an
+    // unevaluated audit now returns null and the caller decides what to do.
+    const passes = id => { const s = audits[id]?.score; return s == null ? null : s >= 0.9; };
+    const isIndexable = passes('is-crawlable');
+    const hasMeta     = passes('meta-description');
+    // Named for what it actually measures. This is Lighthouse's robots-txt
+    // audit -- whether robots.txt parses -- which says nothing about whether a
+    // sitemap exists. It was called hasSitemap, which invited exactly that
+    // misreading; the sitemap box is driven by the real /sitemap.xml fetch.
+    const robotsTxtValid = passes('robots-txt');
+    // These used to read false when the metric was missing, which is the same
+    // conflation as the is-crawlable bug: no measurement scored as a failure.
+    const speedPass   = speed  == null ? null : parseFloat(speed)  < 3;
+    const sizePass    = sizeMB == null ? null : parseFloat(sizeMB) < 3;
 
     // Oversized images
     const imgItems  = audits['uses-optimized-images']?.details?.items || 
@@ -290,15 +306,17 @@ app.get('/site/lighthouse', async (req, res) => {
       .sort((a, b) => b.kb - a.kb);
 
     // Google Analytics — check third-party summary
-    const thirdParty = audits['third-party-summary']?.details?.items || [];
-    const hasGA = thirdParty.some(i =>
+    // If Lighthouse did not produce a third-party summary we have not looked
+    // for Analytics at all, so we cannot say it is absent.
+    const thirdParty = audits['third-party-summary']?.details?.items;
+    const hasGA = !thirdParty ? null : thirdParty.some(i =>
       /google.tag|google.analytics|googletagmanager/i.test(i.entity || '')
     );
 
     res.json({
       strategy,
       speed, sizeMB, perfScore, seoScore,
-      isHttps, isMobile, isIndexable, hasMeta, hasSitemap,
+      isHttps, isMobile, isIndexable, hasMeta, robotsTxtValid,
       speedPass, sizePass, imagesOk, imgList, hasGA,
       heavy, hosts, byType
     });
@@ -308,6 +326,21 @@ app.get('/site/lighthouse', async (req, res) => {
     res.status(500).json({ error: msg });
   }
 });
+
+// Read every robots directive the page declares. Attribute order and quoting
+// vary in the wild, so match the tag first and pull name/content out of it
+// rather than assuming a fixed shape.
+function readRobotsMeta(html) {
+  const out = [];
+  for (const m of String(html).matchAll(/<meta\b[^>]*>/gi)) {
+    const tag  = m[0];
+    const name = (/\bname\s*=\s*["']?([^"'\s>]+)/i.exec(tag) || [])[1] || '';
+    if (!/^(robots|googlebot)$/i.test(name)) continue;
+    const content = (/\bcontent\s*=\s*["']([^"']*)["']/i.exec(tag) || [])[1] || '';
+    out.push({ name: name.toLowerCase(), content: content.trim() });
+  }
+  return out;
+}
 
 // ── 3. Sitemap check — direct HTTP ping ──────────────────────────────────────
 app.get('/site/check', async (req, res) => {
@@ -336,6 +369,39 @@ app.get('/site/check', async (req, res) => {
 
     // Check HTTPS
     results.https = url.startsWith('https');
+
+    // Indexability, measured rather than inferred. Only two things actually
+    // keep a page out of an index: a robots meta tag on the page, and the
+    // X-Robots-Tag response header. Both are readable in one request, so the
+    // audit reads them instead of depending on PageSpeed having evaluated its
+    // is-crawlable audit -- and it records WHY, so an unchecked box can be
+    // explained instead of just asserted.
+    try {
+      const pr = await fetch(url, { headers: UA, redirect: 'follow', signal: AbortSignal.timeout(15000) });
+      results.homeStatus = pr.status;
+      if (!pr.ok) {
+        results.indexable = null;
+        results.indexableNote = 'homepage returned HTTP ' + pr.status;
+      } else {
+        const xRobots = (pr.headers.get('x-robots-tag') || '').trim();
+        const metas   = readRobotsMeta((await pr.text()).slice(0, 300000));
+        const blockers = [];
+        if (/\bnoindex\b/i.test(xRobots)) blockers.push('X-Robots-Tag: ' + xRobots);
+        for (const m of metas) {
+          if (/\bnoindex\b/i.test(m.content)) blockers.push('<meta name="' + m.name + '" content="' + m.content + '">');
+        }
+        results.indexable        = blockers.length === 0;
+        results.indexableBlocked = blockers;
+        results.robotsMeta       = metas.map(m => m.name + ': ' + m.content);
+        results.xRobotsTag       = xRobots;
+        results.indexableNote    = blockers.length ? 'blocked by ' + blockers.join(' and ')
+                                 : metas.length    ? 'declares ' + results.robotsMeta.join(', ')
+                                                   : 'no robots directive found, which means indexable';
+      }
+    } catch (e) {
+      results.indexable = null;
+      results.indexableNote = 'could not fetch the homepage: ' + e.message;
+    }
 
     // Check robots.txt — GET + UA, same reasons as the sitemap check
     try {
@@ -616,9 +682,27 @@ app.get('/gbp/info', async (req, res) => {
       phone:       biz.phone        || '',
       rating:      biz.rating?.value               || null,
       reviewCount: biz.rating?.votes_count         || 0,
-      claimed:     biz.is_claimed                  || false,
+      // DataForSEO returns null for is_claimed when it does not know. `|| false`
+      // turned that into a confident "Unclaimed", which is a different claim
+      // about the business than "we could not tell". Null now survives to the
+      // caller, which marks the box unmeasured rather than failed.
+      claimed:     biz.is_claimed == null ? null : !!biz.is_claimed,
+      // Deliberately NOT given the same null treatment as is_claimed. A firm
+      // with no logo is the ordinary case and the field is simply absent, so
+      // reading absence as "unknown" would turn a real, common finding into a
+      // shrug -- the opposite error, and it would bury the unmeasured list in
+      // noise. is_claimed is different: DataForSEO documents null there as
+      // "not determined", which is genuinely not the same as unclaimed.
       hasLogo:     !!biz.logo,                     // the real logo field
       hasPhotos:   !!(biz.main_image || (biz.images && biz.images.length > 0)),
+      // The profile's own description. Absent key means DataForSEO did not
+      // return the field at all, which is unmeasured -- treating that as "no
+      // description" would fail every firm on an 8-point check. An explicit
+      // empty value is a real finding: the box is there and nothing is in it.
+      description:    biz.description || '',
+      hasDescription: biz.description === undefined
+                        ? null
+                        : !!(biz.description && String(biz.description).trim()),
       category:    biz.category                    || '',
       url:         biz.url                         || ''
     });
@@ -634,7 +718,10 @@ async function sfGet(path) {
   if (!r.ok) {
     const t = await r.text();
     console.error('SocialFetch ' + r.status + ' ' + path + ':', t.slice(0, 150));
-    return null;
+    // Returning null here made a broken lookup indistinguishable from a firm
+    // that simply has no profile on that platform -- the box went unticked
+    // either way and the UI blamed the handle.
+    return { error: 'SocialFetch HTTP ' + r.status };
   }
   return r.json();
 }
@@ -653,37 +740,29 @@ app.get('/social/profiles', async (req, res) => {
   const out   = {};
   const calls = [];
 
-  if (fb) {
-    const url = cleanHandle(fb, 'https://www.facebook.com/');
-    calls.push(
-      sfGet('/facebook/profiles?url=' + encodeURIComponent(url))
-        .then(d => { if (d) out.facebook = d; })
-        .catch(e => console.error('FB:', e.message))
-    );
-  }
-  if (li) {
-    const url = cleanHandle(li, 'https://www.linkedin.com/company/');
-    calls.push(
-      sfGet('/linkedin/companies?url=' + encodeURIComponent(url))
-        .then(d => { if (d) out.linkedin = d; })
-        .catch(e => console.error('LI:', e.message))
-    );
-  }
+  // One shape for all four, so a lookup failure is recorded the same way
+  // everywhere instead of being logged and dropped.
+  const lookup = (key, path) => calls.push(
+    sfGet(path)
+      .then(d => {
+        if (d && d.error) out[key + 'Error'] = d.error;
+        else if (d)       out[key] = d;
+        else              out[key + 'Error'] = 'no response';
+      })
+      .catch(e => { out[key + 'Error'] = e.message; console.error(key + ':', e.message); })
+  );
+
+  if (fb) lookup('facebook',
+    '/facebook/profiles?url=' + encodeURIComponent(cleanHandle(fb, 'https://www.facebook.com/')));
+  if (li) lookup('linkedin',
+    '/linkedin/companies?url=' + encodeURIComponent(cleanHandle(li, 'https://www.linkedin.com/company/')));
   if (ig) {
     const handle = decodeURIComponent(ig).replace(/^@/, '').replace(/.*instagram\.com\//, '').replace(/\/+$/, '');
-    calls.push(
-      sfGet('/instagram/profiles/' + encodeURIComponent(handle))
-        .then(d => { if (d) out.instagram = d; })
-        .catch(e => console.error('IG:', e.message))
-    );
+    lookup('instagram', '/instagram/profiles/' + encodeURIComponent(handle));
   }
   if (yt) {
     const handle = decodeURIComponent(yt).replace(/^@/, '').replace(/.*youtube\.com\/@?/, '').replace(/\/+$/, '');
-    calls.push(
-      sfGet('/youtube/channel?url=' + encodeURIComponent('https://www.youtube.com/@' + handle))
-        .then(d => { if (d) out.youtube = d; })
-        .catch(e => console.error('YT:', e.message))
-    );
+    lookup('youtube', '/youtube/channel?url=' + encodeURIComponent('https://www.youtube.com/@' + handle));
   }
 
   await Promise.allSettled(calls);
@@ -950,6 +1029,73 @@ async function mapLimit(items, limit, fn) {
   }));
   return results;
 }
+
+// ── Cover summary — written from the audit, never from a fresh look ─────────
+// The one piece of per-firm prose in the report. It is generated ONLY from the
+// results this audit produced: the scores, the failed KPIs and the metric
+// values. Asking the model to go and look at the firm again would eventually
+// produce a paragraph that contradicts the checkboxes printed beside it, and
+// the reader would believe the paragraph.
+app.post('/ai/summary', async (req, res) => {
+  const { firm, scores, failed, metrics, model } = req.body || {};
+  if (!firm)   return res.status(400).json({ error: 'firm required' });
+  if (!scores) return res.status(400).json({ error: 'scores required' });
+  if (!ANTHROPIC_KEY) return res.status(500).json({ error: 'ANTHROPIC_KEY not set' });
+
+  const lines = [];
+  lines.push(`Firm: ${firm}`);
+  lines.push(`Overall ${scores.overall}/100 (${scores.band}). ` +
+             `Visibility ${scores.v}, Website ${scores.w}, Social ${scores.s}.`);
+  if (scores.aeoTotal) {
+    // Answer-engine coverage is a count, not a score, and is given as one so
+    // the summary cannot describe it as a fourth grade.
+    lines.push(`Answer-engine KPIs passed: ${scores.aeoPassed} of ${scores.aeoTotal}.`);
+  }
+  if (scores.prior) {
+    lines.push(`Previous audit scored ${scores.prior.overall}; the change is ${scores.prior.delta >= 0 ? '+' : ''}${scores.prior.delta}.`);
+  }
+  if (Array.isArray(failed) && failed.length) {
+    lines.push('Failed checks, worst impact first:');
+    failed.slice(0, 12).forEach(f => lines.push(`  - ${f.label} (${f.pts} pts, ${f.cat})`));
+  }
+  if (metrics && Object.keys(metrics).length) {
+    lines.push('Measured values:');
+    for (const [k, v] of Object.entries(metrics)) {
+      if (v !== null && v !== undefined && v !== '') lines.push(`  - ${k}: ${v}`);
+    }
+  }
+
+  const prompt =
+`Below are the results of a digital marketing audit of a financial advisory firm.
+
+${lines.join('\n')}
+
+Write the summary paragraph for the cover of the report. Rules:
+- 3 to 5 sentences, addressed to the firm as "your".
+- Say what is working first, then name the single biggest thing holding the
+  score back, then say that fixing it is achievable.
+- Use ONLY the facts above. Do not invent measurements, competitors, numbers,
+  or anything about the firm that is not listed. If something is not in the
+  data, do not mention it.
+- No projected results, no revenue or lead claims, no guarantees — this is read
+  by a regulated firm and may reach their compliance officer.
+- Plain prose. No headings, no bullets, no preamble. Return the paragraph only.`;
+
+  try {
+    const out = await claudeOnce({
+      messages: [{ role: 'user', content: prompt }],
+      maxTokens: 700,
+      model
+    });
+    if (out.error) return res.status(502).json({ error: out.error });
+    const text = (out.text || '').trim();
+    if (!text) return res.status(502).json({ error: 'no summary returned' });
+    res.json({ summary: text, model: pickModel(model) });
+  } catch (e) {
+    console.error('AI summary error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
 
 app.post('/ai/visibility', async (req, res) => {
   if (!ANTHROPIC_KEY) return res.status(500).json({ error: 'Anthropic not configured' });

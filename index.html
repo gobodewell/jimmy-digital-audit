@@ -6,6 +6,11 @@
 <title>GrowthLine Digital Audit</title>
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<!-- PDF report. pdfmake renders it; report-assets.js carries the Cetera
+     typefaces, cover and wordmark. Both are checked for before the download
+     runs, so a failed load reports itself instead of producing a broken file. -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.2.20/pdfmake.min.js"></script>
+<script src="assets/report-assets.js"></script>
 <style>
 :root {
   --bg:       #f4f5f8;
@@ -127,6 +132,14 @@ textarea{resize:vertical;min-height:60px}
 .sc-ch{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px}
 .sc-g{font-size:32px;font-weight:600;font-family:'DM Mono',monospace;color:var(--text3)}
 .sc-g.A{color:var(--green)}.sc-g.B{color:var(--blue)}.sc-g.C{color:var(--amber)}.sc-g.D{color:var(--red)}
+.sc-b{font-size:10px;margin-top:3px;font-weight:600;letter-spacing:.03em}
+.sc-b.A{color:var(--green)}.sc-b.B{color:var(--blue)}.sc-b.C{color:var(--amber)}.sc-b.D{color:var(--red)}
+.sc-r{font-size:9px;color:var(--text3);margin-top:2px;font-family:'DM Mono',monospace}
+.adj{display:flex;align-items:center;gap:8px;padding:10px 12px;border-top:1px solid var(--line);font-size:12px;flex-wrap:wrap}
+.adj label{color:var(--text2);white-space:nowrap}
+.adj input[type=number]{width:56px;padding:4px 6px;border:1px solid var(--line);border-radius:5px;font-family:'DM Mono',monospace;font-size:12px;text-align:center}
+.adj input[type=text]{flex:1;min-width:160px;padding:4px 8px;border:1px solid var(--line);border-radius:5px;font-size:12px}
+.adj .warn{color:var(--red);font-size:11px}
 
 /* AI panel */
 .aip{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);margin-bottom:14px;overflow:hidden}
@@ -314,6 +327,11 @@ textarea{resize:vertical;min-height:60px}
         <div id="dirs-body"></div>
       </div>
 
+      <div id="crawl-block" class="card" style="display:none">
+        <div class="ct">Crawlability — what the site tells search engines</div>
+        <div id="crawl-body"></div>
+      </div>
+
       <div id="schema-block" class="card" style="display:none">
         <div class="ct">Structured data — what the homepage declares about itself</div>
         <div id="schema-body"></div>
@@ -340,6 +358,8 @@ textarea{resize:vertical;min-height:60px}
         <div class="cl">
           <label class="ci"><input type="checkbox" id="c-gbp-f" onchange="recalc()"/><span class="ci-l">GBP listing visible<span class="aeo">AEO</span></span></label>
           <label class="ci"><input type="checkbox" id="c-gbp-v" onchange="recalc()"/><span class="ci-l">GBP verified/claimed<span class="aeo">AEO</span></span></label>
+          <label class="ci"><input type="checkbox" id="c-gbp-d" onchange="recalc()"/><span class="ci-l">GBP business description<span class="aeo">AEO</span></span></label>
+          <label class="ci"><input type="checkbox" id="c-gbp-p" onchange="recalc()"/><span class="ci-l">Photos on GBP</span></label>
           <label class="ci"><input type="checkbox" id="c-gbp-l" onchange="recalc()"/><span class="ci-l">Logo on GBP</span></label>
           <label class="ci"><input type="checkbox" id="c-gbp-r" onchange="recalc()"/><span class="ci-l">Has GBP reviews<span class="aeo">AEO</span></span></label>
           <label class="ci"><input type="checkbox" id="c-idx" onchange="recalc()"/><span class="ci-l">Site indexable<span class="aeo">AEO</span></span></label>
@@ -347,11 +367,16 @@ textarea{resize:vertical;min-height:60px}
           <label class="ci"><input type="checkbox" id="c-meta" onchange="recalc()"/><span class="ci-l">Meta descriptions<span class="aeo">AEO</span></span></label>
           <label class="ci"><input type="checkbox" id="c-ga" onchange="recalc()"/><span class="ci-l">Google Analytics</span></label>
           <label class="ci"><input type="checkbox" id="c-da5" onchange="recalc()"/><span class="ci-l">DA above 5<span class="aeo">AEO</span></span></label>
-          <label class="ci"><input type="checkbox" id="c-cgpt" onchange="recalc()"/><span class="ci-l">Named or cited by Claude<span class="aeo">AEO</span></span></label>
+          <label class="ci"><input type="checkbox" id="c-cgpt" onchange="recalc()"/><span class="ci-l">AI surfaces the firm unprompted<span class="aeo">AEO</span></span></label>
           <label class="ci"><input type="checkbox" id="c-rcta" onchange="recalc()"/><span class="ci-l">Review CTA on site<span class="aeo">AEO</span></span></label>
           <label class="ci"><input type="checkbox" id="c-awd" onchange="recalc()"/><span class="ci-l">Industry awards shown</span></label>
-          <label class="ci"><input type="checkbox" id="c-sch-biz" onchange="recalc()"/><span class="ci-l">Business schema markup<span class="aeo">AEO</span></span></label>
-          <label class="ci"><input type="checkbox" id="c-sch-loc" onchange="recalc()"/><span class="ci-l">Location schema markup<span class="aeo">AEO</span></span></label>
+          <label class="ci"><input type="checkbox" id="c-aicite" onchange="recalc()"/><span class="ci-l">AI knows the firm by name<span class="aeo">AEO</span></span></label>
+        </div>
+        <div class="adj">
+          <label for="adj-v">Manual credit</label>
+          <input type="number" id="adj-v" min="0" max="10" placeholder="0" oninput="recalc()"/>
+          <input type="text" id="adjr-v" placeholder="Reason — what earned it (required)" oninput="recalc()"/>
+          <span id="adjw-v" class="warn"></span>
         </div>
       </div>
       <div class="fg"><label>Visibility notes</label><textarea id="n-vis" placeholder="e.g. GBP listed under wrong name..."></textarea></div>
@@ -392,6 +417,13 @@ textarea{resize:vertical;min-height:60px}
           <label class="ci"><input type="checkbox" id="c-hdl" onchange="recalc()"/><span class="ci-l">Benefit-based headlines</span></label>
           <label class="ci"><input type="checkbox" id="c-cta" onchange="recalc()"/><span class="ci-l">Descriptive CTAs</span></label>
           <label class="ci"><input type="checkbox" id="c-res" onchange="recalc()"/><span class="ci-l">Blog/resources section<span class="aeo">AEO</span></span></label>
+          <label class="ci"><input type="checkbox" id="c-sch" onchange="recalc()"/><span class="ci-l">Schema markup<span class="aeo">AEO</span></span></label>
+        </div>
+        <div class="adj">
+          <label for="adj-w">Manual credit</label>
+          <input type="number" id="adj-w" min="0" max="10" placeholder="0" oninput="recalc()"/>
+          <input type="text" id="adjr-w" placeholder="Reason — what earned it (required)" oninput="recalc()"/>
+          <span id="adjw-w" class="warn"></span>
         </div>
       </div>
       <div class="fg"><label>Website notes</label><textarea id="n-web" placeholder="e.g. 3 oversized images found — fix before final score..."></textarea></div>
@@ -441,6 +473,12 @@ textarea{resize:vertical;min-height:60px}
           <label class="ci"><input type="checkbox" id="c-tag" onchange="recalc()"/><span class="ci-l">Tagging other pages</span></label>
           <label class="ci"><input type="checkbox" id="c-lgp" onchange="recalc()"/><span class="ci-l">Logo as profile pic</span></label>
         </div>
+        <div class="adj">
+          <label for="adj-s">Manual credit</label>
+          <input type="number" id="adj-s" min="0" max="10" placeholder="0" oninput="recalc()"/>
+          <input type="text" id="adjr-s" placeholder="Reason — what earned it (required)" oninput="recalc()"/>
+          <span id="adjw-s" class="warn"></span>
+        </div>
       </div>
       <div class="fg"><label>Social notes</label><textarea id="n-soc" placeholder="e.g. No YouTube found. Instagram not posting frequently..."></textarea></div>
     </div>
@@ -448,10 +486,41 @@ textarea{resize:vertical;min-height:60px}
     <!-- EXPORT TAB -->
     <div class="tp" id="tp-export">
       <div class="sr">
-        <div class="sc"><div class="sc-ch">Visibility</div><div class="sc-g" id="sg-v">—</div></div>
-        <div class="sc"><div class="sc-ch">Website</div><div class="sc-g" id="sg-w">—</div></div>
-        <div class="sc"><div class="sc-ch">Social</div><div class="sc-g" id="sg-s">—</div></div>
+        <div class="sc"><div class="sc-ch">Overall</div><div class="sc-g" id="sg-o">—</div><div class="sc-b" id="sb-o"></div><div class="sc-r" id="sr-o"></div><div class="sc-r" id="sd-o" style="font-weight:600"></div></div>
+        <div class="sc"><div class="sc-ch">Visibility</div><div class="sc-g" id="sg-v">—</div><div class="sc-b" id="sb-v"></div><div class="sc-r" id="sr-v"></div></div>
+        <div class="sc"><div class="sc-ch">Website</div><div class="sc-g" id="sg-w">—</div><div class="sc-b" id="sb-w"></div><div class="sc-r" id="sr-w"></div></div>
+        <div class="sc"><div class="sc-ch">Social</div><div class="sc-g" id="sg-s">—</div><div class="sc-b" id="sb-s"></div><div class="sc-r" id="sr-s"></div></div>
       </div>
+      <div id="unk-note" style="display:none;font-size:12px;color:#b45309;margin:-6px 0 14px"></div>
+      <div class="card">
+        <div class="ct">Cover summary</div>
+        <div id="cover-summary" style="font-size:13px;line-height:1.6;color:var(--text2);min-height:40px">Not written yet — click below once the audit is complete.</div>
+        <div class="btn-row" style="margin-top:12px">
+          <button class="btn btn-ghost" onclick="runCoverSummary().then(renderApproval)">Write cover summary</button>
+        </div>
+        <div style="font-size:11px;color:var(--text3);margin-top:8px;line-height:1.5">Written from this audit's results only — the scores, the failed checks and the measured values. It cannot mention anything the audit did not measure.</div>
+      </div>
+      <div class="card">
+        <div class="ct">Approve &amp; download the report</div>
+        <div style="font-size:12px;color:var(--text2);line-height:1.55;margin-bottom:12px">
+          A person signs off before the client document exists. Two things need a human eye: the
+          <b><span id="appr-judgment-n">0</span> checks based on Claude's reading of the site</b> — those are
+          judgments, not measurements, and they are the ones a client may argue with — and anything the
+          audit could not measure.
+        </div>
+        <div class="fr fr2">
+          <div class="fg"><label>Prepared by</label><input type="text" id="preparer" placeholder="Your name" oninput="renderApproval()"/></div>
+        </div>
+        <div class="cl" style="margin-top:4px">
+          <label class="ci" style="align-items:flex-start"><input type="checkbox" id="ack-judgment" onchange="renderApproval()"/><span class="ci-l">I have reviewed the checks based on Claude's reading of the site and corrected any that are wrong.</span></label>
+        </div>
+        <div id="appr-unmeasured" class="cl" style="display:none"></div>
+        <div id="appr-msg" style="font-size:12px;color:var(--text3);margin-top:10px;line-height:1.5"></div>
+        <div class="btn-row" style="margin-top:12px">
+          <button class="btn btn-green" id="dlBtn" onclick="downloadReportPDF()" disabled>Download PDF</button>
+        </div>
+      </div>
+
       <div class="card">
         <div class="ct">Push to Airtable</div>
         <div id="at-msg" style="font-size:13px;color:var(--text2);margin-bottom:12px">Complete the audit tabs then push to Airtable.</div>
@@ -636,13 +705,32 @@ const STEP_DEFS = [
 ];
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
-window.onload = () => { loadSettings(); renderHist(); recalc(); };
+window.onload = () => { loadSettings(); renderHist(); recalc(); renderApproval(); };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const ls  = (k,v) => localStorage.setItem(k,v);
 const lg  = k     => localStorage.getItem(k) || '';
 const fv  = k     => lg('fld_'+k) || k;
-const ck  = id    => { const e=document.getElementById(id); if(e){e.checked=true; recalc();} };
+const ck  = id    => { const e=document.getElementById(id); if(e){e.checked=true; UNK.delete(id); recalc();} };
+
+// Checks we tried to run and could not. An unticked box means "we measured
+// this and it failed"; without somewhere to record "we never got an answer",
+// the two are the same pixel. Every source that can come back null or error
+// calls unk() so the audit can say which is which.
+const UNK = new Map();
+// Read the label off the checkbox itself rather than keeping a second list
+// that can drift out of step with the markup.
+const ckLabel = id => {
+  const el = document.getElementById(id);
+  const sp = el && el.parentElement && el.parentElement.querySelector('.ci-l');
+  return sp ? sp.textContent.replace(/AEO\s*$/, '').trim() : id;
+};
+const unk = (id, why) => {
+  const e = document.getElementById(id);
+  if (!e || e.checked) return;          // a later source may have answered it
+  UNK.set(id, why || 'not measured');
+  recalc();
+};
 const sv  = (id,v)=> {
   const e=document.getElementById(id);
   if(!e) return;
@@ -710,7 +798,9 @@ function updateKeyStatus() {
 function pf(path, opts) {
   opts = opts || {};
   const proxy   = lg('cfg_proxy') || DEFAULT_PROXY;
-  const key     = lg('cfg_audit') || '';
+  // Trimmed for the same reason the proxy trims it: a key pasted into the
+  // settings field with a stray space would 401 every request with no clue why.
+  const key     = (lg('cfg_audit') || '').trim();
   const headers = Object.assign({}, opts.headers || {});
   if (key) headers['X-Audit-Key'] = key;
   return fetch(proxy + path, Object.assign({}, opts, { headers }));
@@ -798,6 +888,35 @@ async function runAudit() {
   st('aireview');
 }
 
+// Show the evidence behind the two crawl boxes. An unchecked box with no
+// reason is not a finding, it is just an absence -- and the audit was
+// previously unable to tell "we found a noindex" apart from "we never looked".
+function renderCrawl(d) {
+  const block = document.getElementById('crawl-block');
+  const body  = document.getElementById('crawl-body');
+  if (!block || !body) return;
+  block.style.display = '';
+  const row = (label, state, detail) => {
+    const colour = state === 'yes' ? 'var(--green)' : state === 'no' ? 'var(--red)' : '#b45309';
+    const mark   = state === 'yes' ? 'yes' : state === 'no' ? 'no' : 'unknown';
+    return '<div style="display:flex;gap:10px;padding:6px 0;border-bottom:1px solid var(--line)">' +
+           '<div style="min-width:64px;font-size:11px;font-weight:600;color:' + colour + '">' + mark + '</div>' +
+           '<div style="font-size:12px"><b>' + escHtml(label) + '</b>' +
+           (detail ? '<div style="font-size:11px;color:var(--text3);margin-top:2px">' + escHtml(detail) + '</div>' : '') +
+           '</div></div>';
+  };
+  let h = '';
+  h += row('Indexable by search engines',
+           d.indexable === true ? 'yes' : d.indexable === false ? 'no' : 'unknown',
+           d.indexableNote || '');
+  h += row('Sitemap at /sitemap.xml',
+           d.sitemap === true ? 'yes' : 'no',
+           d.sitemapError ? 'fetch failed: ' + d.sitemapError
+             : d.sitemapStatus ? d.sitemapUrl + ' returned HTTP ' + d.sitemapStatus
+             : d.sitemapUrl || '');
+  body.innerHTML = h;
+}
+
 // ── Direct site checks - sitemap, HTTPS ──────────────────────────────────────
 async function runSiteCheck(url) {
   const proxy = lg('cfg_proxy') || DEFAULT_PROXY;
@@ -807,6 +926,14 @@ async function runSiteCheck(url) {
     console.log('SITE CHECK:', JSON.stringify(d));
     if (d.sitemap) ck('c-sm');
     if (d.https)   ck('c-https');
+    // Indexability now comes from reading the page's own robots directives.
+    // PageSpeed's is-crawlable audit still runs and can also tick this box,
+    // but it is no longer the only thing that can, and a null from it no
+    // longer reads as "not indexable".
+    if (d.indexable === true) ck('c-idx');
+    else if (d.indexable == null) unk('c-idx', d.indexableNote || 'could not read the homepage');
+    if (d.sitemap !== true && d.sitemapError) unk('c-sm', 'sitemap fetch failed: ' + d.sitemapError);
+    renderCrawl(d);
   } catch(e) {
     console.error('Site check error:', e.message);
   }
@@ -933,8 +1060,10 @@ async function runSchema(url) {
 
     // Business type declared at all ticks the first box; the panel carries the
     // stronger/weaker distinction (FinancialService vs a generic Organization).
-    if (d.hasBusinessType) ck('c-sch-biz');
-    if (d.hasAddress)      ck('c-sch-loc');
+    // One KPI now: the design combines them, and a firm that publishes an
+    // organisation type without an address is rare enough not to need its own row.
+    if (d.hasBusinessType && d.hasAddress) ck('c-sch');
+    else if (d.found === false && d.note) unk('c-sch', d.note);
 
     if (!d.found) {
       body.innerHTML = '<div style="font-size:13px;color:#dc2626;font-weight:600">No structured data found on the homepage.</div>' +
@@ -1014,9 +1143,12 @@ async function runLighthouse(url) {
     // sitemap is driven by the real /sitemap.xml fetch in runSiteCheck, not by
     // robots.txt presence — so don't set c-sm here.
     if (d.speedPass)   ck('c-spd');
+    else if (d.speedPass == null) unk('c-spd', 'PageSpeed returned no LCP');
     if (d.sizePass)    ck('c-szp');
+    else if (d.sizePass == null)  unk('c-szp', 'PageSpeed returned no page weight');
     if (d.imagesOk)    ck('c-img');
     if (d.hasGA)       ck('c-ga');
+    else if (d.hasGA == null)     unk('c-ga',  'PageSpeed returned no third-party summary');
 
     renderPageWeight(d);
     setStep('lighthouse', 'done', (d.speed || d.sizeMB) ? '' : 'no PageSpeed metrics returned');
@@ -1061,6 +1193,11 @@ async function runGBP(name, url, city) {
       // reportable state, and without this box it looked like no listing.
       ck('c-gbp-f');
       if (d.claimed)          ck('c-gbp-v');
+      else if (d.claimed == null) unk('c-gbp-v', 'DataForSEO did not report claim status');
+      if (d.hasDescription)   ck('c-gbp-d');
+      else if (d.hasDescription == null) unk('c-gbp-d', 'DataForSEO did not return a description field');
+      if (d.hasPhotos)        ck('c-gbp-p');
+      else if (d.hasPhotos == null) unk('c-gbp-p', 'no photo fields in the listing data');
       if (d.hasLogo)          ck('c-gbp-l');
       if (d.reviewCount > 0)  ck('c-gbp-r');
     }
@@ -1072,7 +1209,8 @@ async function runGBP(name, url, city) {
     const warn = d.verified ? '' : '<span class="badge br">Unverified match — not scored</span>&nbsp;';
     details.innerHTML = warn +
       '<span class="badge bgr">'+(d.title||'—')+'</span>&nbsp;' +
-      '<span class="badge '+(d.claimed?'bg':'ba')+'">'+(d.claimed?'Claimed ✓':'Unclaimed')+'</span>&nbsp;' +
+      '<span class="badge '+(d.claimed?'bg':'ba')+'">'+
+        (d.claimed ? 'Claimed ✓' : d.claimed == null ? 'Claim status unknown' : 'Unclaimed')+'</span>&nbsp;' +
       '<span class="badge bp">'+(d.reviewCount||0)+' reviews</span>&nbsp;' +
       '<span class="badge bgr">'+(d.rating||'-')+' ★</span>&nbsp;' +
       '<span class="badge bgr">'+(d.category||'-')+'</span>' +
@@ -1139,6 +1277,10 @@ function renderPageWeight(d) {
   }
 
   body.innerHTML = html;
+
+  // Keep the structured response too: the report's metric tiles need counts,
+  // not the prose summary below.
+  AD.lh = d;
 
   // Keep a plain-text copy for the export, where links are no use.
   const lines = [];
@@ -1514,7 +1656,13 @@ async function runAIVisibilityScore(name, url, city) {
     // Deliberately driven by the DISCOVERY numbers only. Being known once you
     // are named is a useful sanity check, but it is not visibility - a firm
     // nobody finds unprompted has not earned this box.
+    // Two tiers, deliberately not the same test twice. The hard one is
+    // discovery: a prospect asks for advisors and the firm comes up without
+    // being named. The easier one is recognition: asked by name, the model
+    // knows them and treats their own site as the source.
     if (result.visibilityScore > 0 || result.citationShare > 0) ck('c-cgpt');
+    if (result.brandedScore > 0 && result.brandedCitation > 0) ck('c-aicite');
+    else if (result.brandedConflict) unk('c-aicite', 'the by-name result contradicted itself and was not scored');
 
     // Show what the model said it knew. A percentage on its own is not
     // checkable; the facts behind it are.
@@ -1693,7 +1841,17 @@ async function _doSocialFetch(fb, li, ig, yt) {
     found += sfFound(d.instagram, 'c-hig', 'm-ig',  d.instagram?.data?.metrics?.followers || 0);
     found += sfFound(d.youtube,   'c-hyt', 'm-yt',  d.youtube?.data?.channel?.subscriberCount || d.youtube?.data?.metrics?.subscribers || d.youtube?.data?.metrics?.followers || 0);
 
-    const msg = found > 0 ? '✓ ' + found + ' platform' + (found>1?'s':'') + ' pulled' : '✗ No counts - check handles';
+    // A lookup that errored is not a firm without a profile. Mark those boxes
+    // unmeasured and say so, instead of telling them to check a handle that
+    // may be perfectly correct.
+    const sfErrs = [['facebook','c-hfb'],['linkedin','c-hli'],['instagram','c-hig'],['youtube','c-hyt']]
+      .filter(([k]) => d[k + 'Error'])
+      .map(([k, id]) => { unk(id, 'lookup failed: ' + d[k + 'Error']); return k; });
+
+    const msg = found > 0 ? '✓ ' + found + ' platform' + (found>1?'s':'') + ' pulled'
+                          + (sfErrs.length ? ' · ' + sfErrs.length + ' lookup failed' : '')
+              : sfErrs.length ? '✗ ' + sfErrs.join(', ') + ' lookup failed - not a verdict on the profile'
+              : '✗ No counts - check handles';
     document.getElementById('sf-status').textContent = msg;
     setStep('socialfetch', found > 0 ? 'done' : 'error');
     if (found > 0) toast(msg);
@@ -1761,26 +1919,884 @@ function buildReport() {
 }
 
 // ── Scoring ───────────────────────────────────────────────────────────────────
-function grade(n, t) {
-  const p = t ? n/t : 0;
-  return p>=.85?'A' : p>=.65?'B' : p>=.45?'C' : 'D';
+// ── The scoring model ────────────────────────────────────────────────────────
+// One table drives everything the report needs: which checks count, what each
+// is worth, which group it prints under, how hard the fix is, and what to do
+// about it. `type` records where the answer comes from -- measured (an API or
+// the site itself), modelled (Claude's judgment) or sampled (a rate over
+// repeated model runs) -- and caps how much of a score can rest on judgment.
+//
+// SCORE_FLOOR indexes the displayed score: 0 reports the true percentage, 60
+// would compress everything into 60-100 so no firm ever sees a brutal number.
+// One constant so the choice can be seen both ways before it is settled.
+const SCORE_FLOOR = 60;
+const CAT_WEIGHT  = { v: 0.40, w: 0.35, s: 0.25 };   // share of the overall score
+const CAT_NAME    = { v: 'Company Visibility', w: 'Website Performance', s: 'Social Media' };
+const CAT_BLURB   = {
+  v: 'How easily clients and prospects can find the business online.',
+  w: 'The site attracts and retains clients — if it loads fast and reads clearly.',
+  s: 'Business pages only — personal profiles are out of scope.'
+};
+// Fixed copy for the three scorecard pages. Deliberately not AI-written: these
+// describe what the category measures, which does not change per firm, so
+// generating them per run would only risk drift. The cover summary is the one
+// piece of per-firm prose, and it is written from the audit results.
+const CAT_INTRO = {
+  v: 'We review search presence, backlinks and site technology alongside the Google Business Profile and search listings, including whether AI-driven search can cite the firm at all.',
+  w: 'As more referred prospects check you out online first, the site has to deliver a good experience, stay accessible to crawlers, and give AI answer engines structured content to reference.',
+  s: 'The goal is a consistent brand presence, frequent posting, and traffic back to the website.'
+};
+// Thresholds are set on the INDEXED score, so they move with SCORE_FLOOR.
+// At a floor of 60 the working range is 60-100 and these correspond to 80%,
+// 50% and 25% of the underlying KPI points.
+const BANDS = [
+  { min: 92, label: 'Strong',         note: 'Well established, with a few opportunities to push further.' },
+  { min: 80, label: 'On track',       note: 'The basics are in place. Addressing the gaps below will move the needle.' },
+  { min: 70, label: 'Needs attention',note: 'Substantial room to improve. The actions below are where to start.' },
+  { min:  0, label: 'Critical',       note: 'Most of the fundamentals are missing. Start at the top of the list.' }
+];
+
+// q = the question as it prints on the scorecard. effort = what the fix costs
+// the firm, which is what turns a list of failures into a plan.
+const CHECKS = [
+  // ══ Company Visibility · 100 ═════════════════════════════════════════════
+  { id:'c-gbp-f', cat:'v', grp:'Google Business Profile', pts:12, type:'measured', aeo:1, effort:'low',
+    q:'Is your Google Business Profile created to tell visitors about your business?',
+    label:'GBP listing visible',
+    action:'Create and fully complete your Google Business Profile at business.google.com.' },
+  { id:'c-gbp-d', cat:'v', grp:'Google Business Profile', pts:8,  type:'measured', aeo:1, effort:'low',
+    q:'Have you added a business description to your profile?',
+    label:'GBP business description',
+    action:'Write a compelling 250-word business description highlighting your services and unique value.' },
+  { id:'c-gbp-r', cat:'v', grp:'Google Business Profile', pts:8,  type:'measured', aeo:1, effort:'ongoing',
+    q:'Do you have reviews from clients on your listing?',
+    label:'Has GBP reviews',
+    action:'Follow your firm guidelines on collecting reviews, then ask every satisfied client at the point of a good outcome.' },
+  { id:'c-gbp-v', cat:'v', grp:'Google Business Profile', pts:6,  type:'measured', aeo:1, effort:'low',
+    q:'Have you verified your GBP listing?',
+    label:'GBP verified/claimed',
+    action:'Verify your GBP listing via postcard or phone so you control the hours, photos and replies.' },
+  { id:'c-gbp-l', cat:'v', grp:'Google Business Profile', pts:3,  type:'measured', aeo:0, effort:'low',
+    q:'Have you uploaded an image of your logo to your GBP profile?',
+    label:'Logo on GBP',
+    action:'Upload a high-resolution logo image to your GBP profile.' },
+  { id:'c-gbp-p', cat:'v', grp:'Google Business Profile', pts:3,  type:'measured', aeo:0, effort:'ongoing',
+    q:'Are you posting photos of your team and office?',
+    label:'Photos on GBP',
+    action:'Post fresh team and office photos regularly to keep your profile active and trusted.' },
+
+  { id:'c-idx',   cat:'v', grp:'Website Search', pts:10, type:'measured', aeo:1, effort:'low',
+    q:'Is the site indexable by search engines?',
+    label:'Site indexable',
+    action:'Confirm with your web provider that your site is not set to block search engine crawlers.' },
+  { id:'c-cgpt',  cat:'v', grp:'Website Search', pts:9,  type:'sampled',  aeo:1, effort:'medium',
+    q:'Do AI assistants surface your firm unprompted?',
+    label:'AI surfaces the firm unprompted',
+    action:'Publish substantive, attributable content and earn mentions on sites AI tools already trust, so assistants can describe your firm accurately when a prospect asks.' },
+  { id:'c-sm',    cat:'v', grp:'Website Search', pts:8,  type:'measured', aeo:1, effort:'low',
+    q:'Does the site have a sitemap?',
+    label:'Has sitemap',
+    action:'Generate and submit an XML sitemap to Google Search Console.' },
+  { id:'c-meta',  cat:'v', grp:'Website Search', pts:8,  type:'measured', aeo:1, effort:'medium',
+    q:'Is the site using meta descriptions for search listings?',
+    label:'Meta descriptions',
+    action:"Write unique meta descriptions for each page via your website's SEO tool." },
+  { id:'c-aicite',cat:'v', grp:'Website Search', pts:7,  type:'sampled',  aeo:1, effort:'medium',
+    q:'Do AI assistants know your firm and cite your site when asked by name?',
+    label:'AI knows the firm by name',
+    action:'Make the site the clearest source about your firm — a complete About page, named advisors with bios, services described in plain language — so AI tools quote you rather than a directory.' },
+  { id:'c-da5',   cat:'v', grp:'Website Search', pts:7,  type:'measured', aeo:1, effort:'medium',
+    q:'Is the domain authority above 5?',
+    label:'DA above 5',
+    action:"Build authority with links from sources that already know you: your custodian or broker-dealer's advisor directory, professional associations, the local chamber, and any press that has quoted you." },
+  { id:'c-ga',    cat:'v', grp:'Website Search', pts:4,  type:'measured', aeo:0, effort:'low',
+    q:'Does the site use Google Analytics?',
+    label:'Google Analytics',
+    action:'Install Google Analytics (GA4) to track visitor behaviour and traffic sources.' },
+  { id:'c-rcta',  cat:'v', grp:'Website Search', pts:4,  type:'modelled', aeo:1, effort:'low',
+    q:'Does the website help clients leave Google reviews?',
+    label:'Review CTA on site',
+    action:"Add a clear review request to your site and email signature, following your firm's compliance guidelines on client testimonials." },
+  { id:'c-awd',   cat:'v', grp:'Website Search', pts:3,  type:'modelled', aeo:0, effort:'low',
+    q:'Does the site show recently received industry awards?',
+    label:'Industry awards shown',
+    action:'Display industry recognition, certifications and association memberships on your homepage and About page, with the required disclosure language.' },
+
+  // ══ Website Performance · 100 ════════════════════════════════════════════
+  { id:'c-spd',   cat:'w', grp:'Technology Review', pts:15, type:'measured', aeo:0, effort:'medium',
+    q:'Is the site loaded in under 3 seconds?',
+    label:'Loads under 3s',
+    action:'Test load speed with PageSpeed Insights and address the top recommendations.' },
+  { id:'c-mob',   cat:'w', grp:'Technology Review', pts:14, type:'measured', aeo:0, effort:'medium',
+    q:'Is the site optimized for mobile?',
+    label:'Mobile optimized',
+    action:"Use Google's Mobile-Friendly Test to identify and fix mobile display issues." },
+  { id:'c-szp',   cat:'w', grp:'Technology Review', pts:11, type:'measured', aeo:0, effort:'low',
+    q:'Is the total page load on the homepage under 3 MB?',
+    label:'Homepage under 3MB',
+    action:'Ask your web provider to optimise total page weight to under 3 MB.' },
+  { id:'c-https', cat:'w', grp:'Technology Review', pts:10, type:'measured', aeo:0, effort:'low',
+    q:'Is the site secure with HTTPS?',
+    label:'HTTPS secure',
+    action:'Obtain an SSL/TLS certificate from your domain provider if not already active.' },
+  { id:'c-img',   cat:'w', grp:'Technology Review', pts:10, type:'measured', aeo:0, effort:'low',
+    q:'Are all images sized under 500 KB?',
+    label:'Images under 500KB',
+    action:'Compress any image over 500 KB with Squoosh.app or your image tool of choice.' },
+  { id:'c-sch',   cat:'w', grp:'Technology Review', pts:8,  type:'measured', aeo:1, effort:'medium',
+    q:'Does the site publish schema markup for your organization and services?',
+    label:'Schema markup',
+    action:'Add FinancialService and PostalAddress schema to your homepage so search and AI tools can identify what your business is and where it is, rather than infer it.' },
+  { id:'c-faq',   cat:'w', grp:'Technology Review', pts:7,  type:'modelled', aeo:1, effort:'low',
+    q:'Does your firm have FAQs on the website?',
+    label:'FAQs with answers',
+    action:'Add a structured FAQ section to key pages using schema markup so your answers appear in AI-powered search results and featured snippets.' },
+
+  { id:'c-nav',   cat:'w', grp:'Visual Review', pts:8, type:'measured', aeo:0, effort:'medium',
+    q:'Is the navigation simple and clean?',
+    label:'Simple navigation',
+    action:'Limit top navigation to 5–6 items. Ensure it is consistent and easy to scan.' },
+  { id:'c-cta',   cat:'w', grp:'Visual Review', pts:5, type:'modelled', aeo:0, effort:'low',
+    q:'Are you using descriptive, actionable CTAs instead of “Click Here” or “Learn More”?',
+    label:'Descriptive CTAs',
+    action:'Replace generic CTAs with specific ones like "Schedule a Free Consultation".' },
+  { id:'c-res',   cat:'w', grp:'Visual Review', pts:4, type:'modelled', aeo:1, effort:'ongoing',
+    q:'Is there a blog or resources section that sets you up as a thought leader?',
+    label:'Blog/resources section',
+    action:'Launch a blog or resources section and publish content at least twice per month.' },
+  { id:'c-pho',   cat:'w', grp:'Visual Review', pts:4, type:'modelled', aeo:0, effort:'medium',
+    q:'Do you have high-quality photos that resonate with your ideal client audience?',
+    label:'High quality photos',
+    action:'Invest in professional photography that reflects your ideal client profile.' },
+  { id:'c-lnk',   cat:'w', grp:'Visual Review', pts:2, type:'modelled', aeo:1, effort:'low',
+    q:'Does the homepage have content linked to other website pages?',
+    label:'Content links to pages',
+    action:'Add a section on the homepage for each core page on your site with a clear link.' },
+  { id:'c-hdl',   cat:'w', grp:'Visual Review', pts:2, type:'modelled', aeo:0, effort:'low',
+    q:'Are you using benefit-based headlines that convey what a person can gain or learn?',
+    label:'Benefit-based headlines',
+    action:'Rewrite headlines to convey specific gains: e.g. "Retire 5 Years Earlier" vs "Our Services".' },
+
+  // ══ Social Media · 100 ═══════════════════════════════════════════════════
+  { id:'c-hli', cat:'s', grp:'Channels', pts:20, type:'measured', aeo:1, effort:'medium',
+    q:'Do you have a LinkedIn page set up for your business?',
+    label:'Has LinkedIn',
+    action:'Create a LinkedIn Company Page with complete profile information — for an advisory firm this is the platform that matters most.' },
+  { id:'c-hfb', cat:'s', grp:'Channels', pts:12, type:'measured', aeo:0, effort:'medium',
+    q:'Do you have a Facebook business page?',
+    label:'Has Facebook',
+    action:'Create a Facebook Business Page and begin posting 2–3 times per week.' },
+  { id:'c-hig', cat:'s', grp:'Channels', pts:5,  type:'measured', aeo:0, effort:'medium',
+    q:'Do you have an Instagram business account?',
+    label:'Has Instagram',
+    action:'Create an Instagram business account to reach a broader audience.' },
+  { id:'c-hyt', cat:'s', grp:'Channels', pts:4,  type:'measured', aeo:0, effort:'ongoing',
+    q:'Do you have a YouTube channel?',
+    label:'Has YouTube',
+    action:'Create a channel and post short client-question videos. Video answers are increasingly surfaced in AI and search results.' },
+
+  { id:'c-pst', cat:'s', grp:'Social Media Review', pts:14, type:'measured', aeo:0, effort:'ongoing',
+    q:'Are you posting at least 2–3 times per week on all active channels?',
+    label:'Posting 2–3x/week',
+    action:'Create a 30-day content calendar and schedule posts in advance using a scheduling tool.' },
+  { id:'c-bhd', cat:'s', grp:'Social Media Review', pts:10, type:'measured', aeo:0, effort:'low',
+    q:'Do you have branded headers consistent with your website?',
+    label:'Branded headers',
+    action:"Design social banner images that match your website's colour palette and style." },
+  { id:'c-sum', cat:'s', grp:'Social Media Review', pts:8,  type:'measured', aeo:1, effort:'low',
+    q:'Have you written a summary for your social profiles?',
+    label:'Profile summary written',
+    action:'Write a concise 2–3 sentence summary for each social profile covering your services and value proposition.' },
+  { id:'c-cni', cat:'s', grp:'Social Media Review', pts:8,  type:'measured', aeo:1, effort:'low',
+    q:'Is your contact information complete on social profiles?',
+    label:'Contact info complete',
+    action:'Fill in all contact fields: phone, email, address and website on every social profile.' },
+  { id:'c-url', cat:'s', grp:'Social Media Review', pts:6,  type:'measured', aeo:1, effort:'low',
+    q:'Is your profile using a custom branded URL with your company name?',
+    label:'Custom branded URL',
+    action:'Change the profile URL in your account settings to your company name (e.g. facebook.com/yourcompany).' },
+  { id:'c-lgp', cat:'s', grp:'Social Media Review', pts:5,  type:'measured', aeo:0, effort:'low',
+    q:'Are you using your logo in your social profile pictures?',
+    label:'Logo as profile pic',
+    action:'Upload your company logo as the profile photo on every platform.' },
+  { id:'c-sln', cat:'s', grp:'Social Media Review', pts:5,  type:'modelled', aeo:0, effort:'low',
+    q:'Are all active social profile links present on your website?',
+    label:'Social links on site',
+    action:'Add social media icons with links in your website header or footer.' },
+  { id:'c-tag', cat:'s', grp:'Social Media Review', pts:3,  type:'measured', aeo:0, effort:'ongoing',
+    q:'Are you tagging other businesses’ pages?',
+    label:'Tagging other pages',
+    action:'Tag partners, associations and local organisations in your posts. It is the cheapest way for a small account to reach beyond its own followers.' },
+];
+
+const EFFORT_LABEL = { low:'Low effort', medium:'Medium effort', ongoing:'Ongoing effort' };
+const CHECK_BY_ID  = Object.fromEntries(CHECKS.map(c => [c.id, c]));
+const CAT_MAX      = { v:0, w:0, s:0 };
+CHECKS.forEach(c => { CAT_MAX[c.cat] += c.pts; });
+
+// Discretionary credit for something real the checklist has no box for — a
+// podcast, a directory we do not track, a referral partnership. Positive only,
+// capped, and it must carry a reason: an unexplained adjustment on a scored
+// client document is exactly the kind of number that cannot be defended later.
+const ADJ_CAP = 10;
+const adjOf = cat => {
+  const raw = parseInt(document.getElementById('adj-' + cat)?.value, 10) || 0;
+  return Math.max(0, Math.min(ADJ_CAP, raw));
+};
+const adjReason = cat => (document.getElementById('adjr-' + cat)?.value || '').trim();
+
+function bandFor(score) { return BANDS.find(b => score >= b.min) || BANDS[BANDS.length - 1]; }
+const indexScore = (raw, max) =>
+  Math.round(SCORE_FLOOR + (max ? raw / max : 0) * (100 - SCORE_FLOOR));
+
+// The most recent saved audit for the same firm, matched on domain and falling
+// back to name. Entries saved before the move to numeric scoring carry letter
+// grades, so anything without a numeric overall is skipped rather than
+// subtracted from -- "up 8 points since last time" has to be true.
+function priorAudit() {
+  const key = a => ((a && a.clientURL) || '')
+        .replace(/^https?:\/\/(www\.)?/i, '').replace(/\/+$/, '').toLowerCase()
+      || ((a && a.clientName) || '').trim().toLowerCase();
+  const me = key({ clientURL: getVal('clientURL'), clientName: getVal('clientName') });
+  if (!me) return null;
+  let h; try { h = JSON.parse(lg('audit_history') || '[]'); } catch (_) { return null; }
+  return h.find(a => key(a) === me && a.scores && typeof a.scores.overall === 'number') || null;
+}
+
+function catScore(cat) {
+  const items  = CHECKS.filter(c => c.cat === cat);
+  const max    = CAT_MAX[cat];
+  const earned = items.reduce((a, c) =>
+    a + (document.getElementById(c.id)?.checked ? c.pts : 0), 0);
+  const adj    = adjOf(cat);
+  const raw    = Math.min(max, earned + adj);
+  const passed = items.filter(c => document.getElementById(c.id)?.checked).length;
+  const aeo    = items.filter(c => c.aeo);
+  return { cat, max, earned, adj, raw, passed, total: items.length,
+           aeoTotal: aeo.length,
+           aeoPassed: aeo.filter(c => document.getElementById(c.id)?.checked).length,
+           score: indexScore(raw, max), pct: Math.round((raw / max) * 100) };
+}
+
+// Kept so the three-tier colour classes still work off a score.
+function gradeLetter(score) {
+  return score >= 92 ? 'A' : score >= 80 ? 'B' : score >= 70 ? 'C' : 'D';
 }
 function gc(ids) { return ids.filter(id => document.getElementById(id)?.checked).length; }
 
 function recalc() {
-  // Visibility is 14: the two schema checks, plus "GBP listing visible" — which
-  // is NOT implied by the other GBP boxes. An unclaimed listing with no logo
-  // and no reviews leaves all three of those false, and without this one that
-  // firm scores identically to a firm with no listing at all.
-  const vIs = ['c-gbp-f','c-gbp-v','c-gbp-l','c-gbp-r','c-idx','c-sm','c-meta','c-ga','c-da5','c-cgpt','c-rcta','c-awd','c-sch-biz','c-sch-loc'];
-  const wIs = ['c-https','c-mob','c-img','c-spd','c-szp','c-faq','c-nav','c-lnk','c-pho','c-hdl','c-cta','c-res'];
-  const sIs = ['c-hfb','c-hli','c-hig','c-hyt','c-sln','c-bhd','c-cni','c-pst','c-url','c-sum','c-tag','c-lgp'];
-  const v=grade(gc(vIs),vIs.length), w=grade(gc(wIs),wIs.length), s=grade(gc(sIs),sIs.length);
-  ['v','w','s'].forEach((k,i)=>{
-    const el=document.getElementById('sg-'+k);
-    if(el){el.textContent=[v,w,s][i];el.className='sc-g '+[v,w,s][i];}
+  const cats = ['v','w','s'].map(catScore);
+  const byCat = Object.fromEntries(cats.map(c => [c.cat, c]));
+
+  // Unmeasured checks still count as not passed -- excluding them would
+  // quietly inflate the score. But the audit says which they are, so a low
+  // score built on missing data can be told apart from one built on findings.
+  const note = document.getElementById('unk-note');
+  if (note) {
+    const all = CHECKS.map(c => c.id)
+      .filter(id => UNK.has(id) && !document.getElementById(id)?.checked);
+    if (all.length) {
+      note.style.display = '';
+      note.innerHTML = all.length + ' of ' + CHECKS.length +
+        ' checks could not be measured and are counted as not passed: ' +
+        all.map(id => escHtml(ckLabel(id)) + ' <span style="color:var(--text3)">(' +
+                      escHtml(UNK.get(id)) + ')</span>').join(', ');
+    } else { note.style.display = 'none'; note.innerHTML = ''; }
+  }
+
+  // A manual credit with no reason is an unexplained number on a client
+  // document, so it is flagged here and blocked at approval.
+  cats.forEach(c => {
+    const w = document.getElementById('adjw-' + c.cat);
+    if (w) w.textContent = (c.adj > 0 && !adjReason(c.cat)) ? 'needs a reason' : '';
   });
-  AD.scores = {v,w,s};
+
+  // Overall is the weighted blend, not a plain average: for an advisory firm
+  // being findable matters more than being on Instagram. Each category is
+  // normalised to 100 first, so the arithmetic is still one a client can redo.
+  const overall  = Math.round(cats.reduce((a, c) => a + c.score * CAT_WEIGHT[c.cat], 0));
+  const rawTotal = cats.reduce((a, c) => a + c.raw, 0);
+  const maxTotal = cats.reduce((a, c) => a + c.max, 0);
+
+  const prior = priorAudit();
+
+  const paint = (key, score, c) => {
+    const g = document.getElementById('sg-' + key);
+    const b = document.getElementById('sb-' + key);
+    const r = document.getElementById('sr-' + key);
+    const L = gradeLetter(score);
+    if (g) { g.textContent = score; g.className = 'sc-g ' + L; }
+    if (b) { b.textContent = bandFor(score).label; b.className = 'sc-b ' + L; }
+    if (r) r.textContent = c ? (c.passed + ' of ' + c.total + ' KPIs' + (c.adj ? ' (+' + c.adj + ')' : ''))
+                             : cats.reduce((a,x)=>a+x.passed,0) + ' of ' + cats.reduce((a,x)=>a+x.total,0) + ' KPIs';
+  };
+  paint('o', overall, null);
+  cats.forEach(c => paint(c.cat, c.score, c));
+
+  // Painted from the value computed in THIS call. Reading it back off
+  // AD.scores would render a recalc behind, because AD.scores is assigned
+  // below -- so the line would show the previous firm's movement.
+  const dEl = document.getElementById('sd-o');
+  if (dEl) {
+    const d = prior ? overall - prior.scores.overall : null;
+    dEl.textContent = d === null ? ''
+      : (d > 0 ? '▲ ' + d : d < 0 ? '▼ ' + Math.abs(d) : '▬ 0') + ' since last audit';
+    dEl.style.color = d === null ? '' : d > 0 ? 'var(--green)' : d < 0 ? 'var(--red)' : 'var(--text3)';
+  }
+
+  AD.scores = {
+    overall, band: bandFor(overall).label,
+    // Movement since the last audit of this firm. Null when there is no
+    // comparable prior run, so the report can omit the line rather than
+    // print a delta against nothing.
+    prior: prior ? {
+      overall: prior.scores.overall,
+      delta:   overall - prior.scores.overall,
+      when:    prior.savedAt || null
+    } : null,
+    v: byCat.v.score, w: byCat.w.score, s: byCat.s.score,
+    passed: cats.reduce((a,c)=>a+c.passed,0), total: CHECKS.length,
+    // Answer-engine coverage is reported as a COUNT -- "8 of 19 AEO KPIs
+    // passed" -- not as a fourth score. The scorecard is overall plus three
+    // categories; a fourth number would invite the reader to weigh it against
+    // them when nothing in the model says how.
+    aeoPassed: cats.reduce((a,c)=>a+c.aeoPassed,0),
+    aeoTotal:  cats.reduce((a,c)=>a+c.aeoTotal,0),
+    floor: SCORE_FLOOR,
+    detail: Object.fromEntries(cats.map(c => [c.cat, {
+      name: CAT_NAME[c.cat], weight: CAT_WEIGHT[c.cat],
+      score: c.score, raw: c.raw, max: c.max, earned: c.earned,
+      passed: c.passed, total: c.total,
+      aeoPassed: c.aeoPassed, aeoTotal: c.aeoTotal,
+      adj: c.adj, adjReason: adjReason(c.cat), band: bandFor(c.score).label
+    }]))
+  };
+}
+
+// Everything the cover summary is allowed to know. Assembled here so the
+// boundary is visible: if a fact is not in this object, the summary cannot
+// state it.
+function summaryPayload() {
+  recalc();
+  return {
+    firm: getVal('clientName') || '',
+    scores: AD.scores,
+    failed: failedChecks().slice(0, 12).map(c => ({
+      label: c.label, pts: c.pts, cat: CAT_NAME[c.cat]
+    })),
+    metrics: {
+      'Domain authority': AD.da,
+      'Organic keywords': AD.keywords,
+      'Monthly organic traffic': AD.traffic,
+      'Referring domains': AD.refDomains,
+      'Homepage size (MB)': AD.size,
+      'Load time (s, desktop LCP)': AD.speed,
+      'Google reviews': AD.gbpReviews,
+      'Google rating': AD.gbpRating,
+      'Free directories claimed': AD.directories
+        ? AD.directories.freeFound + ' of ' + AD.directories.freeTotal : null,
+      'Unmeasured checks': UNK.size || null
+    }
+  };
+}
+
+async function runCoverSummary() {
+  const out = document.getElementById('cover-summary');
+  if (out) out.textContent = 'Writing the summary from the audit results...';
+  try {
+    const r = await pf('/ai/summary', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...summaryPayload(), model: lg('cfg_model') || undefined })
+    });
+    const d = await r.json();
+    if (d.error) throw new Error(d.error);
+    AD.coverSummary = d.summary;
+    if (out) out.textContent = d.summary;
+    return d.summary;
+  } catch (e) {
+    console.error('Cover summary error:', e.message);
+    if (out) out.innerHTML = '<span style="color:var(--red)">Could not write the summary: ' +
+                             escHtml(e.message) + '</span>';
+    return null;
+  }
+}
+
+// Failed checks, worst-impact first -- the basis of the recommendations.
+function failedChecks() {
+  return CHECKS
+    .filter(c => !document.getElementById(c.id)?.checked)
+    .sort((a, b) => b.pts - a.pts);
+}
+
+// ── The GrowthLine by Cetera audit report ────────────────────────────────────
+// Builds the pdfmake document definition from one audit. Pure: give it the
+// same data twice and it produces the same five pages. Every value it prints
+// comes from `d` -- nothing is fetched, inferred or written here.
+//
+// Tokens are the Cetera design system's, named as it names them.
+const RC = {
+  purple:  '#37006E',
+  magenta: '#87006E',
+  green:   '#407371',
+  gold:    '#FFC864',
+  blueLt:  '#94B1C7',
+  gray:    '#585B5E',
+  grayMid: '#808285',
+  g050:    '#F6F7F8',
+  g100:    '#ECEDEE',
+  g200:    '#D8DADB',
+  white:   '#FFFFFF'
+};
+const DISCLOSURE = 'For financial professional use only. Not for use with the public.';
+const PAGE_W = 612, M = 48, CONTENT = PAGE_W - M * 2;
+
+const n = v => (v === null || v === undefined || v === '') ? '—' : String(v);
+
+// The Latin subsets of Gelasio and Arimo have no U+2713 tick, U+2715 cross or
+// U+2192 arrow -- they render as tofu. Drawn as SVG so they are always present
+// and always match each other's weight.
+const MARK = {
+  pass: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M5 12.5l4.7 4.7L19 7.6" fill="none" stroke="#FFFFFF" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  fail: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M7 7l10 10M17 7L7 17" fill="none" stroke="#FFFFFF" stroke-width="3.2" stroke-linecap="round"/></svg>',
+  unknown: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M9 9a3 3 0 1 1 3.6 2.9c-.7.2-1.1.8-1.1 1.6v.6" fill="none" stroke="#3B2E0C" stroke-width="2.6" stroke-linecap="round"/><circle cx="12" cy="17.6" r="1.5" fill="#3B2E0C"/></svg>',
+  arrow: '<svg viewBox="0 0 28 12" xmlns="http://www.w3.org/2000/svg"><path d="M1 6h22M18 1.5L23.5 6 18 10.5" fill="none" stroke="#37006E" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+};
+
+// A mark in its coloured chip. Kept as one helper so the checklist and the
+// legend can never drift apart.
+const chip = (state, size) => ({
+  table: { widths: [size], body: [[{ svg: MARK[state], width: size - 4,
+    alignment: 'center', margin: [0, 2, 0, 2] }]] },
+  layout: {
+    hLineWidth: () => 0, vLineWidth: () => 0,
+    // pdfmake's default cell padding is 4pt a side: left in, the chip is 8pt
+    // wider than its column and the text beside it prints on top.
+    paddingLeft: () => 2, paddingRight: () => 2,
+    paddingTop: () => 0, paddingBottom: () => 0,
+    fillColor: () => state === 'pass' ? RC.green : state === 'fail' ? RC.magenta : RC.gold
+  }
+});
+
+// A horizontal bar: filled portion, then the track. Drawn rather than tabled
+// so the fill lands on an exact fraction.
+const bar = (pct, w, h, fill, track) => ({
+  canvas: [
+    { type: 'rect', x: 0, y: 0, w, h, color: track || RC.g200 },
+    { type: 'rect', x: 0, y: 0, w: Math.max(0, Math.min(1, pct / 100)) * w, h, color: fill }
+  ]
+});
+
+const rule = (w, color) => ({ canvas: [{ type: 'line', x1: 0, y1: 0, x2: w, y2: 0, lineWidth: 0.6, lineColor: color || RC.g200 }] });
+
+// ── cover ────────────────────────────────────────────────────────────────────
+function cover(d, logoWhite) {
+  const s = d.scores;
+  const stat = (big, small) => ({
+    stack: [
+      { text: big, font: 'Display', bold: true, fontSize: 17, color: RC.white, margin: [0, 0, 0, 1] },
+      { text: small, font: 'Body', fontSize: 8, color: '#D9CBE6' }
+    ]
+  });
+  const chan = (name, score) => ({
+    width: '*',
+    stack: [
+      { text: name, font: 'Body', bold: true, fontSize: 8.5, color: RC.white, margin: [0, 0, 0, 4] },
+      { text: String(score), font: 'Display', bold: true, fontSize: 26, color: RC.white, margin: [0, 0, 0, 5] },
+      bar(score, 150, 3.2, RC.white, '#6B4A8C')   // no rgba in canvas
+    ]
+  });
+
+  return [
+    { svg: logoWhite, width: 168, alignment: 'right', margin: [0, 10, 0, 34] },
+    { text: 'Digital Audit', font: 'Display', fontSize: 34, color: RC.white, margin: [0, 0, 0, 8] },
+    { text: [d.firm, '  ·  ', d.url, '  ·  Reviewed ', d.reviewed].join(''),
+      font: 'Body', fontSize: 9.5, color: '#CBB8DC', margin: [0, 0, 0, 24] },
+
+    { table: { body: [[{ text: 'SUMMARY', font: 'Body', bold: true, fontSize: 7, color: RC.white,
+        characterSpacing: 1.1, margin: [5, 3, 5, 3] }]] },
+      layout: { hLineWidth: () => 0.7, vLineWidth: () => 0.7,
+                hLineColor: () => '#A88FC0', vLineColor: () => '#A88FC0' },
+      margin: [0, 0, 0, 10] },
+    { text: d.summary || '', font: 'Display', fontSize: 12.5, lineHeight: 1.42,
+      color: '#F2EAF7', margin: [0, 0, 120, 30] },
+
+    { text: `OVERALL DIGITAL SCORE — ${s.overall} OF 100`, font: 'Body', bold: true, fontSize: 7.5,
+      color: '#CBB8DC', characterSpacing: 1.1, margin: [120, 0, 0, 5] },
+    { text: s.band, font: 'Display', fontSize: 21, color: RC.white, margin: [120, 0, 0, 5] },
+    { text: d.deltaLine || '', font: 'Body', fontSize: 9, color: '#CBB8DC', margin: [120, 0, 0, 13] },
+
+    { columns: [
+        { width: 110, stack: [
+            { canvas: [{ type: 'ellipse', x: 34, y: 34, r1: 33, r2: 33, lineColor: '#B9A3D0', lineWidth: 2.4 }] },
+            { text: String(s.overall), font: 'Display', bold: true, fontSize: 25, color: RC.white,
+              alignment: 'left', margin: [19, -45, 0, 0] }
+          ] },
+        { width: '*', columns: [
+            { width: '*', stack: [ stat(d.kpiPassed, 'KPIs passed'), { text: '', margin: [0, 9, 0, 0] }, stat(d.aeoPassed, 'AEO KPIs passed') ] },
+            { width: '*', stack: [ stat(d.needWork, 'need work'), { text: '', margin: [0, 9, 0, 0] }, stat(d.ptsAvailable, 'available in six fixes') ] }
+          ] }
+      ], margin: [0, 0, 0, 30] },
+
+    { columns: [chan('Company Visibility', s.v), chan('Website Performance', s.w), chan('Social Media', s.s)],
+      columnGap: 16, margin: [0, 0, 0, 26] },
+
+    { text: `${DISCLOSURE}  ·  Prepared by Cetera GrowthLine`,
+      font: 'Body', fontSize: 7, color: '#B9A6CC' }
+  ];
+}
+
+// ── page 2 · priorities ──────────────────────────────────────────────────────
+function priorities(d, logoPurple) {
+  const rows = [];
+  d.actions.forEach((a, i) => {
+    // No per-row point value. Indexed to a 60-100 scale and then weighted by
+    // category share, the heaviest single fix any firm can have is worth two
+    // points, so every row printed "+1" or "+2" and the column read as broken.
+    // The rank already carries the priority; the total is on the cover and in
+    // the projection band below, where the arithmetic still holds.
+    rows.push([
+      { text: String(i + 1), font: 'Display', fontSize: 15, color: RC.g200, margin: [0, 3, 0, 0] },
+      { stack: [
+          { text: a.title, font: 'Body', bold: true, fontSize: 10.5, color: RC.purple, margin: [0, 2, 0, 4] },
+          { text: a.why, font: 'Body', fontSize: 9, color: RC.gray, lineHeight: 1.38, margin: [0, 0, 0, 5] },
+          { text: [a.cat, ' · ', a.effort, a.aeo ? ' · Impacts AEO' : ''].join(''),
+            font: 'Body', fontSize: 7.8, color: RC.grayMid }
+        ] }
+    ]);
+  });
+
+  return [
+    { columns: [
+        { text: 'Do these six things first', font: 'Display', fontSize: 21, color: RC.purple, width: '*' },
+        { svg: logoPurple, width: 95, alignment: 'right' }
+      ], margin: [0, 0, 0, 16] },
+    rule(CONTENT),
+    { table: { widths: [22, '*'], body: rows },
+      layout: {
+        hLineWidth: (i, node) => (i === 0 || i === node.table.body.length) ? 0 : 0.6,
+        vLineWidth: () => 0, hLineColor: () => RC.g200,
+        paddingTop: () => 11, paddingBottom: () => 11, paddingLeft: () => 0, paddingRight: () => 0
+      }, margin: [0, 4, 0, 18] },
+
+    { table: { widths: ['*'], body: [[{
+        columns: [
+          { width: 126, columns: [
+              { width: 26, text: String(d.scores.overall), font: 'Display', bold: true, fontSize: 19, color: RC.purple },
+              { width: 24, svg: MARK.arrow, margin: [0, 8, 0, 0] },
+              { width: 26, text: String(d.projected), font: 'Display', bold: true, fontSize: 19, color: RC.purple }
+            ], columnGap: 9 },
+          { width: '*', text: [
+              'Completing all six moves this firm from ',
+              { text: d.scores.band, bold: true }, ' into the ',
+              { text: d.projectedBand, bold: true }, ' band.'
+            ], font: 'Body', fontSize: 9.5, color: '#1F2A33', lineHeight: 1.4, margin: [0, 3, 0, 0] }
+        ], margin: [14, 12, 14, 12]
+      }]] },
+      layout: { hLineWidth: () => 0, vLineWidth: () => 0, fillColor: () => RC.blueLt },
+      margin: [0, 0, 0, 12] },
+
+    { text: 'Ranked by the score each fix unlocks, hardest-hitting first. Your GrowthLine consultant can walk through the detail with you.',
+      font: 'Body', fontSize: 8, color: RC.grayMid }
+  ];
+}
+
+// ── pages 3-5 · scorecards ───────────────────────────────────────────────────
+function scorecard(sec, logoPurple) {
+  const tile = t => ({
+    stack: [
+      { canvas: [{ type: 'rect', x: 0, y: 0, w: 118, h: 2.2, color: t.ok ? RC.green : RC.magenta }] },
+      { table: { widths: [118], body: [[{ stack: [
+            { text: t.label.toUpperCase(), font: 'Body', bold: true, fontSize: 6.6, color: RC.grayMid, characterSpacing: .7, margin: [0, 0, 0, 5] },
+            { text: n(t.value), font: 'Display', bold: true, fontSize: 21, color: RC.magenta, margin: [0, 0, 0, 2] },
+            { text: t.unit || '', font: 'Body', fontSize: 7.6, color: RC.gray, margin: [0, 0, 0, 5] },
+            { text: t.good || '', font: 'Body', fontSize: 7, color: RC.grayMid }
+          ], margin: [8, 8, 6, 9] }]] },
+        layout: { hLineWidth: (i, node) => i === node.table.body.length ? 0.6 : 0,
+                  vLineWidth: (i, node) => (i === 0 || i === node.table.widths.length) ? 0.6 : 0,
+                  hLineColor: () => RC.g200, vLineColor: () => RC.g200 } }
+    ]
+  });
+
+  const item = k => {
+    return [
+      chip(k.state, 12),
+      { stack: [
+          { text: k.q, font: 'Body', bold: k.state !== 'pass', fontSize: 8.2,
+            color: k.state === 'pass' ? RC.gray : '#1F2A33', lineHeight: 1.32 },
+          k.note ? { text: k.note, font: 'Body', fontSize: 6.8, color: RC.grayMid, margin: [0, 2, 0, 0] } : null
+        ].filter(Boolean) },
+      k.aeo ? { table: { body: [[{ text: 'AEO', font: 'Body', bold: true, fontSize: 5.6, color: '#2C4457',
+                                   alignment: 'center' }]], widths: [18] },
+               layout: { hLineWidth: () => 0, vLineWidth: () => 0,
+                         paddingLeft: () => 0, paddingRight: () => 0,
+                         paddingTop: () => 2.5, paddingBottom: () => 2.5,
+                         fillColor: () => RC.blueLt } }
+            : { text: '' }
+    ];
+  };
+
+  const group = g => [
+    { text: g.name.toUpperCase(), font: 'Body', bold: true, fontSize: 7, color: RC.grayMid,
+      characterSpacing: .9, margin: [0, 0, 0, 5] },
+    { canvas: [{ type: 'rect', x: 0, y: 0, w: 232, h: 1.6, color: RC.purple }], margin: [0, 0, 0, 4] },
+    { table: { widths: [12, '*', 18], body: g.items.map(item) },
+      layout: { hLineWidth: (i, node) => i === 0 ? 0 : 0.5, vLineWidth: () => 0,
+                hLineColor: () => RC.g100, paddingTop: () => 5, paddingBottom: () => 5,
+                // Column 1 is the question: it needs a real gutter or it prints
+                // over the mark beside it.
+                paddingLeft: i => i === 1 ? 7 : 0,
+                paddingRight: i => i === 1 ? 5 : 0 } }
+  ];
+
+  const cols = sec.groups.map(g => ({ width: '*', stack: group(g) }));
+
+  return [
+    { columns: [
+        { width: '*', text: sec.name, font: 'Display', fontSize: 21, color: RC.purple },
+        { width: 128, stack: [
+            { text: `${sec.weight}% of overall score`, font: 'Body', fontSize: 8, color: RC.grayMid, alignment: 'right' },
+            { text: `${sec.passed} of ${sec.total} KPIs passed`, font: 'Body', fontSize: 8, color: RC.grayMid, alignment: 'right' }
+          ], margin: [0, 3, 8, 0] },
+        { width: 88, svg: logoPurple, alignment: 'right' }
+      ], columnGap: 0, margin: [0, 0, 0, 14] },
+
+    { columns: [
+        { width: 76, text: String(sec.score), font: 'Display', bold: true, fontSize: 40, color: RC.purple },
+        { width: '*', stack: [
+            { text: sec.band, font: 'Body', bold: true, fontSize: 11, color: RC.purple, margin: [0, 8, 0, 3] },
+            { text: sec.blurb, font: 'Body', fontSize: 9, color: RC.grayMid }
+          ] }
+      ], margin: [0, 0, 0, 10] },
+
+    bar(sec.score, CONTENT, 6, RC.magenta, RC.g100),
+    { columns: [
+        { text: '0', font: 'Body', fontSize: 7, color: RC.grayMid },
+        { text: '100', font: 'Body', fontSize: 7, color: RC.grayMid, alignment: 'right' }
+      ], margin: [0, 3, 0, 12] },
+
+    { text: sec.intro, font: 'Body', fontSize: 9.2, color: '#1F2A33', lineHeight: 1.45, margin: [0, 0, 60, 16] },
+    { columns: sec.tiles.map(tile), columnGap: 12, margin: [0, 0, 0, 18] },
+    { columns: cols, columnGap: 24 },
+
+    { columns: [
+        { width: 11, ...chip('pass', 11) },
+        { width: 40, text: 'Passed', font: 'Body', fontSize: 7.4, color: RC.gray, margin: [4, 1.5, 0, 0] },
+        { width: 11, ...chip('fail', 11) },
+        { width: 58, text: 'Needs work', font: 'Body', fontSize: 7.4, color: RC.gray, margin: [4, 1.5, 0, 0] },
+        { width: 11, ...chip('unknown', 11) },
+        { width: 68, text: 'Not measured', font: 'Body', fontSize: 7.4, color: RC.gray, margin: [4, 1.5, 0, 0] },
+        { width: '*', text: sec.legend || '', font: 'Body', fontSize: 7.4, color: RC.grayMid, margin: [0, 1.5, 0, 0] }
+      ], columnGap: 0, margin: [0, 14, 0, 0] }
+  ];
+}
+
+function buildReportDoc(d, assets) {
+  const content = [];
+  content.push(...cover(d, assets.logoWhite));
+  content.push({ text: '', pageBreak: 'after' });
+  content.push(...priorities(d, assets.logoPurple));
+  d.sections.forEach(sec => {
+    content.push({ text: '', pageBreak: 'before' });
+    content.push(...scorecard(sec, assets.logoPurple));
+  });
+
+  return {
+    pageSize: 'LETTER',
+    pageOrientation: 'portrait',
+    pageMargins: [M, M, M, 58],
+    info: { title: `Digital Audit — ${d.firm}`, author: 'Cetera GrowthLine' },
+    background: page => page === 1
+      ? { image: 'cover', width: PAGE_W, height: 792 }
+      : { canvas: [{ type: 'rect', x: 0, y: 786, w: PAGE_W, h: 6, color: RC.purple }] },
+    footer: page => page === 1 ? null : ({
+      columns: [
+        { text: DISCLOSURE, font: 'Body', fontSize: 7, color: RC.grayMid },
+        { text: `Reviewed ${d.reviewed}  ·  Page ${page}`, font: 'Body', fontSize: 7, color: RC.grayMid, alignment: 'right' }
+      ], margin: [M, 8, M, 0]
+    }),
+    images: { cover: assets.coverBg },
+    content,
+    defaultStyle: { font: 'Body', fontSize: 9.5, color: RC.gray }
+  };
+}
+
+
+// ── From the live audit to the report's data ─────────────────────────────────
+// The only place audit state becomes report input. Everything the PDF prints
+// passes through here, so a value the audit did not measure has nowhere to
+// enter: the tiles fall back to null and print an em dash.
+const STATE = id => {
+  const el = document.getElementById(id);
+  if (el && el.checked) return 'pass';
+  return UNK.has(id) ? 'unknown' : 'fail';
+};
+
+function assembleReport() {
+  recalc();
+  const s = AD.scores;
+  const lh = AD.lh || {};
+  const dirs = AD.directories || null;
+
+  const failed = failedChecks();
+  const top6   = failed.slice(0, 6);
+  const gain   = top6.reduce((a, c) => a + c.pts * CAT_WEIGHT[c.cat] * (100 - SCORE_FLOOR) / 100, 0);
+  const projected = Math.min(100, Math.round(s.overall + gain));
+
+  const section = (cat, tiles) => {
+    const items = CHECKS.filter(c => c.cat === cat);
+    const groups = [...new Set(items.map(c => c.grp))].map(g => ({
+      name: g,
+      items: items.filter(c => c.grp === g).map(c => ({
+        state: STATE(c.id), q: c.q, aeo: c.aeo,
+        note: UNK.get(c.id) || null
+      }))
+    }));
+    const d = s.detail[cat];
+    return {
+      name: CAT_NAME[cat], weight: Math.round(CAT_WEIGHT[cat] * 100),
+      score: d.score, band: d.band, passed: d.passed, total: d.total,
+      blurb: CAT_BLURB[cat], intro: CAT_INTRO[cat],
+      legend: cat === 'v' ? 'AEO marks answer-engine signals.' : '',
+      groups, tiles
+    };
+  };
+
+  const imgOver = lh.imgList ? lh.imgList.length : null;
+  const imgAll  = (lh.byType || []).find(t => t.type === 'image');
+
+  return {
+    firm: getVal('clientName') || '[Client]',
+    url:  getVal('clientURL')  || '',
+    reviewed: new Date().toLocaleDateString('en-US', { month:'2-digit', day:'2-digit', year:'numeric' }),
+    summary: AD.coverSummary || '',
+    scores: s,
+    deltaLine: s.prior
+      ? (s.prior.delta > 0 ? `Up ${s.prior.delta} points since the last review.`
+       : s.prior.delta < 0 ? `Down ${Math.abs(s.prior.delta)} points since the last review.`
+       : 'Unchanged since the last review.')
+      : '',
+    kpiPassed:    `${s.passed} of ${s.total}`,
+    needWork:     `${s.total - s.passed} items`,
+    aeoPassed:    `${s.aeoPassed} of ${s.aeoTotal}`,
+    ptsAvailable: `+${projected - s.overall} pts`,
+    projected, projectedBand: bandFor(projected).label,
+    actions: top6.map(c => ({
+      title: c.action.split('. ')[0].replace(/\.$/, ''),
+      why:   c.action,
+      pts:   Math.max(1, Math.round(c.pts * CAT_WEIGHT[c.cat] * (100 - SCORE_FLOOR) / 100)),
+      cat:   CAT_NAME[c.cat], effort: EFFORT_LABEL[c.effort], aeo: !!c.aeo
+    })),
+    sections: [
+      section('v', [
+        { label:'Business listings', value: dirs ? dirs.freeFound : null,
+          unit: dirs ? `of ${dirs.freeTotal} free` : '', good:'Above 3 is good', ok: dirs && dirs.freeFound >= 3 },
+        { label:'Domain authority', value: AD.da ?? null, unit:'/ 100', good:'Above 5 is good', ok: AD.da > 5 },
+        { label:'Organic traffic', value: AD.traffic ?? null, unit:'visits / mo', good:'Above 50 is good', ok: AD.traffic > 50 },
+        { label:'Ranking keywords', value: AD.keywords ?? null, unit:'keywords', good:'Above 75 is good', ok: AD.keywords > 75 }
+      ]),
+      section('w', [
+        { label:'Homepage size', value: AD.size ?? null, unit:'MB', good:'Ideally under 3 MB', ok: parseFloat(AD.size) < 3 },
+        { label:'Page speed', value: AD.speed ?? null, unit:'seconds', good:'Ideally under 3 sec', ok: parseFloat(AD.speed) < 3 },
+        { label:'Images over 500 KB', value: imgOver, unit: imgAll ? `of ${imgAll.count}` : '', good:'Target is zero', ok: imgOver === 0 },
+        { label:'Referring domains', value: AD.refDomains ?? null, unit:'domains', good:'Above 10 is good', ok: AD.refDomains > 10 }
+      ]),
+      section('s', [
+        { label:'LinkedIn followers', value: getVal('m-lif') || null, unit:'followers', good:'The platform that matters' },
+        { label:'Facebook followers', value: getVal('m-fb')  || null, unit:'followers', good:'' },
+        { label:'Instagram followers', value: getVal('m-ig') || null, unit:'followers', good:'' },
+        { label:'YouTube subscribers', value: getVal('m-yt') || null, unit:'subscribers', good:'' }
+      ])
+    ]
+  };
+}
+
+// ── Approval ─────────────────────────────────────────────────────────────────
+// The download is gated, and the gate is not ceremonial: it blocks on the two
+// things that can put an untrue statement in front of a client -- a check that
+// is Claude's judgment rather than a measurement, and a check that could not
+// be measured at all. Both have to be looked at by a person before the file
+// exists.
+function approvalState() {
+  recalc();
+  const modelled = CHECKS.filter(c => c.type === 'modelled');
+  const unmeasured = CHECKS.map(c => c.id).filter(id =>
+    UNK.has(id) && !document.getElementById(id)?.checked);
+  const creditMissingReason = ['v','w','s'].filter(c => adjOf(c) > 0 && !adjReason(c));
+  return {
+    modelled, unmeasured, creditMissingReason,
+    blockers: [
+      !getVal('clientName') && 'a client name',
+      !getVal('clientURL')  && 'a website URL',
+      !getVal('preparer')   && 'who prepared it',
+      !AD.coverSummary      && 'the cover summary',
+      !document.getElementById('ack-judgment')?.checked &&
+        `confirmation of the ${modelled.length} checks based on Claude's reading of the site`,
+      (unmeasured.length && !document.getElementById('ack-unmeasured')?.checked) &&
+        `acknowledgement of the ${unmeasured.length} check${unmeasured.length>1?'s':''} that could not be measured`,
+      creditMissingReason.length && 'a reason for every manual credit'
+    ].filter(Boolean)
+  };
+}
+
+function renderApproval() {
+  const a = approvalState();
+  const un = document.getElementById('appr-unmeasured');
+  if (un) {
+    un.style.display = a.unmeasured.length ? '' : 'none';
+    un.innerHTML = a.unmeasured.length
+      ? '<label class="ci" style="align-items:flex-start"><input type="checkbox" id="ack-unmeasured" onchange="renderApproval()"' +
+        (document.getElementById('ack-unmeasured')?.checked ? ' checked' : '') +
+        '/><span class="ci-l">I have reviewed the ' + a.unmeasured.length + ' check' +
+        (a.unmeasured.length>1?'s':'') + ' that could not be measured: ' +
+        a.unmeasured.map(id => escHtml(ckLabel(id))).join(', ') +
+        '. They count as not passed.</span></label>'
+      : '';
+  }
+  const jl = document.getElementById('appr-judgment-n');
+  if (jl) jl.textContent = String(a.modelled.length);
+
+  const msg = document.getElementById('appr-msg');
+  const btn = document.getElementById('dlBtn');
+  if (a.blockers.length) {
+    if (msg) { msg.style.color = 'var(--text3)';
+      msg.textContent = 'Still needed: ' + a.blockers.join('; ') + '.'; }
+    if (btn) btn.disabled = true;
+  } else {
+    if (msg) { msg.style.color = 'var(--green)';
+      msg.textContent = 'Approved by ' + getVal('preparer') + '. Ready to download.'; }
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function downloadReportPDF() {
+  const btn = document.getElementById('dlBtn');
+  const msg = document.getElementById('appr-msg');
+  const a = approvalState();
+  if (a.blockers.length) { renderApproval(); return; }
+  if (!window.pdfMake || !window.REPORT_ASSETS) {
+    if (msg) { msg.style.color = 'var(--red)';
+      msg.textContent = 'The PDF library or the brand assets did not load. Check the network and reload.'; }
+    return;
+  }
+  btn.disabled = true; btn.textContent = 'Building...';
+  try {
+    const A = window.REPORT_ASSETS;
+    pdfMake.vfs = Object.assign({}, pdfMake.vfs || {}, A.vfs);
+    pdfMake.fonts = A.fonts;
+    const d = assembleReport();
+    d.preparedBy = getVal('preparer');
+    const doc = buildReportDoc(d, { logoWhite: A.logoWhite, logoPurple: A.logoPurple, coverBg: A.cover });
+    const name = 'Digital Audit - ' + (d.firm || 'Client') + ' - ' +
+                 new Date().toLocaleDateString('en-US', { month:'long', year:'numeric' }) + '.pdf';
+    await new Promise(res => pdfMake.createPdf(doc).download(name, res));
+    if (msg) { msg.style.color = 'var(--green)'; msg.textContent = 'Downloaded ' + name; }
+  } catch (e) {
+    console.error('PDF error:', e);
+    if (msg) { msg.style.color = 'var(--red)'; msg.textContent = 'Could not build the PDF: ' + e.message; }
+  }
+  btn.textContent = 'Download PDF';
+  renderApproval();
 }
 
 // ── Export ────────────────────────────────────────────────────────────────────
@@ -1799,7 +2815,9 @@ Date: ${date}
 URL: ${url}
 
 SCORES
-Visibility: ${s.v||'-'} | Website: ${s.w||'-'} | Social: ${s.s||'-'}
+Overall: ${s.overall??'-'}/100 — ${s.band||'-'}
+Visibility: ${s.v??'-'} | Website: ${s.w??'-'} | Social: ${s.s??'-'}
+(scores are indexed to a ${typeof SCORE_FLOOR!=='undefined'?SCORE_FLOOR:60}-100 scale; a firm meeting none of the criteria scores ${typeof SCORE_FLOOR!=='undefined'?SCORE_FLOOR:60})
 
 METRICS
 Domain Authority: ${AD.da||'-'} | Keywords: ${AD.keywords||'-'} | Traffic: ${AD.traffic||'-'}
@@ -1909,15 +2927,18 @@ function renderHist() {
         <div style="font-size:12px;color:var(--text3);margin-top:2px">${a.clientURL||''} · ${new Date(a.savedAt).toLocaleDateString()}</div>
       </div>
       <div style="display:flex;gap:6px">
-        <span class="badge bg">V:${a.scores?.v||'-'}</span>
-        <span class="badge bp">W:${a.scores?.w||'-'}</span>
-        <span class="badge ba">S:${a.scores?.s||'-'}</span>
+        <span class="badge bgr">${a.scores?.overall??'-'}</span>
+        <span class="badge bg">V:${a.scores?.v??'-'}</span>
+        <span class="badge bp">W:${a.scores?.w??'-'}</span>
+        <span class="badge ba">S:${a.scores?.s??'-'}</span>
       </div>
     </div>`).join('');
 }
 
 // ── Clear ─────────────────────────────────────────────────────────────────────
 function clearAll() {
+  UNK.clear();
+  ['v','w','s'].forEach(c => { sv('adj-'+c,''); sv('adjr-'+c,''); });
   document.querySelectorAll('input[type=checkbox]').forEach(c => c.checked=false);
   document.querySelectorAll('input[type=number]').forEach(i => i.value='');
   document.querySelectorAll('textarea').forEach(t => t.value='');
@@ -1938,9 +2959,10 @@ function clearAll() {
 const AID_CATALOG = [
   ['c-res','Blog / resources section'],['c-faq','FAQ page with Q&A'],
   ['c-awd','Industry awards shown'],['c-rcta','Review/testimonial CTA'],
-  ['c-cgpt','Named or cited by Claude'],['c-nav','Simple navigation'],
-  ['c-sch-biz','Business schema markup'],['c-sch-loc','Location schema markup'],
-  ['c-gbp-f','GBP listing visible'],
+  ['c-cgpt','AI surfaces the firm unprompted'],['c-nav','Simple navigation'],
+  ['c-aicite','AI knows the firm by name'],['c-sch','Schema markup'],
+  ['c-gbp-f','GBP listing visible'],['c-gbp-d','GBP business description'],
+  ['c-gbp-p','Photos on GBP'],
   ['c-lnk','Content links to other pages'],['c-pho','High-quality photos'],
   ['c-hdl','Benefit-based headlines'],['c-cta','Descriptive CTAs'],
   ['c-meta','Meta descriptions exist'],['c-ga','Google Analytics installed'],
