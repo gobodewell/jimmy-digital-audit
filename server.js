@@ -4,11 +4,41 @@ const cors    = require('cors');
 const app  = express();
 const PORT = process.env.PORT || 3001;
 
-const DFS_LOGIN    = process.env.DATAFORSEO_LOGIN    || '';
-const DFS_PASSWORD = process.env.DATAFORSEO_PASSWORD || '';
-const SF_KEY       = process.env.SOCIALFETCH_KEY     || '';
-const GOOGLE_KEY   = process.env.GOOGLE_API_KEY       || '';
-const SEM_KEY      = process.env.SEMRUSH_KEY          || '';   // SEO numbers (DA/keywords/traffic)
+// Every one of these is trimmed. A key pasted into a hosting panel's env
+// editor picks up a trailing newline or space remarkably easily, and these go
+// straight into a query string or an auth header -- the vendor then rejects it
+// as malformed, which reads as "the key is wrong" when the key is fine.
+// SEMrush answers a key with a stray character on the end with
+// "ERROR 122 :: WRONG FORMAT OR EMPTY KEY". Whitespace is also truthy, so the
+// `if (!SEM_KEY)` guards below passed a key that was nothing but a newline.
+const env = n => (process.env[n] || '').trim();
+for (const n of ['DATAFORSEO_LOGIN','DATAFORSEO_PASSWORD','SOCIALFETCH_KEY',
+                 'GOOGLE_API_KEY','SEMRUSH_KEY','ANTHROPIC_KEY','AIRTABLE_TOKEN']) {
+  const raw = process.env[n];
+  if (raw && raw !== raw.trim()) console.warn('WARNING: ' + n + ' had surrounding whitespace — trimmed.');
+}
+const DFS_LOGIN    = env('DATAFORSEO_LOGIN');
+const DFS_PASSWORD = env('DATAFORSEO_PASSWORD');
+const SF_KEY       = env('SOCIALFETCH_KEY');
+const GOOGLE_KEY   = env('GOOGLE_API_KEY');
+const SEM_KEY      = env('SEMRUSH_KEY');   // SEO numbers (DA/keywords/traffic)
+
+// SEMrush reports failures as plain text: "ERROR ## :: MESSAGE". Relayed raw,
+// the code means nothing to whoever is running the audit and says nothing
+// about where to fix it.
+function semWhy(errText) {
+  const code = (errText.match(/ERROR\s+(\d+)/i) || [])[1];
+  const why = {
+    120: 'the SEMRUSH_KEY is wrong',
+    122: 'the SEMRUSH_KEY is empty or malformed — check it was pasted whole, with no line break or space on the end',
+    131: 'the SEMrush account is out of API units',
+    132: 'the SEMrush account is out of API units',
+    133: 'the SEMrush API is not enabled on this plan — it needs a Business plan or an API units add-on',
+    134: 'the SEMrush account has no API units left',
+    135: 'the SEMrush API is disabled for this account'
+  }[code];
+  return errText.trim().slice(0, 120) + (why ? ' — ' + why : '');
+}
 const SF_BASE      = 'https://api.socialfetch.dev/v1';
 const DFS_BASE     = 'https://api.dataforseo.com/v3';
 
@@ -98,7 +128,7 @@ async function semrushOverview(domain) {
     `https://api.semrush.com/?type=domain_rank&key=${SEM_KEY}&export_columns=Dn,Rk,Or,Ot&domain=${encodeURIComponent(domain)}&database=us`
   );
   const trimmed = (txt || '').trim();
-  if (/^ERROR/i.test(trimmed)) return { error: trimmed };
+  if (/^ERROR/i.test(trimmed)) return { error: semWhy(trimmed) };
 
   const rows = trimmed.split('\n');
   let keywords = 0, traffic = 0;
@@ -603,7 +633,7 @@ app.get('/directories', async (req, res) => {
 
     const trimmed = (txt || '').trim();
     if (/^ERROR/i.test(trimmed)) {
-      return res.json({ error: 'SEMrush: ' + trimmed.slice(0, 120) });
+      return res.json({ error: 'SEMrush: ' + semWhy(trimmed) });
     }
 
     // Find the domain column by header name — its position is not guaranteed.
