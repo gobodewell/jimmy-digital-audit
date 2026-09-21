@@ -209,8 +209,17 @@ app.get('/site/lighthouse', async (req, res) => {
   // the desktop numbers these reports are read against.
   const strategy = req.query.strategy === 'mobile' ? 'mobile' : 'desktop';
   try {
+    // Ask only for the two categories we read. Unfiltered, PageSpeed also runs
+    // and returns accessibility and best-practices, which roughly doubles a
+    // response that is already megabytes of JSON -- and this proxy parses the
+    // whole thing in memory on a 512MB instance. Every audit used below
+    // (largest-contentful-paint, first-contentful-paint, total-blocking-time,
+    // total-byte-weight, resource-summary, third-party-summary,
+    // uses-optimized-images, uses-responsive-images) is in performance;
+    // viewport, is-crawlable, meta-description and robots-txt are in seo.
     const psUrl = 'https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=' +
-      encodeURIComponent(url) + '&strategy=' + strategy + (GOOGLE_KEY ? '&key=' + GOOGLE_KEY : '');
+      encodeURIComponent(url) + '&strategy=' + strategy +
+      '&category=performance&category=seo' + (GOOGLE_KEY ? '&key=' + GOOGLE_KEY : '');
     console.log('PageSpeed fetching:', psUrl.slice(0, 100));
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 60000);  // slow sites can take >30s for a full Lighthouse run

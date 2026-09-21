@@ -810,7 +810,20 @@ function pf(path, opts) {
   const key     = (lg('cfg_audit') || '').trim();
   const headers = Object.assign({}, opts.headers || {});
   if (key) headers['X-Audit-Key'] = key;
-  return fetch(proxy + path, Object.assign({}, opts, { headers }));
+  // A fetch that never reaches the server rejects with a bare "Failed to
+  // fetch" -- no status, no URL, nothing to act on. Every step routes through
+  // here, so name the proxy and the shapes this actually takes: the free
+  // instance asleep or restarting, or the request cut off partway (the long
+  // PageSpeed and GBP calls are the ones that hit this).
+  return fetch(proxy + path, Object.assign({}, opts, { headers }))
+    .catch(e => {
+      if (e && e.name === 'TypeError') {
+        throw new Error('could not reach the proxy at ' + proxy + path.split('?')[0] +
+          ' — it may be asleep, restarting, or it dropped the connection mid-request. ' +
+          'Check the Render logs for a restart at this time.');
+      }
+      throw e;
+    });
 }
 
 async function testProxy() {
@@ -1168,7 +1181,7 @@ async function runLighthouse(url) {
 // ── DataForSEO: GBP ───────────────────────────────────────────────────────────
 async function runGBP(name, url, city) {
   setStep('gbp', 'running');
-  if (!name) { setStep('gbp', 'error'); return; }
+  if (!name) { setStep('gbp', 'error', 'no firm name entered — the GBP lookup needs one'); return; }
   const proxy = lg('cfg_proxy') || DEFAULT_PROXY;
   try {
     // GBP listings are local — pass the city/state so the lookup resolves.
@@ -1230,8 +1243,10 @@ async function runGBP(name, url, city) {
   } catch(e) {
     console.error('GBP error:', e.message);
     document.getElementById('gbp-block').style.display = '';
-    document.getElementById('gbp-details').innerHTML = '<span class="badge br">GBP error: '+e.message+'</span>';
-    setStep('gbp', 'error');
+    document.getElementById('gbp-details').innerHTML = '<span class="badge br">GBP error: '+escHtml(e.message)+'</span>';
+    // This used to pass no message at all, so a failed GBP lookup showed a bare
+    // red cross in the progress list with the reason buried in a panel below.
+    setStep('gbp', 'error', e.message);
   }
 }
 
@@ -1321,6 +1336,11 @@ async function claudeStream(prompt, panelId, statusId, textId) {
     const reader  = resp.body.getReader();
     const decoder = new TextDecoder();
     let buf = '', fullText = '', errMsg = null, pings = 0, resumes = 0, stopReason = null;
+    // Whether the server's closing {type:"done"} actually arrived. A stream that
+    // just stops -- the instance restarts, the connection is cut -- ends the
+    // read loop exactly like a clean finish, and without this flag that was
+    // indistinguishable from a review that returned nothing to say.
+    let sawDone = false;
 
     while (true) {
       const { value, done } = await reader.read();
@@ -1331,7 +1351,7 @@ async function claudeStream(prompt, panelId, statusId, textId) {
       for (const line of lines) {
         if (!line.trim()) continue;
         let msg; try { msg = JSON.parse(line); } catch { continue; }
-        if (msg.type === 'done')       { fullText = msg.text || ''; stopReason = msg.stop_reason || null; }
+        if (msg.type === 'done')       { sawDone = true; fullText = msg.text || ''; stopReason = msg.stop_reason || null; }
         else if (msg.type === 'error') errMsg = msg.error;
         else if (msg.type === 'resuming') { resumes++; textEl.innerHTML = '<span class="spin">⟳</span> Still searching (part ' + (resumes + 1) + ')…'; }
         else if (msg.type === 'ping') { pings++; textEl.innerHTML = '<span class="spin">⟳</span> Analyzing' + '.'.repeat(pings % 4); }
@@ -1345,7 +1365,20 @@ async function claudeStream(prompt, panelId, statusId, textId) {
     // truncated review as if it were finished.
     const cut = stopReason === 'max_tokens' ? 'hit the length limit'
               : stopReason === 'pause_turn' ? 'still had more searching to do'
+              : stopReason === 'tool_use'   ? 'stopped while still calling tools'
               : null;
+
+    // Two ways a review finished with nothing to show, and neither is success.
+    // The panel badge read "done" for both: it was set from "the stream ended"
+    // rather than "the stream delivered an answer", so an empty Social panel
+    // sat next to a green badge with no clue which had happened.
+    if (!sawDone) throw new Error(
+      'the connection dropped before the review finished — no result was returned. ' +
+      'Check the Render logs for a restart, then re-run this client.');
+    if (!fullText.trim()) throw new Error(
+      'the review returned no text' + (stopReason ? ' (stopped on: ' + stopReason + ')' : '') +
+      ' — no checks were set. Re-run this client.');
+
     textEl.innerHTML = mdToHtml(fullText);
     if (cut) {
       textEl.innerHTML += '<p style="color:var(--red);font-size:12px;margin-top:8px">Incomplete — the review ' + cut +
@@ -1897,11 +1930,16 @@ async function _doSocialFetch(fb, li, ig, yt) {
     if (!asked.length)  bits.push('✗ No handles were looked up — enter them and click Pull');
     const msg = bits.join('  ·  ');
     document.getElementById('sf-status').textContent = msg;
-    setStep('socialfetch', found > 0 ? 'done' : 'error');
+    // Pulling nothing is only an error when the lookups broke. A firm with no
+    // handles entered, or handles that resolve to nothing, is a real finding --
+    // reporting it as a failed step hid whichever of the two it was.
+    if (sfErrs.length)        setStep('socialfetch', 'error', sfErrs.join(', ') + ' lookup failed');
+    else if (!asked.length)   setStep('socialfetch', 'done',  'no handles entered');
+    else                      setStep('socialfetch', 'done',  found + ' of ' + asked.length + ' pulled');
     if (found > 0) toast(msg);
   } catch(e) {
     document.getElementById('sf-status').textContent = '✗ Error: ' + e.message;
-    setStep('socialfetch', 'error');
+    setStep('socialfetch', 'error', e.message);
   }
 }
 
