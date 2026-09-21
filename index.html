@@ -1851,14 +1851,29 @@ async function _doSocialFetch(fb, li, ig, yt) {
     // A lookup that errored is not a firm without a profile. Mark those boxes
     // unmeasured and say so, instead of telling them to check a handle that
     // may be perfectly correct.
-    const sfErrs = [['facebook','c-hfb'],['linkedin','c-hli'],['instagram','c-hig'],['youtube','c-hyt']]
-      .filter(([k]) => d[k + 'Error'])
+    const PLAT = [['facebook','c-hfb','m-fb'],['linkedin','c-hli','m-lif'],
+                  ['instagram','c-hig','m-ig'],['youtube','c-hyt','m-yt']];
+    const sfErrs = PLAT.filter(([k]) => d[k + 'Error'])
       .map(([k, id]) => { unk(id, 'lookup failed: ' + d[k + 'Error']); return k; });
 
-    const msg = found > 0 ? '✓ ' + found + ' platform' + (found>1?'s':'') + ' pulled'
-                          + (sfErrs.length ? ' · ' + sfErrs.length + ' lookup failed' : '')
-              : sfErrs.length ? '✗ ' + sfErrs.join(', ') + ' lookup failed - not a verdict on the profile'
-              : '✗ No counts - check handles';
+    // Three outcomes per platform, and they are not the same thing: the
+    // lookup broke, the profile resolved but carried no follower number, or
+    // it worked. Reporting only a count made the middle case look like the
+    // first, so "no counts - check handles" blamed a handle that was fine.
+    const asked = PLAT.filter(([k]) => d[k] || d[k + 'Error']);
+    const noCount = PLAT.filter(([k, , mv]) => d[k] && !getVal(mv)).map(([k]) => k);
+    AD.socialStatus = {
+      pulled: found,
+      failed: Object.fromEntries(sfErrs.map(k => [k, d[k + 'Error']])),
+      noCount
+    };
+
+    const bits = [];
+    if (found)          bits.push('✓ ' + found + ' platform' + (found > 1 ? 's' : '') + ' pulled');
+    if (noCount.length) bits.push('no follower count returned for ' + noCount.join(', '));
+    sfErrs.forEach(k => bits.push(k + ': ' + d[k + 'Error']));
+    if (!asked.length)  bits.push('✗ No handles were looked up — enter them and click Pull');
+    const msg = bits.join('  ·  ');
     document.getElementById('sf-status').textContent = msg;
     setStep('socialfetch', found > 0 ? 'done' : 'error');
     if (found > 0) toast(msg);
@@ -2396,6 +2411,28 @@ const bar = (pct, w, h, fill, track) => ({
 
 const rule = (w, color) => ({ canvas: [{ type: 'line', x1: 0, y1: 0, x2: w, y2: 0, lineWidth: 0.6, lineColor: color || RC.g200 }] });
 
+
+// The cover holds about 554 characters of summary before the block below it is
+// pushed onto a second page -- measured by rendering at increasing lengths and
+// watching the page count, not estimated. SUMMARY_MAX leaves headroom for text
+// that wraps worse than the sample did.
+const SUMMARY_MAX = 460;
+function fitSummary(text) {
+  const t = (text || '').trim();
+  if (t.length <= SUMMARY_MAX) return t;
+  // Drop whole sentences from the end rather than cutting mid-thought.
+  const parts = t.match(/[^.!?]+[.!?]+(\s|$)/g) || [t];
+  let out = '';
+  for (const p of parts) {
+    if ((out + p).trim().length > SUMMARY_MAX) break;
+    out += p;
+  }
+  out = out.trim();
+  // A single sentence longer than the budget still has to be cut somewhere.
+  if (!out) out = t.slice(0, SUMMARY_MAX).replace(/\s+\S*$/, '') + '…';
+  return out;
+}
+
 // ── cover ────────────────────────────────────────────────────────────────────
 function cover(d, logoWhite) {
   const s = d.scores;
@@ -2425,7 +2462,7 @@ function cover(d, logoWhite) {
       layout: { hLineWidth: () => 0.7, vLineWidth: () => 0.7,
                 hLineColor: () => '#A88FC0', vLineColor: () => '#A88FC0' },
       margin: [0, 0, 0, 10] },
-    { text: d.summary || '', font: 'Display', fontSize: 12.5, lineHeight: 1.42,
+    { text: fitSummary(d.summary), font: 'Display', fontSize: 12.5, lineHeight: 1.42,
       color: '#F2EAF7', margin: [0, 0, 120, 30] },
 
     { text: `OVERALL DIGITAL SCORE — ${s.overall} OF 100`, font: 'Body', bold: true, fontSize: 7.5,
@@ -2433,23 +2470,30 @@ function cover(d, logoWhite) {
     { text: s.band, font: 'Display', fontSize: 21, color: RC.white, margin: [120, 0, 0, 5] },
     { text: d.deltaLine || '', font: 'Body', fontSize: 9, color: '#CBB8DC', margin: [120, 0, 0, 13] },
 
-    { columns: [
-        { width: 110, stack: [
-            { canvas: [{ type: 'ellipse', x: 34, y: 34, r1: 33, r2: 33, lineColor: '#B9A3D0', lineWidth: 2.4 }] },
-            { text: String(s.overall), font: 'Display', bold: true, fontSize: 25, color: RC.white,
-              alignment: 'left', margin: [19, -45, 0, 0] }
-          ] },
-        { width: '*', columns: [
-            { width: '*', stack: [ stat(d.kpiPassed, 'KPIs passed'), { text: '', margin: [0, 9, 0, 0] }, stat(d.aeoPassed, 'AEO KPIs passed') ] },
-            { width: '*', stack: [ stat(d.needWork, 'need work'), { text: '', margin: [0, 9, 0, 0] }, stat(d.ptsAvailable, 'available in six fixes') ] }
-          ] }
-      ], margin: [0, 0, 0, 30] },
+    // One unbreakable block. Left to itself pdfmake will split this at a page
+    // boundary, which orphans the category numbers and their bars onto a blank
+    // second page while their labels stay on the cover. The summary is capped
+    // so it should never come to this; unbreakable makes the failure legible
+    // rather than broken.
+    { unbreakable: true, stack: [
+      { columns: [
+          { width: 110, stack: [
+              { canvas: [{ type: 'ellipse', x: 34, y: 34, r1: 33, r2: 33, lineColor: '#B9A3D0', lineWidth: 2.4 }] },
+              { text: String(s.overall), font: 'Display', bold: true, fontSize: 25, color: RC.white,
+                alignment: 'left', margin: [19, -45, 0, 0] }
+            ] },
+          { width: '*', columns: [
+              { width: '*', stack: [ stat(d.kpiPassed, 'KPIs passed'), { text: '', margin: [0, 9, 0, 0] }, stat(d.aeoPassed, 'AEO KPIs passed') ] },
+              { width: '*', stack: [ stat(d.needWork, 'need work'), { text: '', margin: [0, 9, 0, 0] }, stat(d.ptsAvailable, 'available in six fixes') ] }
+            ] }
+        ], margin: [0, 0, 0, 30] },
 
-    { columns: [chan('Company Visibility', s.v), chan('Website Performance', s.w), chan('Social Media', s.s)],
-      columnGap: 16, margin: [0, 0, 0, 26] },
+      { columns: [chan('Company Visibility', s.v), chan('Website Performance', s.w), chan('Social Media', s.s)],
+        columnGap: 16, margin: [0, 0, 0, 26] },
 
-    { text: `${DISCLOSURE}  ·  Prepared by Cetera GrowthLine`,
-      font: 'Body', fontSize: 7, color: '#B9A6CC' }
+      { text: `${DISCLOSURE}  ·  Prepared by Cetera GrowthLine`,
+        font: 'Body', fontSize: 7, color: '#B9A6CC' }
+    ] }
   ];
 }
 
@@ -2708,12 +2752,27 @@ function assembleReport() {
         { label:'Images over 500 KB', value: imgOver, unit: imgAll ? `of ${imgAll.count}` : '', good:'Target is zero', ok: imgOver === 0 },
         { label:'Referring domains', value: AD.refDomains ?? null, unit:'domains', good:'Above 10 is good', ok: AD.refDomains > 10 }
       ]),
-      section('s', [
-        { label:'LinkedIn followers', value: getVal('m-lif') || null, unit:'followers', good:'The platform that matters' },
-        { label:'Facebook followers', value: getVal('m-fb')  || null, unit:'followers', good:'' },
-        { label:'Instagram followers', value: getVal('m-ig') || null, unit:'followers', good:'' },
-        { label:'YouTube subscribers', value: getVal('m-yt') || null, unit:'subscribers', good:'' }
-      ])
+      section('s', (() => {
+        // Follower counts come from one source and it is the flakiest of them.
+        // Channels active is derived from the checkboxes, so at least one tile
+        // always carries a real number instead of four em dashes.
+        const num = id => { const v = parseInt(getVal(id), 10); return isNaN(v) ? null : v; };
+        // Only channels the audit actually found count toward the total, so
+        // "2 of 4 active" can never sit beside "across 3 channels". A stray
+        // follower number for a platform with no profile is not a channel.
+        const PAIRS = [['c-hli','m-lif'],['c-hfb','m-fb'],['c-hig','m-ig'],['c-hyt','m-yt']];
+        const active = PAIRS.filter(([ck]) => document.getElementById(ck)?.checked);
+        const counts = active.map(([, mv]) => num(mv)).filter(v => v !== null);
+        const live = active.length;
+        return [
+          { label:'Channels active', value: live, unit:'of 4', good:'All four is good', ok: live >= 3 },
+          { label:'Total followers', value: counts.length ? counts.reduce((a,b)=>a+b,0).toLocaleString() : null,
+            unit: counts.length ? 'across ' + counts.length + ' channel' + (counts.length>1?'s':'') : '',
+            good:'Above 2,500 is good' },
+          { label:'LinkedIn followers', value: num('m-lif'), unit:'followers', good:'The platform that matters' },
+          { label:'Facebook followers', value: num('m-fb'),  unit:'followers', good:'' }
+        ];
+      })())
     ]
   };
 }

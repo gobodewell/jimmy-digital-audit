@@ -713,17 +713,49 @@ app.get('/gbp/info', async (req, res) => {
 });
 
 // ── 4. SocialFetch — follower counts by URL/handle ───────────────────────────
+// The only outbound call in this file that had no timeout. SocialFetch can sit
+// on a request indefinitely, and because the four platform lookups are awaited
+// together, one hung call held the whole audit open with nothing to show for
+// it. Twenty seconds is well past a healthy response and well short of the
+// caller giving up.
+const SF_TIMEOUT_MS = 20000;
 async function sfGet(path) {
-  const r = await fetch(SF_BASE + path, { headers: { 'x-api-key': SF_KEY } });
+  let r;
+  try {
+    r = await fetch(SF_BASE + path, {
+      headers: { 'x-api-key': SF_KEY },
+      signal: AbortSignal.timeout(SF_TIMEOUT_MS)
+    });
+  } catch (e) {
+    const why = e.name === 'TimeoutError' || e.name === 'AbortError'
+      ? 'SocialFetch timed out after ' + (SF_TIMEOUT_MS / 1000) + 's'
+      : 'SocialFetch unreachable: ' + e.message;
+    console.error(why + ' ' + path);
+    return { error: why };
+  }
   if (!r.ok) {
-    const t = await r.text();
+    const t = await r.text().catch(() => '');
     console.error('SocialFetch ' + r.status + ' ' + path + ':', t.slice(0, 150));
     // Returning null here made a broken lookup indistinguishable from a firm
     // that simply has no profile on that platform -- the box went unticked
     // either way and the UI blamed the handle.
-    return { error: 'SocialFetch HTTP ' + r.status };
+    //
+    // The status alone does not say what to do about it, and the answer is
+    // almost always in the body. Carried through to the browser so the cause
+    // is visible in the app rather than only in the proxy's logs.
+    const why = { 401: 'the SOCIALFETCH_KEY is wrong or expired',
+                  403: 'the SOCIALFETCH_KEY is not allowed to call this',
+                  404: 'the endpoint path no longer exists',
+                  429: 'rate limited or out of quota' }[r.status];
+    let detail = '';
+    try { const j = JSON.parse(t); detail = j.error || j.message || ''; } catch (_) { detail = t; }
+    detail = String(detail).replace(/\s+/g, ' ').trim().slice(0, 120);
+    return { error: 'SocialFetch HTTP ' + r.status +
+                    (why ? ' — ' + why : '') +
+                    (detail ? ' (' + detail + ')' : '') };
   }
-  return r.json();
+  try { return await r.json(); }
+  catch (e) { return { error: 'SocialFetch sent a malformed response' }; }
 }
 
 function cleanHandle(val, base) {
@@ -1071,7 +1103,10 @@ app.post('/ai/summary', async (req, res) => {
 ${lines.join('\n')}
 
 Write the summary paragraph for the cover of the report. Rules:
-- 3 to 5 sentences, addressed to the firm as "your".
+- 3 to 4 sentences, and UNDER 440 CHARACTERS in total. The cover has a fixed
+  amount of room; anything longer is trimmed before it is printed, so a fifth
+  sentence is a sentence the client never reads. Count as you write.
+- Addressed to the firm as "your".
 - Say what is working first, then name the single biggest thing holding the
   score back, then say that fixing it is achievable.
 - Use ONLY the facts above. Do not invent measurements, competitors, numbers,
