@@ -1363,6 +1363,18 @@ async function claudeStream(prompt, panelId, statusId, textId) {
 }
 
 // ── Parse JSON from AI response ───────────────────────────────────────────────
+// A review that returns prose is not a review that ran. The step used to go
+// green whenever the model said anything at all, so a run that exhausted its
+// tool budget, wrote up what it had seen and dropped the JSON block reported
+// success while setting no checks -- the audit's own "measured or not" rule,
+// broken in the place it matters most.
+function reviewVerdict(stepId, result, parsed, applied) {
+  if (!result)  return setStep(stepId, 'error', 'no response from the model');
+  if (!parsed)  return setStep(stepId, 'error',
+    'the model answered in prose with no JSON block — no checks were set');
+  setStep(stepId, 'done', applied ? applied + ' check' + (applied > 1 ? 's' : '') + ' set' : 'no checks matched');
+}
+
 function extractJSON(text) {
   if (!text) return null;
   // Prefer the delimited block, fall back to the whole response.
@@ -1435,8 +1447,11 @@ Write a brief summary of your findings, then end with this EXACT block:
       if (j.reviewCTA) ck('c-rcta');
       if (j.awards)    ck('c-awd');
     }
+    reviewVerdict('ai-vis', result, j,
+      ['sitemap','meta','reviewCTA','awards'].filter(k => j && j[k]).length);
+    return;
   }
-  setStep('ai-vis', result ? 'done' : 'error');
+  reviewVerdict('ai-vis', result, null, 0);
 }
 
 // ── AI: website ───────────────────────────────────────────────────────────────
@@ -1483,6 +1498,8 @@ Definitions:
   if (result) {
     AD.aiWebsite = result;
     const j = extractJSON(result);
+    const WEB_FIELDS = ['nav','linkedContent','photos','headlines','ctas',
+                        'resources','faqs','reviewCTA','awards','analytics'];
     if (j) {
       if (j.nav)          ck('c-nav');
       if (j.linkedContent) ck('c-lnk');
@@ -1499,8 +1516,10 @@ Definitions:
         if (n && !n.value) n.value = j.notes;
       }
     }
+    reviewVerdict('ai-web', result, j, j ? WEB_FIELDS.filter(k => j[k]).length : 0);
+    return;
   }
-  setStep('ai-web', result ? 'done' : 'error');
+  reviewVerdict('ai-web', result, null, 0);
 }
 
 // ── AI: social ────────────────────────────────────────────────────────────────
@@ -1596,14 +1615,17 @@ Write a brief summary of what you found and how you verified each profile, then 
 
     // Parse JSON and fill fields immediately
     const socJ = extractJSON(result);
+    let applied = 0;
     if (socJ) {
-      applySocialJSON(socJ);
+      applied = applySocialJSON(socJ);
       console.log('Social JSON parsed OK:', JSON.stringify(socJ).slice(0, 200));
     } else {
       console.error('Social JSON parse FAILED - raw result snippet:', result.slice(-500));
     }
+    reviewVerdict('ai-soc', result, socJ, applied);
+    return;
   }
-  setStep('ai-soc', result ? 'done' : 'error');
+  reviewVerdict('ai-soc', result, null, 0);
 }
 
 // ── AI visibility - measured, not guessed ────────────────────────────────────

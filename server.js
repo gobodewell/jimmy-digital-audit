@@ -743,12 +743,23 @@ async function sfGet(path) {
     // The status alone does not say what to do about it, and the answer is
     // almost always in the body. Carried through to the browser so the cause
     // is visible in the app rather than only in the proxy's logs.
+    // 402 is the one that actually happens. SocialFetch bills per lookup and
+    // the balance runs out quietly: the key stays valid, the endpoints stay
+    // correct, requests are still counted, and every lookup fails. Usage
+    // charts show spend, not balance, so nothing on the dashboard looks wrong.
     const why = { 401: 'the SOCIALFETCH_KEY is wrong or expired',
+                  402: 'the SocialFetch account is out of credits — top it up in their Billing tab',
                   403: 'the SOCIALFETCH_KEY is not allowed to call this',
                   404: 'the endpoint path no longer exists',
                   429: 'rate limited or out of quota' }[r.status];
+    // The message can sit at the top level or nested under `error`, and
+    // SocialFetch nests it -- taking j.error straight gave "[object Object]".
     let detail = '';
-    try { const j = JSON.parse(t); detail = j.error || j.message || ''; } catch (_) { detail = t; }
+    try {
+      const j = JSON.parse(t);
+      const e = j && j.error;
+      detail = (e && typeof e === 'object' ? (e.message || e.code) : e) || j.message || '';
+    } catch (_) { detail = t; }
     detail = String(detail).replace(/\s+/g, ' ').trim().slice(0, 120);
     return { error: 'SocialFetch HTTP ' + r.status +
                     (why ? ' — ' + why : '') +
@@ -906,8 +917,15 @@ const WEB_TOOLS = [
   // cheaper in tokens. The filtering is built into these tool versions — do NOT
   // also declare code_execution, or the model ends up with two execution
   // environments and gets confused.
-  { type: 'web_search_20260209', name: 'web_search', max_uses: 3 },
-  { type: 'web_fetch_20260209',  name: 'web_fetch',  max_uses: 4 }
+  //
+  // These caps have to cover what the prompts actually ask for. At 4 fetches
+  // the visibility review alone ran out -- sitemap, homepage, contact/about,
+  // homepage again -- and the website review, which reads several sub-pages,
+  // ran out sooner. A model that exhausts its tools does not fail: it writes
+  // up what it managed to see and drops the JSON block, so the audit applied
+  // nothing while reporting success.
+  { type: 'web_search_20260209', name: 'web_search', max_uses: 6 },
+  { type: 'web_fetch_20260209',  name: 'web_fetch',  max_uses: 12 }
 ];
 
 // ── 5a. AI review — proxied Anthropic, STREAMED ──────────────────────────────
