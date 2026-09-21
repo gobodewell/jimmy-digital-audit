@@ -9,8 +9,15 @@
 <!-- PDF report. pdfmake renders it; report-assets.js carries the Cetera
      typefaces, cover and wordmark. Both are checked for before the download
      runs, so a failed load reports itself instead of producing a broken file. -->
-<script src="https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.2.20/pdfmake.min.js"></script>
-<script src="assets/report-assets.js"></script>
+<script>window.__loadFail = [];</script>
+<!-- pdfmake is served from the repo, not a CDN. Cetera's network blocks
+     cdnjs, and a report the tool cannot build on the network it is used on is
+     not a working report. 1.4 MB, ~570 KB over the wire, cached after the
+     first load. -->
+<script src="assets/pdfmake.min.js"
+        onerror="window.__loadFail.push('assets/pdfmake.min.js — not found at ' + this.src)"></script>
+<script src="assets/report-assets.js"
+        onerror="window.__loadFail.push('assets/report-assets.js — not found at ' + this.src)"></script>
 <style>
 :root {
   --bg:       #f4f5f8;
@@ -2774,9 +2781,21 @@ async function downloadReportPDF() {
   const msg = document.getElementById('appr-msg');
   const a = approvalState();
   if (a.blockers.length) { renderApproval(); return; }
+  // Name what is missing and where it was looked for. "One of two things
+  // failed" is not a diagnosis -- it is the state the audit itself refuses to
+  // report, and the report builder should hold to the same standard.
   if (!window.pdfMake || !window.REPORT_ASSETS) {
+    const why = [];
+    if (!window.pdfMake) why.push(
+      (window.__loadFail || []).find(f => /pdfmake/.test(f)) ||
+      'pdfmake did not load (the script tag ran but window.pdfMake is undefined)');
+    if (!window.REPORT_ASSETS) why.push(
+      (window.__loadFail || []).find(f => /report-assets/.test(f)) ||
+      'report-assets.js did not load. It must sit at ' +
+      new URL('assets/report-assets.js', location.href).href);
     if (msg) { msg.style.color = 'var(--red)';
-      msg.textContent = 'The PDF library or the brand assets did not load. Check the network and reload.'; }
+      msg.innerHTML = 'Cannot build the PDF.<br>' + why.map(escHtml).join('<br>'); }
+    console.error('PDF prerequisites missing:', why);
     return;
   }
   btn.disabled = true; btn.textContent = 'Building...';
