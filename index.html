@@ -613,8 +613,9 @@ textarea{resize:vertical;min-height:60px}
     <div class="btn-row">
       <button class="btn btn-primary" onclick="saveSettings()">Save settings</button>
       <button class="btn btn-ghost" onclick="testProxy()">Test proxy</button>
+      <button class="btn btn-ghost" onclick="testSemrush()">Test SEMrush</button>
     </div>
-    <div id="s-msg" style="margin-top:10px;font-size:13px;color:var(--text2)"></div>
+    <div id="s-msg" style="margin-top:10px;font-size:13px;color:var(--text2);white-space:pre-wrap"></div>
   </div>
 </div>
 
@@ -824,6 +825,34 @@ function pf(path, opts) {
       }
       throw e;
     });
+}
+
+// The proxy is locked with AUDIT_KEY, so /semrush/diag cannot be opened in a
+// browser tab -- there is no way to send the header. This runs it through the
+// same pf() every other call uses and prints the result, which also saves
+// anyone hunting for the Render URL: it is whatever Settings points at, not
+// the Netlify address the app itself is served from.
+async function testSemrush() {
+  const msg = document.getElementById('s-msg');
+  msg.textContent = 'Probing SEMrush routes — this can take a few seconds...';
+  try {
+    const r = await pf('/semrush/diag');
+    const d = await r.json();
+    if (d.error) { msg.textContent = '✗ ' + d.error; return; }
+    const ok = (d.probes || []).filter(p => p.ok);
+    const lines = [
+      'Key: ' + d.keyGeneration + ' (' + d.keyLength + " chars, ends '" + d.keyEndsWith + "')",
+      ok.length ? '✓ Working routes:' : '✗ No route answered.',
+      ...ok.map(p => '   ' + p.report + ' → ' + p.method + ' ' + p.path +
+                     ' [' + (p.fields || []).join(', ') + ']')
+    ];
+    msg.textContent = lines.join('\n');
+    // The full probe list is what gets pasted back for diagnosis.
+    console.log('SEMRUSH DIAG:', JSON.stringify(d, null, 2));
+    msg.textContent += '\n\nFull detail printed to the browser console (F12) — copy it from there.';
+  } catch (e) {
+    msg.textContent = '✗ ' + e.message;
+  }
 }
 
 async function testProxy() {

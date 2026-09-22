@@ -140,20 +140,27 @@ async function semFetch(url, opts) {
 // of the process; a 404/405 moves on to the next. /semrush/diag reports which
 // one answered, so a route that moves can be pinned without guesswork.
 const SEM_V4_ROUTES = {
-  domainRank:  ['/analytics/v1/domain_rank', '/trends/v1/domain-rank', '/domain/v1/rank'],
-  blOverview:  ['/backlinks/v1/overview', '/analytics/v1/backlinks_overview'],
-  refDomains:  ['/backlinks/v1/refdomains', '/backlinks/v1/referring-domains',
+  domainRank:  ['/analytics/v1/domain_rank', '/trends/v1/domain-rank',
+                '/domain/v1/rank', '/analytics/v1/overview'],
+  blOverview:  ['/backlinks/v1/overview', '/backlinks/v1/backlinks_overview',
+                '/analytics/v1/backlinks_overview'],
+  refDomains:  ['/backlinks/v1/refdomains', '/backlinks/v1/referring_domains',
+                '/backlinks/v1/referring-domains', '/backlinks/v1/domains',
                 '/analytics/v1/backlinks_refdomains']
 };
 const semV4Found = {};   // report -> the path that worked
 
-async function semV4Raw(url) {
+async function semV4Raw(url, body) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 20000);
+  const headers = { Authorization: 'Apikey ' + SEM_KEY, Accept: 'application/json' };
+  if (body) headers['Content-Type'] = 'application/json';
   try {
     const r = await fetch(url, {
       signal: controller.signal,
-      headers: { Authorization: 'Apikey ' + SEM_KEY, Accept: 'application/json' }
+      method: body ? 'POST' : 'GET',
+      headers,
+      body: body ? JSON.stringify(body) : undefined
     });
     clearTimeout(timeout);
     return { status: r.status, text: await r.text() };
@@ -196,20 +203,45 @@ function semV4Parse(txt) {
 
 async function semV4(report, params) {
   const qs = new URLSearchParams(params).toString();
-  const candidates = semV4Found[report] ? [semV4Found[report]] : SEM_V4_ROUTES[report];
+  const known = semV4Found[report];
+  const candidates = known ? [known.path] : SEM_V4_ROUTES[report];
   let last = null;
+  const tried = [];
 
   for (const path of candidates) {
-    let r;
-    try { r = await semV4Raw(SEM_V4_BASE + path + (qs ? '?' + qs : '')); }
+    let r, method = (known && known.method) || 'GET';
+    try {
+      r = method === 'POST'
+        ? await semV4Raw(SEM_V4_BASE + path, params)
+        : await semV4Raw(SEM_V4_BASE + path + (qs ? '?' + qs : ''));
+    }
     catch (e) {
       last = e.name === 'AbortError' ? 'SEMrush timed out after 20s' : e.message;
+      tried.push(path + ' → ' + last);
       continue;
+    }
+
+    // 405 means this path is right and only the method is wrong. Retry it as a
+    // POST here, not just in the diagnostics, or the audit keeps failing on a
+    // route we have already identified.
+    if (r.status === 405 && method === 'GET') {
+      try {
+        const p2 = await semV4Raw(SEM_V4_BASE + path, params);
+        if (p2.status !== 405) { r = p2; method = 'POST'; }
+      } catch (_) { /* keep the GET result */ }
     }
     // A missing route is the only reason to try the next candidate. 401/403 is
     // the key, 429 is the rate limit, 402 is units — all of them mean this path
     // was right and something else is wrong, so stop and say so.
-    if (r.status === 404 || r.status === 405) { last = 'no route at ' + path; continue; }
+    // 404 means there is nothing here, so try the next candidate. 405 means
+    // this route EXISTS and only the method is wrong -- worth recording
+    // prominently, because it names the right path.
+    if (r.status === 404) { tried.push(path + ' → 404'); last = 'no route at ' + path; continue; }
+    if (r.status === 405) {
+      tried.push(path + ' → 405 (route exists, but rejects GET and POST)');
+      last = path + ' exists but rejects both GET and POST (HTTP 405)';
+      continue;
+    }
     if (r.status === 401 || r.status === 403) {
       return { error: 'SEMrush rejected the key (HTTP ' + r.status + ') — check SEMRUSH_KEY is the v4 token, whole and unexpired' };
     }
@@ -218,11 +250,14 @@ async function semV4(report, params) {
     if (r.status >= 400)  return { error: 'SEMrush HTTP ' + r.status + ': ' + (r.text || '').trim().slice(0, 120) };
 
     const parsed = semV4Parse(r.text);
-    if (parsed.error) { last = parsed.error; continue; }
-    semV4Found[report] = path;
+    if (parsed.error) { tried.push(path + ' → ' + parsed.error); last = parsed.error; continue; }
+    semV4Found[report] = { path, method };
     return parsed;
   }
-  return { error: last || 'SEMrush v4: no working route for ' + report };
+  // Name every path tried and what each said. Reporting only the last one made
+  // a whole exhausted candidate list look like a single wrong guess.
+  return { error: 'no working v4 route for ' + report + ' — tried: ' + tried.join('; ') +
+                  '. Run /semrush/diag to see the full responses.' };
 }
 
 // v3's semicolon-delimited body -> the same list-of-objects shape as v4, so
@@ -362,20 +397,44 @@ app.get('/semrush/diag', async (req, res) => {
     refDomains: { target, target_type: 'root_domain', export_columns: 'domain,domain_authority_score', display_limit: 5 }
   };
 
+  // Ask the API about itself first. A root or discovery document, or even the
+  // error body from a known-good path, usually names the real route layout --
+  // worth more than another round of guessing.
+  out.discovery = [];
+  for (const probe of ['', '/', '/backlinks/v1', '/backlinks/v1/links']) {
+    try {
+      const r = await semV4Raw(SEM_V4_BASE + probe + (probe.endsWith('links') ?
+        '?target=' + encodeURIComponent(target) + '&target_type=root_domain&display_limit=1' : ''));
+      out.discovery.push({ path: probe || '(root)', status: r.status,
+                           sample: (r.text || '').trim().slice(0, 300) });
+    } catch (e) { out.discovery.push({ path: probe || '(root)', error: e.message }); }
+  }
+
   for (const [report, paths] of Object.entries(SEM_V4_ROUTES)) {
     for (const path of paths) {
       const qs = new URLSearchParams(params[report]).toString();
       let r;
       try { r = await semV4Raw(SEM_V4_BASE + path + '?' + qs); }
       catch (e) { out.probes.push({ report, path, error: e.message }); continue; }
+
+      // 405 says the route is right and only the method is wrong, so retry it
+      // as a POST rather than moving on and reporting "no route".
+      let method = 'GET';
+      if (r.status === 405) {
+        try {
+          const p2 = await semV4Raw(SEM_V4_BASE + path, params[report]);
+          if (p2.status !== 405) { r = p2; method = 'POST'; }
+        } catch (_) { /* keep the GET result */ }
+      }
+
       const parsed = r.status < 400 ? semV4Parse(r.text) : { error: 'HTTP ' + r.status };
       out.probes.push({
-        report, path, status: r.status,
+        report, path, method, status: r.status,
         ok: !parsed.error,
         rows: parsed.rows ? parsed.rows.length : 0,
         fields: parsed.rows && parsed.rows[0] ? Object.keys(parsed.rows[0]) : undefined,
         error: parsed.error,
-        sample: (r.text || '').trim().slice(0, 200)
+        sample: (r.text || '').trim().slice(0, 300)
       });
       if (!parsed.error) break;   // this report is answered; move to the next
     }
