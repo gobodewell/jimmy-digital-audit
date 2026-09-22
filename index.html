@@ -969,19 +969,26 @@ async function runDomain(domain) {
     console.log('DOMAIN RESPONSE:', JSON.stringify(d));
     if (d.error) throw new Error(d.error);
     const { da, keywords, traffic, backlinks, refDomains } = d;
-    setMV('da', da,                         da > 5);
-    setMV('kw', (keywords||0).toLocaleString(), keywords > 50);
-    setMV('tr', (traffic||0).toLocaleString(),  traffic  > 75);
+    // null means the provider did not return the column, which is not the same
+    // as a firm with no traffic. Showing 0 for it understated real numbers and
+    // scored the DA check as failed; an em dash and an unknown check say what
+    // actually happened.
+    const num = v => v != null ? Number(v).toLocaleString() : '—';
+    setMV('da', da != null ? da : '—',  da != null ? da > 5  : null);
+    setMV('kw', num(keywords),          keywords != null ? keywords > 50 : null);
+    setMV('tr', num(traffic),           traffic  != null ? traffic  > 75 : null);
     // Backlink numbers only come from SEMrush; leave the tiles blank otherwise.
     setMV('bl', backlinks  != null ? (backlinks||0).toLocaleString()  : '—', backlinks  > 0  ? true : null);
     setMV('rd', refDomains != null ? (refDomains||0).toLocaleString() : '—', refDomains > 10 ? true : null);
     AD.da = da; AD.keywords = keywords; AD.traffic = traffic;
     AD.backlinks = backlinks; AD.refDomains = refDomains;
-    if (da > 5) ck('c-da5');
+    if (da != null && da > 5) ck('c-da5');
+    else if (da == null) unk('c-da5', 'no authority score returned');
     // d.source = 'semrush' when SEMrush fed the numbers; d.note carries the
     // provider status when no usable data came back.
     const src = d.source === 'semrush' ? 'via SEMrush' : 'via DataForSEO';
-    setStep('domain', 'done', d.note || (!keywords && !traffic ? 'no organic data returned' : src));
+    setStep('domain', 'done', d.note ||
+      (keywords == null && traffic == null ? 'no organic data returned' : src));
   } catch(e) {
     console.error('Domain error:', e.message);
     setStep('domain', 'error', e.message);
@@ -1354,7 +1361,16 @@ async function claudeStream(prompt, panelId, statusId, textId) {
         if (msg.type === 'done')       { sawDone = true; fullText = msg.text || ''; stopReason = msg.stop_reason || null; }
         else if (msg.type === 'error') errMsg = msg.error;
         else if (msg.type === 'resuming') { resumes++; textEl.innerHTML = '<span class="spin">⟳</span> Still searching (part ' + (resumes + 1) + ')…'; }
-        else if (msg.type === 'ping') { pings++; textEl.innerHTML = '<span class="spin">⟳</span> Analyzing' + '.'.repeat(pings % 4); }
+        else if (msg.type === 'ping') {
+          // These reviews run for minutes. Showing the elapsed seconds is the
+          // difference between "still working" and "this has hung".
+          pings++;
+          const t = msg.elapsed != null
+            ? ' — ' + (msg.elapsed < 60 ? msg.elapsed + 's'
+                     : Math.floor(msg.elapsed / 60) + 'm ' + (msg.elapsed % 60) + 's')
+            : '';
+          textEl.innerHTML = '<span class="spin">⟳</span> Analyzing' + '.'.repeat(pings % 4) + t;
+        }
       }
     }
 

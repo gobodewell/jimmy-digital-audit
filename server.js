@@ -61,8 +61,8 @@ function pickModel(requested) {
 // transit, so the two would never match and every request would 401 with no
 // clue why. The same trim is applied to the key the app sends.
 const AUDIT_KEY     = (process.env.AUDIT_KEY   || '').trim();   // shared secret the app must send
-const ANTHROPIC_KEY = process.env.ANTHROPIC_KEY  || '';   // AI reviews, server-side
-const AIRTABLE_TOKEN= process.env.AIRTABLE_TOKEN || '';   // Airtable push, server-side
+const ANTHROPIC_KEY = env('ANTHROPIC_KEY');    // AI reviews, server-side
+const AIRTABLE_TOKEN= env('AIRTABLE_TOKEN');   // Airtable push, server-side
 
 app.use(cors({ origin: '*', methods: ['GET','POST','OPTIONS'], allowedHeaders: ['Content-Type','Authorization','X-Audit-Key'] }));
 app.options('*', cors());
@@ -106,13 +106,27 @@ async function dfsPost(path, body) {
 }
 
 // ── SEMrush helper ────────────────────────────────────────────────────────────
-// SEMrush returns CSV-ish text (semicolon-delimited, header row first). Hard
-// failures come back as a line beginning with "ERROR ## :: message".
-async function semFetch(url) {
+// Two generations of this API are live and they are not interchangeable.
+//
+//   v3  key: 32 hex characters. Passed as ?key=. Answers semicolon-delimited
+//       text, header row first, failures as "ERROR ## :: message".
+//   v4  key: a personal access token, "semrtkn-pat-...". Passed as an
+//       "Authorization: Apikey" header against https://api.semrush.com/apis/v4/.
+//       Answers JSON. Column names differ throughout: ascore -> authority_score,
+//       domain_ascore -> domain_authority_score, and domain_rank's short codes
+//       (Dn, Rk, Or, Ot) become domain, rank, organic_keywords, organic_traffic.
+//
+// Semrush stopped issuing v3 keys, so new accounts only have the PAT. Both are
+// supported here: v3 keys keep working, and the shape of the key picks the path
+// rather than a setting nobody would remember to change.
+const SEM_V4 = !/^[0-9a-f]{32}$/i.test(SEM_KEY);
+const SEM_V4_BASE = 'https://api.semrush.com/apis/v4';
+
+async function semFetch(url, opts) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 20000);
   try {
-    const r = await fetch(url, { signal: controller.signal });
+    const r = await fetch(url, Object.assign({ signal: controller.signal }, opts || {}));
     clearTimeout(timeout);
     return await r.text();
   } finally {
@@ -120,43 +134,186 @@ async function semFetch(url) {
   }
 }
 
+// v4 is Early Access and its route layout is not something this proxy can
+// verify from the outside, so each report carries a short list of candidate
+// paths. The first that answers with data wins and is remembered for the life
+// of the process; a 404/405 moves on to the next. /semrush/diag reports which
+// one answered, so a route that moves can be pinned without guesswork.
+const SEM_V4_ROUTES = {
+  domainRank:  ['/analytics/v1/domain_rank', '/trends/v1/domain-rank', '/domain/v1/rank'],
+  blOverview:  ['/backlinks/v1/overview', '/analytics/v1/backlinks_overview'],
+  refDomains:  ['/backlinks/v1/refdomains', '/backlinks/v1/referring-domains',
+                '/analytics/v1/backlinks_refdomains']
+};
+const semV4Found = {};   // report -> the path that worked
+
+async function semV4Raw(url) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20000);
+  try {
+    const r = await fetch(url, {
+      signal: controller.signal,
+      headers: { Authorization: 'Apikey ' + SEM_KEY, Accept: 'application/json' }
+    });
+    clearTimeout(timeout);
+    return { status: r.status, text: await r.text() };
+  } finally { clearTimeout(timeout); }
+}
+
+// Turn one v4 body into { rows } — a list of plain objects keyed by column
+// name — or { error }. The shape is read defensively: rows may arrive as a bare
+// array, or under data/rows/items/result, and either as objects or as a
+// columns+rows pair. Anything unrecognised is reported as unreadable rather
+// than quietly parsed into zeroes, because a zero here would score as "this
+// firm has no backlinks".
+function semV4Parse(txt) {
+  const head = (txt || '').trim().slice(0, 200);
+  if (!head) return { error: 'SEMrush returned an empty body' };
+  if (/^ERROR/i.test(head)) return { error: semWhy(txt) };
+
+  let j;
+  try { j = JSON.parse(txt); }
+  catch (_) {
+    const rows = semCsvRows(txt);
+    if (rows) return { rows };
+    return { error: 'SEMrush v4 returned something this proxy could not read: ' + head };
+  }
+
+  if (j && j.error)   return { error: 'SEMrush: ' + (j.error.message || j.error) };
+  if (j && j.message && !j.data && !j.rows) return { error: 'SEMrush: ' + j.message };
+
+  const body = Array.isArray(j) ? j : (j.data || j.rows || j.items || j.result);
+  if (Array.isArray(body)) {
+    if (body.length && Array.isArray(body[0]) && Array.isArray(j.columns)) {
+      const cols = j.columns.map(c => (typeof c === 'string' ? c : c.name));
+      return { rows: body.map(r => Object.fromEntries(cols.map((c, i) => [c, r[i]]))) };
+    }
+    return { rows: body };
+  }
+  if (body && typeof body === 'object') return { rows: [body] };
+  return { error: 'SEMrush v4 returned no recognisable rows: ' + head };
+}
+
+async function semV4(report, params) {
+  const qs = new URLSearchParams(params).toString();
+  const candidates = semV4Found[report] ? [semV4Found[report]] : SEM_V4_ROUTES[report];
+  let last = null;
+
+  for (const path of candidates) {
+    let r;
+    try { r = await semV4Raw(SEM_V4_BASE + path + (qs ? '?' + qs : '')); }
+    catch (e) {
+      last = e.name === 'AbortError' ? 'SEMrush timed out after 20s' : e.message;
+      continue;
+    }
+    // A missing route is the only reason to try the next candidate. 401/403 is
+    // the key, 429 is the rate limit, 402 is units — all of them mean this path
+    // was right and something else is wrong, so stop and say so.
+    if (r.status === 404 || r.status === 405) { last = 'no route at ' + path; continue; }
+    if (r.status === 401 || r.status === 403) {
+      return { error: 'SEMrush rejected the key (HTTP ' + r.status + ') — check SEMRUSH_KEY is the v4 token, whole and unexpired' };
+    }
+    if (r.status === 402) return { error: 'SEMrush: out of API units' };
+    if (r.status === 429) return { error: 'SEMrush: rate limited — try again shortly' };
+    if (r.status >= 400)  return { error: 'SEMrush HTTP ' + r.status + ': ' + (r.text || '').trim().slice(0, 120) };
+
+    const parsed = semV4Parse(r.text);
+    if (parsed.error) { last = parsed.error; continue; }
+    semV4Found[report] = path;
+    return parsed;
+  }
+  return { error: last || 'SEMrush v4: no working route for ' + report };
+}
+
+// v3's semicolon-delimited body -> the same list-of-objects shape as v4, so
+// everything downstream reads one format regardless of which API answered.
+function semCsvRows(txt) {
+  const lines = (txt || '').trim().split('\n').filter(Boolean);
+  if (lines.length < 2 || !lines[0].includes(';')) return null;
+  const cols = lines[0].split(';').map(h => h.trim());
+  return lines.slice(1).map(l => {
+    const c = l.split(';');
+    return Object.fromEntries(cols.map((h, i) => [h, c[i]]));
+  });
+}
+
+// Column names differ between the two generations, and v3 labels its header row
+// with DISPLAY names rather than the codes asked for in export_columns -- ask
+// for "Or" and the header says "Organic Keywords". So match on a normalised
+// key: lowercased, with everything but letters and digits stripped. That makes
+// organic_keywords, "Organic Keywords" and organicKeywords the same lookup, and
+// leaves the call sites naming both generations' columns and nothing else.
+const semKey = k => String(k).toLowerCase().replace(/[^a-z0-9]/g, '');
+function semCell(row, names) {
+  if (!row) return null;
+  const want = names.map(semKey);
+  for (const k of Object.keys(row)) {
+    if (want.includes(semKey(k)) && row[k] != null && row[k] !== '') return row[k];
+  }
+  return null;
+}
+const semNum = (row, ...names) => {
+  const v = semCell(row, names);
+  if (v == null) return null;
+  const n = parseInt(String(v).replace(/[^0-9-]/g, ''), 10);
+  return Number.isNaN(n) ? null : n;
+};
+const semStr = (row, ...names) => {
+  const v = semCell(row, names);
+  return v == null ? '' : String(v).trim();
+};
+
 // Returns { da, keywords, traffic } on success, or { error } when SEMrush
 // reports a problem (bad key, no data) so the caller can fall back.
 async function semrushOverview(domain) {
-  // domain_rank → organic keywords (Or) + organic traffic (Ot)
-  const txt = await semFetch(
-    `https://api.semrush.com/?type=domain_rank&key=${SEM_KEY}&export_columns=Dn,Rk,Or,Ot&domain=${encodeURIComponent(domain)}&database=us`
-  );
-  const trimmed = (txt || '').trim();
-  if (/^ERROR/i.test(trimmed)) return { error: semWhy(trimmed) };
+  // domain_rank → organic keywords + organic traffic.
+  const r = SEM_V4
+    ? await semV4('domainRank', {
+        target: domain, database: 'us',
+        export_columns: 'domain,rank,organic_keywords,organic_traffic' })
+    : await semLegacy(`https://api.semrush.com/?type=domain_rank&key=${SEM_KEY}` +
+        `&export_columns=Dn,Rk,Or,Ot&domain=${encodeURIComponent(domain)}&database=us`);
+  if (r.error) return { error: r.error };
 
-  const rows = trimmed.split('\n');
-  let keywords = 0, traffic = 0;
-  if (rows.length >= 2) {
-    const cols = rows[1].split(';');           // Dn;Rk;Or;Ot
-    keywords = parseInt(cols[2], 10) || 0;
-    traffic  = parseInt(cols[3], 10) || 0;
-  }
+  const row = (r.rows || [])[0] || {};
+  // Read by either generation's column name. null, not 0, when the column is
+  // absent — a zero here would report a firm with real traffic as having none.
+  const keywords = semNum(row, 'organic_keywords', 'Or', 'Organic Keywords');
+  const traffic  = semNum(row, 'organic_traffic',  'Ot', 'Organic Traffic');
 
   // backlinks_overview → Authority Score (the real "DA"), plus total backlinks
   // and referring domains — all three come back in one billed call, so we may
-  // as well take them. Columns arrive in the order named in export_columns.
-  // Best-effort: a failure here leaves the values at 0 rather than aborting.
-  let da = 0, backlinks = 0, refDomains = 0;
+  // as well take them. Best-effort: a failure here leaves them unmeasured
+  // rather than aborting the whole overview.
+  let da = null, backlinks = null, refDomains = null;
   try {
-    const bl = await semFetch(
-      `https://api.semrush.com/analytics/v1/?type=backlinks_overview&key=${SEM_KEY}&target=${encodeURIComponent(domain)}&target_type=root_domain&export_columns=ascore,total,domains_num`
-    );
-    const blRows = (bl || '').trim().split('\n');
-    if (blRows.length >= 2 && !/^ERROR/i.test(blRows[0])) {
-      const c = blRows[1].split(';');            // ascore;total;domains_num
-      da         = parseInt(c[0], 10) || 0;
-      backlinks  = parseInt(c[1], 10) || 0;
-      refDomains = parseInt(c[2], 10) || 0;
+    const b = SEM_V4
+      ? await semV4('blOverview', {
+          target: domain, target_type: 'root_domain',
+          export_columns: 'authority_score,total,domains_num' })
+      : await semLegacy(`https://api.semrush.com/analytics/v1/?type=backlinks_overview&key=${SEM_KEY}` +
+          `&target=${encodeURIComponent(domain)}&target_type=root_domain` +
+          `&export_columns=ascore,total,domains_num`);
+    if (!b.error) {
+      const br = (b.rows || [])[0] || {};
+      da         = semNum(br, 'authority_score', 'ascore', 'Authority Score');
+      backlinks  = semNum(br, 'total', 'Backlinks');
+      refDomains = semNum(br, 'domains_num', 'Referring Domains');
     }
   } catch (_) { /* backlink data is optional */ }
 
   return { da, keywords, traffic, backlinks, refDomains };
+}
+
+// A v3 call, normalised to the same { rows } / { error } shape as semV4 so the
+// call sites above do not branch on anything but the URL.
+async function semLegacy(url) {
+  let txt;
+  try { txt = await semFetch(url); }
+  catch (e) { return { error: e.name === 'AbortError' ? 'SEMrush timed out after 20s' : e.message }; }
+  const trimmed = (txt || '').trim();
+  if (/^ERROR/i.test(trimmed)) return { error: semWhy(trimmed) };
+  return { rows: semCsvRows(trimmed) || [] };
 }
 
 // ── Domain helper ─────────────────────────────────────────────────────────────
@@ -173,6 +330,58 @@ function rootDomain(u) {
 
 // ── Health ────────────────────────────────────────────────────────────────────
 app.get('/health', (req, res) => res.json({ ok: true, dfs: !!DFS_LOGIN, sem: !!SEM_KEY, sf: !!SF_KEY, ai: !!ANTHROPIC_KEY, at: !!AIRTABLE_TOKEN, google: !!GOOGLE_KEY, locked: !!AUDIT_KEY, model: AI_MODEL }));
+
+// ── SEMrush diagnostics ───────────────────────────────────────────────────────
+// Probes every candidate v4 route and reports what each one answered. v4 is
+// Early Access, so a route can move; this turns "the directory check is broken"
+// into a specific path and status without redeploying to find out. Never
+// returns the key itself -- only its generation, length and last four.
+app.get('/semrush/diag', async (req, res) => {
+  if (!SEM_KEY) return res.json({ error: 'SEMRUSH_KEY not set' });
+  const target = rootDomain(req.query.domain || 'semrush.com');
+  const out = {
+    keyGeneration: SEM_V4 ? 'v4 (token)' : 'v3 (32-char hex)',
+    keyLength: SEM_KEY.length,
+    keyEndsWith: SEM_KEY.slice(-4),
+    base: SEM_V4_BASE,
+    target,
+    probes: []
+  };
+
+  if (!SEM_V4) {
+    const r = await semLegacy(`https://api.semrush.com/?type=domain_rank&key=${SEM_KEY}` +
+      `&export_columns=Dn,Rk,Or,Ot&domain=${encodeURIComponent(target)}&database=us`);
+    out.probes.push({ generation: 'v3', report: 'domainRank',
+                      ok: !r.error, error: r.error, rows: (r.rows || []).length });
+    return res.json(out);
+  }
+
+  const params = {
+    domainRank: { target, database: 'us', export_columns: 'domain,rank,organic_keywords,organic_traffic' },
+    blOverview: { target, target_type: 'root_domain', export_columns: 'authority_score,total,domains_num' },
+    refDomains: { target, target_type: 'root_domain', export_columns: 'domain,domain_authority_score', display_limit: 5 }
+  };
+
+  for (const [report, paths] of Object.entries(SEM_V4_ROUTES)) {
+    for (const path of paths) {
+      const qs = new URLSearchParams(params[report]).toString();
+      let r;
+      try { r = await semV4Raw(SEM_V4_BASE + path + '?' + qs); }
+      catch (e) { out.probes.push({ report, path, error: e.message }); continue; }
+      const parsed = r.status < 400 ? semV4Parse(r.text) : { error: 'HTTP ' + r.status };
+      out.probes.push({
+        report, path, status: r.status,
+        ok: !parsed.error,
+        rows: parsed.rows ? parsed.rows.length : 0,
+        fields: parsed.rows && parsed.rows[0] ? Object.keys(parsed.rows[0]) : undefined,
+        error: parsed.error,
+        sample: (r.text || '').trim().slice(0, 200)
+      });
+      if (!parsed.error) break;   // this report is answered; move to the next
+    }
+  }
+  res.json(out);
+});
 
 // ── 1. Domain overview — DA, keywords, traffic ────────────────────────────────
 // Endpoint: /v3/dataforseo_labs/google/domain_rank_overview/live
@@ -619,32 +828,40 @@ app.get('/directories', async (req, res) => {
   if (!SEM_KEY) return res.status(500).json({ error: 'SEMRUSH_KEY not set — directory checks read the backlink profile' });
 
   const target = rootDomain(domain);
-  const base = `https://api.semrush.com/analytics/v1/?type=backlinks_refdomains&key=${SEM_KEY}` +
-               `&target=${encodeURIComponent(target)}&target_type=root_domain` +
-               `&export_columns=domain,domain_ascore&display_limit=1000`;
 
   try {
     // Sorted by authority so the directories that matter surface first if the
-    // firm has more referring domains than the limit. Column and sort naming
-    // differs across SEMrush report families, so fall back to an unsorted
-    // request rather than failing the whole check on a rejected parameter.
-    let txt = await semFetch(base + '&display_sort=domain_ascore_desc');
-    if (/^ERROR/i.test((txt || '').trim())) txt = await semFetch(base);
-
-    const trimmed = (txt || '').trim();
-    if (/^ERROR/i.test(trimmed)) {
-      return res.json({ error: 'SEMrush: ' + semWhy(trimmed) });
+    // firm has more referring domains than the limit. The sort key is named
+    // differently in each generation, and a rejected sort parameter should not
+    // fail the whole check — so fall back to an unsorted request.
+    let r;
+    if (SEM_V4) {
+      const p = { target, target_type: 'root_domain',
+                  export_columns: 'domain,domain_authority_score', display_limit: 1000 };
+      r = await semV4('refDomains', Object.assign({ display_sort: 'domain_authority_score_desc' }, p));
+      if (r.error) r = await semV4('refDomains', p);
+    } else {
+      const base = `https://api.semrush.com/analytics/v1/?type=backlinks_refdomains&key=${SEM_KEY}` +
+                   `&target=${encodeURIComponent(target)}&target_type=root_domain` +
+                   `&export_columns=domain,domain_ascore&display_limit=1000`;
+      r = await semLegacy(base + '&display_sort=domain_ascore_desc');
+      if (r.error) r = await semLegacy(base);
     }
+    if (r.error) return res.json({ error: 'SEMrush: ' + r.error });
 
-    // Find the domain column by header name — its position is not guaranteed.
-    const rows = trimmed.split('\n');
-    const headers = (rows[0] || '').split(';').map(h => h.trim().toLowerCase());
-    const di = headers.indexOf('domain') >= 0 ? headers.indexOf('domain') : 0;
-
+    // Read the domain column by name under either generation. A response that
+    // parsed but carried no usable domain column is reported as unreadable, not
+    // as a firm with no referring domains -- that would score every directory
+    // as missing and quietly cost the client real points.
     const seen = new Set();
-    for (const line of rows.slice(1)) {
-      const d = rootDomain((line.split(';')[di] || '').trim());
+    for (const row of r.rows || []) {
+      const d = rootDomain(semStr(row, 'domain', 'source_url', 'url'));
       if (d) seen.add(d);
+    }
+    if (!seen.size && (r.rows || []).length) {
+      return res.json({ error: 'SEMrush returned ' + r.rows.length +
+        ' referring domains but no readable domain column — fields were: ' +
+        Object.keys(r.rows[0] || {}).join(', ') });
     }
 
     // A listing may sit on a subdomain (eg. austin.bbb.org), so match the
@@ -982,17 +1199,36 @@ app.post('/ai/message', async (req, res) => {
   res.flushHeaders?.();
   const send = obj => { try { res.write(JSON.stringify(obj) + '\n'); } catch (e) {} };
 
+  // A heartbeat on its own timer, not on upstream events. The ping used to fire
+  // from onEvent, which means it only fired while Anthropic was actively
+  // streaming -- and the long stretches in these reviews are exactly the ones
+  // where it is NOT: a web_fetch of a slow page, or a server-side tool loop
+  // running between turns. The connection sat silent for those stretches and
+  // got dropped as idle, which the app saw as a review that returned nothing.
+  // The social review is the one that hits this, being the most tool-hungry.
+  const started = Date.now();
+  const beat = setInterval(() => send({ type: 'ping', elapsed: Math.round((Date.now() - started) / 1000) }), 5000);
+
+  // Stop working the moment the browser goes away, rather than finishing a
+  // multi-minute review for a client that is no longer listening.
+  let gone = false;
+  res.on('close', () => { gone = true; clearInterval(beat); });
+
   try {
     const out = await claudeRun({
       prompt, model, tools: WEB_TOOLS, maxTokens: 8192,
-      onEvent:  () => send({ type: 'ping' }),      // heartbeat
       onResume: () => send({ type: 'resuming' })
     });
+    clearInterval(beat);
+    if (gone) return;
     if (out.error) { send({ type: 'error', error: out.error }); return res.end(); }
-    send({ type: 'done', text: out.text, stop_reason: out.stopReason, model: pickModel(model) });
+    send({ type: 'done', text: out.text, stop_reason: out.stopReason, model: pickModel(model),
+           elapsed: Math.round((Date.now() - started) / 1000) });
     res.end();
   } catch (e) {
+    clearInterval(beat);
     console.error('AI proxy error:', e.message);
+    if (gone) return;
     send({ type: 'error', error: e.message });
     res.end();
   }
