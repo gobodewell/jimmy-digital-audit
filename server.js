@@ -1689,22 +1689,54 @@ function aimNum(row, names) {
   return null;
 }
 
-async function aimTargetMetrics({ targets, platform, locationCode, languageCode }) {
+// `target` is an array of OBJECTS — up to ten, each carrying a domain or a
+// keyword plus optional per-entity settings. Passing plain strings returns
+// "Invalid Field: 'Each target item must be an object.'". The exact key names
+// are not verifiable from outside this proxy, so the candidates below are tried
+// in order and the one the API validates is remembered for the life of the
+// process. A validation error moves to the next shape; anything else (credits,
+// auth, no data) stops, because those mean the shape was fine.
+const AIM_TARGET_SHAPES = [
+  { name: 'domain/keyword', build: t => t.kind === 'domain' ? { domain: t.value } : { keyword: t.value } },
+  { name: 'target+type',    build: t => ({ target: t.value, type: t.kind }) },
+  { name: 'value+type',     build: t => ({ value: t.value, type: t.kind }) }
+];
+let aimShape = null;
+const aimIsValidationError = code => code === 40501 || code === 40001;
+
+async function aimTargetMetricsOnce({ targets, platform, locationCode, languageCode, shape }) {
   const d = await dfsPost(AIM_BASE + '/target_metrics/live', [{
-    target: targets,
+    target: targets.map(shape.build),
     platform,
     location_code: locationCode || 2840,
     language_code: languageCode || 'en',
     internal_list_limit: 10
   }]);
   if (d && d.status_code && d.status_code !== 20000)
-    return { error: 'DataForSEO ' + d.status_code + ': ' + d.status_message };
+    return { error: 'DataForSEO ' + d.status_code + ': ' + d.status_message, code: d.status_code };
   const task = d?.tasks?.[0];
   if (task && task.status_code !== 20000)
-    return { error: 'DataForSEO ' + task.status_code + ': ' + task.status_message };
+    return { error: 'DataForSEO ' + task.status_code + ': ' + task.status_message, code: task.status_code };
   const result = task?.result?.[0];
-  if (!result) return { error: 'DataForSEO returned no LLM mentions result for ' + targets.join(', ') };
-  return { result, items: result.items || [], totalCount: result.total_count ?? null };
+  if (!result) return { error: 'DataForSEO returned no LLM mentions result for ' +
+    targets.map(t => t.value).join(', ') };
+  return { result, items: result.items || [], totalCount: result.total_count ?? null, shape: shape.name };
+}
+
+async function aimTargetMetrics(opts) {
+  const shapes = aimShape ? [aimShape] : AIM_TARGET_SHAPES;
+  let last = null;
+  const tried = [];
+  for (const shape of shapes) {
+    const r = await aimTargetMetricsOnce({ ...opts, shape });
+    if (!r.error) { aimShape = shape; return r; }
+    tried.push(shape.name + ' → ' + r.error);
+    last = r;
+    // Not a "wrong shape" answer — the request was understood and something
+    // else is wrong. Trying other spellings would just bill for more failures.
+    if (!aimIsValidationError(r.code)) return { ...r, tried };
+  }
+  return { ...last, tried, error: (last && last.error) + ' · tried target shapes: ' + tried.join(' | ') };
 }
 
 app.post('/ai/mentions', async (req, res) => {
@@ -1716,7 +1748,8 @@ app.post('/ai/mentions', async (req, res) => {
   // The domain and the brand name are different targets: a firm can be talked
   // about constantly and never have its site cited, which is exactly the gap
   // worth reporting.
-  const targets = [target, ...(name ? [name] : [])];
+  const targets = [{ value: target, kind: 'domain' },
+                   ...(name ? [{ value: name, kind: 'keyword' }] : [])];
 
   const out = { target, targets, platforms: {} };
   for (const platform of AIM_PLATFORMS) {
@@ -1737,6 +1770,7 @@ app.post('/ai/mentions', async (req, res) => {
     out.platforms[platform] = {
       rows:        items.length,
       totalCount:  r.totalCount,
+      targetShape: r.shape,
       mentions:    sum(['mentions_count', 'mentions', 'mention_count', 'count']),
       citations:   sum(['citations_count', 'citations', 'citation_count']),
       searchVolume: sum(['ai_search_volume', 'search_volume', 'monthly_searches']),
@@ -1758,9 +1792,11 @@ app.post('/ai/mentions/diag', async (req, res) => {
   if (!DFS_LOGIN) return res.json({ error: 'DataForSEO not configured' });
   const target = rootDomain(req.body?.domain || 'fisherinvestments.com');
   const out = { target, platforms: {} };
+  const one = [{ value: target, kind: 'domain' }];
   for (const platform of AIM_PLATFORMS) {
-    const r = await aimTargetMetrics({ targets: [target], platform });
-    out.platforms[platform] = r.error ? { error: r.error } : {
+    const r = await aimTargetMetrics({ targets: one, platform });
+    out.platforms[platform] = r.error ? { error: r.error, triedShapes: r.tried || [] } : {
+      targetShape: r.shape,
       totalCount: r.totalCount,
       rows: r.items.length,
       resultKeys: Object.keys(r.result || {}),
