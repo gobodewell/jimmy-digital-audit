@@ -2667,6 +2667,24 @@ function recalc() {
 // Everything the cover summary is allowed to know. Assembled here so the
 // boundary is visible: if a fact is not in this object, the summary cannot
 // state it.
+// Readers for the AI-mentions block. Each returns null when the platform did
+// not report, so an absent figure stays out of the prompt entirely rather than
+// arriving as a zero the summary could describe as "no AI presence".
+const aim = (plat, key) => {
+  const p = (AD.aiMentions && AD.aiMentions.platforms || {})[plat];
+  return (p && !p.error && p[key] != null) ? p[key] : null;
+};
+const pctOr = v => v == null ? null : v + '%';
+// The domains cited alongside the firm, and whether theirs is among them --
+// the single most useful sentence this section can give a client.
+function aimTop() {
+  const p = (AD.aiMentions && AD.aiMentions.platforms || {}).google
+         || (AD.aiMentions && AD.aiMentions.platforms || {}).chat_gpt;
+  if (!p || p.error || !(p.cited || []).length) return null;
+  const top = p.cited.slice(0, 5).map(x => x.domain).join(', ');
+  return top + (p.cited.some(x => x.own) ? '' : ' — their own site is not among them');
+}
+
 function summaryPayload() {
   recalc();
   return {
@@ -2686,6 +2704,14 @@ function summaryPayload() {
       'Google rating': AD.gbpRating,
       'Free directories claimed': AD.directories
         ? AD.directories.freeFound + ' of ' + AD.directories.freeTotal : null,
+      // AI visibility, so the cover summary can speak to it from measurement
+      // rather than leaving the newest part of the audit out of the narrative.
+      // Named per platform because the two differ sharply for the same firm.
+      'Mentions in Google AI Overview answers': aim('google', 'mentions'),
+      'Mentions in ChatGPT answers': aim('chat_gpt', 'mentions'),
+      'Share of AI answers citing their own site (Google)': pctOr(aim('google', 'ownCitedShare')),
+      'Share of AI answers citing their own site (ChatGPT)': pctOr(aim('chat_gpt', 'ownCitedShare')),
+      'Most-cited sources in AI answers about them': aimTop(),
       'Unmeasured checks': UNK.size || null
     }
   };
