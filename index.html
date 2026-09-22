@@ -129,6 +129,10 @@ textarea{resize:vertical;min-height:60px}
 .step.done{color:var(--green);border-color:#bbf7d0;background:#f0fdf4}
 .step.running{color:var(--amber);border-color:#fde68a;background:#fffbeb}
 .step.error{color:var(--red);border-color:#fecaca;background:#fef2f2}
+/* Pushed to the right so it sits clear of the reason text, which can run long. */
+.step-retry{margin-left:auto;flex:none;padding:3px 10px;font-size:11px;font-weight:600;color:var(--red);background:#fff;border:1px solid #fca5a5;border-radius:4px;cursor:pointer}
+.step-retry:hover{background:#fee2e2}
+.step-retry:disabled{opacity:.55;cursor:default}
 .si{font-size:14px;width:18px;text-align:center;flex-shrink:0}
 .spin{display:inline-block;animation:spin .8s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
@@ -359,6 +363,7 @@ textarea{resize:vertical;min-height:60px}
         <div style="font-size:11px;color:var(--text3);margin:0 0 8px">
           From DataForSEO's database of real prompts, not a sample of test questions.</div>
         <div id="aiment-body"></div>
+        <div id="aiment-live"></div>
       </div>
 
       <div id="aivis-block" class="card" style="display:none">
@@ -1002,6 +1007,45 @@ function initSteps() {
   ).join('');
 }
 
+// What each step actually runs, so a failed one can be run again without
+// re-running the whole audit. The arguments are read fresh from the form on
+// every call rather than captured at audit time: a step that failed because
+// the URL had a typo should retry against the corrected URL, not the old one.
+function auditArgs() {
+  let url = getVal('clientURL') || '';
+  if (url && !/^https?:\/\//i.test(url)) url = 'https://' + url;
+  url = url.replace(/\/$/, '');
+  return { url, name: getVal('clientName') || '', city: getVal('clientCity') || '',
+           domain: url.replace(/^https?:\/\/(www\.)?/, '').replace(/\/.*$/, '') };
+}
+
+const STEP_RUN = {
+  domain:      () => { const a = auditArgs(); return runDomain(a.domain); },
+  lighthouse:  () => { const a = auditArgs(); return runLighthouse(a.url); },
+  gbp:         () => { const a = auditArgs(); return runGBP(a.name, a.url, a.city); },
+  schema:      () => { const a = auditArgs(); return runSchema(a.url); },
+  dirs:        () => { const a = auditArgs(); return runDirectories(a.domain); },
+  'ai-vis':    () => { const a = auditArgs(); return runAIVisibility(a.name, a.url); },
+  'ai-web':    () => { const a = auditArgs(); return runAIWebsite(a.name, a.url); },
+  'ai-soc':    () => { const a = auditArgs(); return runAISocial(a.name, a.url); },
+  'ai-score':  () => { const a = auditArgs(); return runAIVisibilityScore(a.name, a.url, a.city); },
+  'ai-ment':   () => { const a = auditArgs(); return runAIMentions(a.name, a.url); },
+  socialfetch: () => pullFollowers()
+};
+
+// Re-runs one step. The runner sets its own step state, so the line repaints
+// itself: the button vanishes on success and comes back on another failure.
+// There is no second code path here -- a retry is the same call as the first
+// attempt, so it cannot set boxes the original run would not have.
+async function retryStep(id) {
+  const run = STEP_RUN[id];
+  if (!run) return;
+  const b = document.getElementById('retry-' + id);
+  if (b) { b.disabled = true; b.textContent = '...'; }
+  try { await run(); }
+  catch (e) { console.error('Retry of ' + id + ' failed:', e); }
+}
+
 function setStep(id, state, msg) {
   const el = document.getElementById('step-'+id);
   if (!el) return;
@@ -1009,7 +1053,13 @@ function setStep(id, state, msg) {
   el.className = 'step ' + state;
   const label = STEP_DEFS.find(s=>s.id===id)?.label || id;
   const note  = msg ? ` <span style="color:var(--text3);font-size:11px">— ${msg}</span>` : '';
-  el.innerHTML = `<span class="si">${icons[state]||'○'}</span>${label}${note}`;
+  // A failed step is offered again rather than just reported. Only on failure:
+  // a retry button beside a green tick invites a pointless second call, and
+  // these are billed per request.
+  const retry = (state === 'error' && STEP_RUN[id])
+    ? ` <button id="retry-${id}" onclick="retryStep('${id}')" class="step-retry" title="Run this step again">Retry</button>`
+    : '';
+  el.innerHTML = `<span class="si">${icons[state]||'○'}</span>${label}${note}${retry}`;
 }
 
 // ── Main audit runner ─────────────────────────────────────────────────────────
@@ -1300,10 +1350,28 @@ async function runSchema(url) {
     // rendered as "No structured data found on the homepage" — a claim about a
     // page the audit never saw, and one that costs a check the firm may pass.
     if (d.blocked) {
+      // Nothing could read the page -- but Google may already have. A rich
+      // result is Google displaying what it parsed out of the markup, so it
+      // settles the check even though the page itself stayed shut to us.
+      if (d.googleParsed) {
+        body.innerHTML =
+          '<div style="font-size:13px;color:#16a34a;font-weight:600">Structured data confirmed — via Google</div>' +
+          '<div style="font-size:12px;color:var(--text2);margin-top:6px">The homepage refused every crawler, ' +
+          'but Google is showing ' + escHtml((d.richSignals || []).join(', ')) +
+          ' for this site. Google can only build those from structured data, so the markup exists ' +
+          'and is valid enough to use.</div>' +
+          '<div style="font-size:11px;color:var(--text3);margin-top:6px">Read from search results, not the page. ' +
+          'The specific types could not be listed — that needs the markup itself.</div>';
+        ck('c-sch');
+        measured('c-sch');
+        setStep('schema', 'done', 'confirmed via Google rich results');
+        return;
+      }
       body.innerHTML = '<span style="color:#b45309;font-size:12px">Could not read the homepage markup: ' +
         escHtml(d.note || 'the page refused every request') + '</span>' +
         '<div style="font-size:11px;color:var(--text3);margin-top:6px">' +
-        'Not a finding either way — the markup was never seen.</div>';
+        'Not a finding either way — the markup was never seen.' +
+        (d.richNote ? ' ' + escHtml(d.richNote) + '.' : '') + '</div>';
       unk('c-sch', d.note || 'could not read the homepage markup');
       setStep('schema', 'error', 'could not read the page');
       return;
@@ -1817,6 +1885,7 @@ async function runAIMentions(name, url) {
     }
 
     body.innerHTML = html;
+    renderAIMentions();
     const g = (d.platforms || {}).google || {};
     const c = (d.platforms || {}).chat_gpt || {};
     const meas = [g, c].filter(p => p && !p.error && p.mentions != null);
@@ -1841,9 +1910,65 @@ async function runAIMentions(name, url) {
         '<div style="font-size:11px;color:var(--text3);margin-top:6px">' +
         'This needs the LLM Mentions endpoints on the DataForSEO account. ' +
         'Settings → Test AI mentions runs the same call on its own.</div>';
+      // The vendor call failing does not mean we measured nothing.
+      renderAIMentions();
     }
     setStep('ai-ment', 'error', e.message);
   }
+}
+
+// When DataForSEO has no rows for a firm, the mentions panel is four em
+// dashes -- accurate, and useless to a client. But we are not actually without
+// a measurement: the visibility run asks the models live, with search on, and
+// counts what came back. For a firm outside the sampled prompt database that
+// run IS the measurement of their AI presence, so it is shown here rather than
+// left on another tab while this panel says nothing.
+//
+// It is never presented as the same thing. The figures are labelled as a live
+// test with their run counts attached, so a reader can see exactly what was
+// asked and how often it hit.
+function renderAIMentions() {
+  const el = document.getElementById('aiment-live');
+  if (!el) return;
+  const plats = (AD.aiMentions && AD.aiMentions.platforms) || {};
+  const vals  = Object.values(plats);
+  // Only stand in when the database genuinely had nothing. A firm with real
+  // mention counts does not need a substitute, and showing both invites the
+  // two to be read as one number.
+  const tracked = vals.some(p => p && !p.error && p.mentions != null);
+  const v = AD.aiVisibility;
+  if (tracked || !v) { el.innerHTML = ''; return; }
+
+  const rows = [
+    ['Named in AI answers about them', v.brandedScore,    v.brandedHits,     v.brandedRuns,
+     'asked about the firm by name, the model named them'],
+    ['Their site cited as the source', v.brandedCitation, v.brandedCiteHits, v.brandedCiteRuns,
+     'asked about them by name, the model quoted pages on their own domain'],
+    ['Found without being named',      v.namedScore,      v.namedHits,       v.namedRuns,
+     'asked for advisors in their area, the firm came up unprompted'],
+    ['Site cited in those answers',    v.citationShare,   v.citationHits,    v.citationRuns,
+     'their own domain was among the sources the model read']
+  ].filter(r => r[3]);   // a tier that never ran says nothing
+
+  if (!rows.length) { el.innerHTML = ''; return; }
+
+  el.innerHTML =
+    '<div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border)">' +
+    '<div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;' +
+    'letter-spacing:.4px;margin-bottom:4px">Measured live instead — ' +
+    escHtml(v.model || 'Claude') + ' with web search</div>' +
+    '<div style="font-size:11px;color:var(--text3);margin-bottom:10px">' +
+    'This firm is not in DataForSEO\'s tracked-prompt database, so the figures above ' +
+    'are blank. These are from asking the models directly, ' + (v.prompts || 0) +
+    ' prompt' + ((v.prompts === 1) ? '' : 's') + ' run ' + (v.repeats || 1) + '&times; each.</div>' +
+    '<div class="mg">' +
+    rows.map(([label, pct, hits, runs, note]) =>
+      '<div class="mc"><div class="ml">' + label + '</div>' +
+      '<div class="mv" style="color:' + (pct > 0 ? 'var(--green)' : 'var(--text2)') + '">' +
+        (pct == null ? '—' : pct + '%') + '</div>' +
+      '<div class="mt">' + hits + ' of ' + runs + ' runs — ' + note + '</div></div>'
+    ).join('') +
+    '</div></div>';
 }
 
 // ── AI: visibility ────────────────────────────────────────────────────────────
@@ -2115,6 +2240,12 @@ async function runAIVisibilityScore(name, url, city) {
 
     AD.aiVisibilityScore = result.visibilityScore;
     AD.aiCitationShare   = result.citationShare;
+    // Kept whole: for a firm outside DataForSEO's sampled prompt database this
+    // live run is the ONLY measurement of their AI presence, and the mentions
+    // panel falls back to it rather than printing four em dashes.
+    AD.aiVisibility = result;
+    // The two run in parallel, so whichever lands second repaints the panel.
+    if (typeof renderAIMentions === 'function') renderAIMentions();
 
     // m-aivis and m-aibrand are the retired knowledge-mode tiles, kept as
     // hidden spans so this still writes somewhere when knowledgeMode is on.

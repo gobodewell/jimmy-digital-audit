@@ -1184,13 +1184,199 @@ Rules:
   } catch (e) { return { error: e.message }; }
 }
 
+// The route that does not need the site's permission.
+//
+// Everything above asks the firm's server for the page, and a CDN bot rule can
+// refuse all of it -- our proxy, DataForSEO's crawler and Google's Lighthouse
+// alike. A prospect is never going to allowlist a tool auditing them without
+// their knowledge, so the fix cannot depend on them.
+//
+// So stop asking the site. Ask Google what it has ALREADY indexed. A
+// `site:domain` query is answered by Google's own index, and the firm's CDN
+// has no say in it.
+//
+// It is also better evidence. A robots meta tag states an intention; pages
+// sitting in the index are the outcome. A site with pages in Google's index is
+// indexable -- that is what the check is asking, and this answers it directly
+// rather than by inference.
+//
+// The reverse does NOT hold: zero results can mean a brand-new site, a SERP
+// quirk or a bad query, so it is never reported as "not indexed". Only a
+// positive finding is taken from here.
+async function indexedPages(domain, opts) {
+  if (!DFS_LOGIN) return { error: 'DataForSEO not configured' };
+  const d = await dfsPost('/serp/google/organic/live/advanced', [{
+    keyword: 'site:' + domain,
+    location_code: 2840,
+    language_code: 'en',
+    depth: 20
+  }]);
+  if (d?.status_code && d.status_code !== 20000)
+    return { error: 'DataForSEO ' + d.status_code + ': ' + d.status_message };
+  const task = d?.tasks?.[0];
+  if (task && task.status_code !== 20000)
+    return { error: 'DataForSEO ' + task.status_code + ': ' + task.status_message };
+  const result = task?.result?.[0];
+  if (!result) return { error: 'no SERP result returned' };
+
+  // Count only organic rows that really are on this domain: a `site:` query
+  // with no matches falls back to showing something else entirely, and
+  // counting those rows would report any domain as indexed.
+  const root  = String(domain).replace(/^www\./, '').toLowerCase();
+  const items = Array.isArray(result.items) ? result.items : [];
+  const mine  = items.filter(it => {
+    if (it.type !== 'organic') return false;
+    const host = String(it.domain || '').replace(/^www\./, '').toLowerCase();
+    return host === root || host.endsWith('.' + root);
+  });
+  return {
+    indexedCount: typeof result.se_results_count === 'number' ? result.se_results_count : null,
+    shown: mine.length,
+    sample: mine.slice(0, 5).map(it => it.url).filter(Boolean),
+    // The same rows, kept whole for the rich-result read. One SERP call
+    // answers two questions; splitting it would bill twice for one lookup.
+    rows: opts && opts.raw ? mine : undefined
+  };
+}
+
+// Structured data, without reading the page.
+//
+// There is no API to call for this. schema.org is a vocabulary, not a service;
+// Google retired the Structured Data Testing Tool API; the Rich Results Test
+// and validator.schema.org have no public endpoint. So there is nothing to ask
+// except Google's search results -- and those are useful, because a rich
+// result is Google showing what it PARSED out of the site's markup.
+//
+// Breadcrumbs, review stars, FAQ dropdowns and sitelinks cannot be produced
+// without structured data. Seeing one is proof the markup exists and is valid
+// enough for Google to build on.
+//
+// Strictly one-way. Most of what a financial advisory firm marks up
+// (FinancialService, LocalBusiness, Person) produces NO visible rich result,
+// so an absence here means nothing at all and is never reported as missing
+// schema. Only the positive is taken.
+//
+// Field names are read defensively across the shapes DataForSEO has used,
+// because guessing one wrong is how the LLM Mentions integration reported a
+// firm with 855 mentions as having none. /site/schema/diag prints the real
+// keys so this can be checked against the live API rather than trusted.
+const RICH_SIGNALS = [
+  ['breadcrumb',      it => it.breadcrumb, 'breadcrumbs'],
+  ['rating',          it => it.rating || it.reviews_count || it.rating_value, 'review stars'],
+  ['faq',             it => it.faq || it.questions, 'FAQ answers'],
+  ['sitelinks',       it => Array.isArray(it.links) && it.links.length, 'sitelinks'],
+  ['price',           it => it.price, 'pricing'],
+  ['featured',        it => it.is_featured_snippet, 'a featured snippet'],
+  ['images',          it => it.images && it.images.length, 'thumbnail images']
+];
+
+async function richResults(url) {
+  let domain;
+  try { domain = new URL(url).hostname; } catch { domain = String(url); }
+  const idx = await indexedPages(domain, { raw: true });
+  if (idx.error) return { proven: false, note: 'could not read the SERP: ' + idx.error };
+  const mine = idx.rows || [];
+  if (!mine.length) return { proven: false, note: 'no results for this domain to read' };
+
+  const found = new Set();
+  for (const it of mine) {
+    for (const [, get, label] of RICH_SIGNALS) {
+      let v; try { v = get(it); } catch { v = null; }
+      if (v) found.add(label);
+    }
+  }
+  return {
+    proven: found.size > 0,
+    signals: [...found],
+    rows: mine.length,
+    // What the rows actually carried, so a signal we are not reading yet is
+    // visible rather than silently missed.
+    itemKeys: [...new Set(mine.flatMap(it => Object.keys(it || {})))].sort(),
+    note: found.size ? null : 'Google shows no rich result for this site, which is ' +
+      'not evidence either way — most advisory-firm schema produces none'
+  };
+}
+
+// The last two routes, tried in order, for a site whose server refuses every
+// crawler we have. Neither needs the firm's cooperation.
+//
+//   1. Claude's fetcher reads the <head>. Different infrastructure, and it
+//      demonstrably gets through -- the visibility run cites these pages.
+//      Used ONLY as a fetcher: what comes back is parsed by the same readers
+//      as a direct fetch, so a paraphrase fails to parse rather than becoming
+//      a believed answer.
+//   2. Google's index, via a site: query. This asks Google, not the firm, so
+//      no CDN rule can block it.
+//
+// Both only fill nulls. A value the direct fetch established is never
+// overwritten -- measured must not lose to a second-hand reading.
+async function lastResortRead(url, results, why) {
+  const domain = (() => { try { return new URL(url).hostname; } catch { return String(url); } })();
+
+  const ai = await claudeFetchHead(url);
+  if (!ai.error) {
+    const metas = readRobotsMeta(ai.html);
+    const blockers = metas.filter(m => /\bnoindex\b/i.test(m.content));
+    if (results.indexable == null) {
+      results.indexable     = blockers.length === 0;
+      results.indexableNote = why + ' — the head was fetched by the model: ' +
+        (blockers.length ? 'it declares ' + blockers.map(b => b.name + ': ' + b.content).join(', ')
+                         : metas.length ? 'it declares ' + metas.map(m => m.name + ': ' + m.content).join(', ')
+                                        : 'no robots directive found, which means indexable');
+    }
+    const vp = readViewport(ai.html);
+    if (vp && results.viewport == null) {
+      results.viewport = vp.ok;
+      results.viewportNote = 'read from the model-fetched head: ' + vp.content;
+    }
+    const desc = /<meta\b[^>]*name\s*=\s*["']?description["']?[^>]*content\s*=\s*["']([^"']*)["']/i.exec(ai.html);
+    if (desc && results.hasMeta == null) {
+      results.hasMeta = desc[1].trim().length > 0;
+      results.hasMetaNote = 'read from the model-fetched head';
+    }
+    results.readVia = 'claude-fetch';
+  } else {
+    results.modelFetch = 'failed: ' + ai.error;
+  }
+
+  // Google's index settles indexability on its own, and outranks a robots tag:
+  // pages in the index are the outcome the tag only predicts. So it is allowed
+  // to CORRECT a negative read from the head -- a site declaring noindex whose
+  // pages Google is serving anyway is indexed, whatever the tag says.
+  const idx = await indexedPages(domain);
+  if (idx.error) { results.googleIndex = 'failed: ' + idx.error; return; }
+  results.indexedShown = idx.shown;
+  results.indexedCount = idx.indexedCount;
+  results.indexedSample = idx.sample;
+  if (idx.shown > 0) {
+    const n = idx.indexedCount && idx.indexedCount >= idx.shown ? idx.indexedCount : idx.shown;
+    results.indexable = true;
+    results.indexableNote = why + ' — but Google has ' + n.toLocaleString() +
+      ' page' + (n === 1 ? '' : 's') + ' of this site in its index, which is indexability proven ' +
+      'rather than inferred';
+    results.readVia = (results.readVia ? results.readVia + '+' : '') + 'google-index';
+  } else if (results.indexable == null) {
+    // Zero rows is not evidence of absence: a new site, a SERP quirk or a
+    // query that did not resolve all look identical from here.
+    results.googleIndex = 'no site: results — not treated as a finding';
+  }
+}
+
 // Ask OnPage for what the direct fetch could not read, and record that it was
 // OnPage that answered. Never overwrites a value the direct fetch established:
 // it only fills nulls.
 async function onPageRescue(url, results, whyDirectFailed) {
   if (!DFS_LOGIN) { results.onPage = 'not configured'; return; }
   const r = await onPageFetch(url, { js: true });
-  if (r.error) { results.onPage = 'failed: ' + r.error; return; }
+  // OnPage failing is not the end of the chain. It used to return here, so an
+  // out-of-credits or timed-out OnPage call silently skipped both remaining
+  // routes and the checks stayed unmeasured for a reason that had nothing to
+  // do with the site.
+  if (r.error) {
+    results.onPage = 'failed: ' + r.error;
+    await lastResortRead(url, results, whyDirectFailed + ' — OnPage failed: ' + r.error);
+    return;
+  }
 
   const op = onPageRead(r.item);
   results.onPage = 'used';
@@ -1200,21 +1386,8 @@ async function onPageRescue(url, results, whyDirectFailed) {
   // is the one that still gets through — it is reading these sites during the
   // visibility run — so parse its <head> with the same readers.
   if (op.indexable == null && typeof op.status === 'number' && op.status >= 400) {
-    const ai = await claudeFetchHead(url);
-    if (ai.error) { results.onPage = 'used, blocked too (HTTP ' + op.status + '); model fetch: ' + ai.error; return; }
-    const metas = readRobotsMeta(ai.html);
-    const blockers = metas.filter(m => /\bnoindex\b/i.test(m.content));
-    results.indexable     = blockers.length === 0;
-    results.indexableNote = whyDirectFailed + ' — OnPage was blocked too, so the head was fetched by the model: ' +
-      (blockers.length ? 'it declares ' + blockers.map(b => b.name + ': ' + b.content).join(', ')
-                       : metas.length ? 'it declares ' + metas.map(m => m.name + ': ' + m.content).join(', ')
-                                      : 'no robots directive found, which means indexable');
-    const vp = readViewport(ai.html);
-    if (vp) { results.viewport = vp.ok;
-              results.viewportNote = 'read from the model-fetched head: ' + vp.content; }
-    const desc = /<meta\b[^>]*name\s*=\s*["']?description["']?[^>]*content\s*=\s*["']([^"']*)["']/i.exec(ai.html);
-    if (desc) { results.hasMeta = desc[1].trim().length > 0; results.hasMetaNote = 'read from the model-fetched head'; }
-    results.readVia = 'claude-fetch';
+    await lastResortRead(url, results,
+      whyDirectFailed + ' — OnPage was blocked too (HTTP ' + op.status + ')');
     return;
   }
   if (results.indexable == null && op.indexable != null) {
@@ -1441,17 +1614,48 @@ function flattenLd(node, out) {
 
 const typesOf = n => [].concat(n['@type'] || []).map(t => String(t).replace(/^https?:\/\/schema\.org\//, ''));
 
+// Prints what Google's SERP actually carries for a domain, so the rich-result
+// field names above can be confirmed rather than assumed. The LLM Mentions
+// integration spent a week reporting zeros because it read the wrong key; this
+// is the cheap way to not repeat that.
+app.get('/site/schema/diag', async (req, res) => {
+  const { url } = req.query;
+  if (!url) return res.status(400).json({ error: 'url required' });
+  const r = await richResults(url);
+  res.json({
+    url,
+    provenByGoogle: r.proven || false,
+    signalsFound: r.signals || [],
+    rowsRead: r.rows || 0,
+    note: r.note || null,
+    // Every key present on the organic rows. A signal we are not reading yet
+    // shows up here.
+    itemKeys: r.itemKeys || [],
+    reading: RICH_SIGNALS.map(x => x[0])
+  });
+});
+
 app.get('/site/schema', async (req, res) => {
   const { url } = req.query;
   if (!url) return res.status(400).json({ error: 'url required' });
   try {
-    const r = await fetch(url, {
-      headers: BROWSER_HEADERS,
-      redirect: 'follow',
-      signal: AbortSignal.timeout(15000)
-    });
+    // A CDN does not always answer with a status. It can reset the connection
+    // or hang until the timeout, and a throw here used to skip every fallback
+    // and return a 500 -- the same blocked site reported two completely
+    // different ways depending on how the block was delivered.
+    let r = null, fetchErr = null;
+    try {
+      r = await fetch(url, {
+        headers: BROWSER_HEADERS,
+        redirect: 'follow',
+        signal: AbortSignal.timeout(15000)
+      });
+    } catch (e) {
+      fetchErr = e.name === 'TimeoutError' ? 'timed out fetching the page' : e.message;
+    }
     let html, via = 'direct';
-    if (!r.ok) {
+    if (!r || !r.ok) {
+      const whyDirect = r ? 'page returned HTTP ' + r.status : 'could not reach the page (' + fetchErr + ')';
       // A blocked page is not a page without markup. Reporting "no structured
       // data found" for a 403 is a finding the audit did not measure, and it
       // costs the firm a check they may well pass.
@@ -1461,10 +1665,20 @@ app.get('/site/schema', async (req, res) => {
         // Claude's fetcher gets through where both of the others are refused.
         const ai = await claudeFetchLd(url);
         if (ai.error) {
-          return res.json({ found: false, blocked: true, readVia: 'none',
-            note: 'page returned HTTP ' + r.status + ', OnPage could not read it' +
+          // Everything that reads the page has been refused. One route left,
+          // and it does not read the page: ask Google what it already
+          // extracted from this site's markup.
+          const rich = await richResults(url);
+          return res.json({ found: false, blocked: true, readVia: rich.proven ? 'google-serp' : 'none',
+            googleParsed: rich.proven || false,
+            richSignals: rich.signals || [],
+            richNote: rich.note || null,
+            note: whyDirect + ', OnPage could not read it' +
                   (op.tried ? ' (' + op.tried.join('; ') + ')' : '') +
-                  ', and the model fetch failed: ' + ai.error });
+                  ', and the model fetch failed: ' + ai.error +
+                  (rich.proven ? ' — but Google is showing ' + rich.signals.join(', ') +
+                                 ' for this site, which it can only build from structured data'
+                               : '') });
         }
         html = ai.html; via = 'claude-fetch';
       }
