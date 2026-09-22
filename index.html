@@ -324,12 +324,12 @@ textarea{resize:vertical;min-height:60px}
 
     <!-- VISIBILITY TAB -->
     <div class="tp" id="tp-visibility">
-      <div class="sl">Domain metrics — SEMrush (DataForSEO fallback)</div>
+      <div class="sl">Domain metrics — DataForSEO</div>
       <div class="mg">
         <div class="mc"><div class="ml">Domain authority</div><div class="mv" id="m-da">—</div><div class="mt">Above 5 is good</div></div>
         <div class="mc"><div class="ml">Organic keywords</div><div class="mv" id="m-kw">—</div><div class="mt">Above 50 is good</div></div>
         <div class="mc"><div class="ml">Monthly traffic</div><div class="mv" id="m-tr">—</div><div class="mt">Above 75 is good</div></div>
-        <div class="mc"><div class="ml">Backlinks</div><div class="mv" id="m-bl">—</div><div class="mt">SEMrush total</div></div>
+        <div class="mc"><div class="ml">Backlinks</div><div class="mv" id="m-bl">—</div><div class="mt">total</div></div>
         <div class="mc"><div class="ml">Referring domains</div><div class="mv" id="m-rd">—</div><div class="mt">Above 10 is good</div></div>
       </div>
 
@@ -352,6 +352,13 @@ textarea{resize:vertical;min-height:60px}
       <div id="schema-block" class="card" style="display:none">
         <div class="ct">Structured data — what the homepage declares about itself</div>
         <div id="schema-body"></div>
+      </div>
+
+      <div id="aiment-block" class="card" style="display:none">
+        <div class="ct">AI mentions — measured on ChatGPT and Google AI Overview</div>
+        <div style="font-size:11px;color:var(--text3);margin:0 0 8px">
+          From DataForSEO's database of real prompts, not a sample of test questions.</div>
+        <div id="aiment-body"></div>
       </div>
 
       <div id="aivis-block" class="card" style="display:none">
@@ -742,6 +749,7 @@ const STEP_DEFS = [
   { id: 'ai-web',    label: 'AI website deep review' },
   { id: 'ai-soc',    label: 'AI social media analysis' },
   { id: 'ai-score',  label: 'AI visibility - named & cited' },
+  { id: 'ai-ment',   label: 'AI mentions - ChatGPT & Google AI Overview' },
   { id: 'socialfetch',label: 'SocialFetch - live follower counts' },
 ];
 
@@ -759,6 +767,26 @@ const ck  = id    => { const e=document.getElementById(id); if(e){e.checked=true
 // the two are the same pixel. Every source that can come back null or error
 // calls unk() so the audit can say which is which.
 const UNK = new Map();
+
+// Checks a direct measurement has already decided, either way. An AI review
+// runs after the fetches and was free to tick a box the fetch had just
+// answered "no" — which is how a run could show "Sitemap at /sitemap.xml: no"
+// in the crawl panel and "Has sitemap ✓" in the checklist at the same time.
+// A measurement beats a description of a measurement, so anything in here is
+// off limits to the AI passes.
+const DIRECT = new Set();
+const measured = (...ids) => ids.forEach(id => DIRECT.add(id));
+// Used by the AI passes instead of ck(). Refuses anything already measured and
+// says so in the console, rather than silently disagreeing with the panel
+// above it.
+function ckAI(id, what) {
+  if (DIRECT.has(id)) {
+    console.log('AI suggested ' + id + ' but it was already measured directly — keeping the measurement');
+    return false;
+  }
+  ck(id);
+  return true;
+}
 // Read the label off the checkbox itself rather than keeping a second list
 // that can drift out of step with the markup.
 const ckLabel = id => {
@@ -1013,7 +1041,8 @@ async function runAudit() {
     runAIVisibility(name, url),
     runAIWebsite(name, url),
     runAISocial(name, url),
-    runAIVisibilityScore(name, url, getVal('clientCity'))
+    runAIVisibilityScore(name, url, getVal('clientCity')),
+    runAIMentions(name, url)
   ]);
 
   // Phase 3 - the AI has filled the social handle fields; auto-pull live counts.
@@ -1064,6 +1093,9 @@ async function runSiteCheck(url) {
     const d = await r.json();
     console.log('SITE CHECK:', JSON.stringify(d));
     if (d.sitemap) ck('c-sm');
+    // Decided either way: found, or looked for in every known location and not
+    // found. Only a fetch failure leaves it genuinely unmeasured.
+    if (!d.sitemapError) measured('c-sm');
     if (d.https)   ck('c-https');
     // Indexability now comes from reading the page's own robots directives.
     // PageSpeed's is-crawlable audit still runs and can also tick this box,
@@ -1071,12 +1103,14 @@ async function runSiteCheck(url) {
     // longer reads as "not indexable".
     if (d.indexable === true) ck('c-idx');
     else if (d.indexable == null) unk('c-idx', d.indexableNote || 'could not read the homepage');
+    if (d.indexable != null) measured('c-idx');
 
     // Read straight from the page rather than waiting on PageSpeed, which is
     // one more thing that has to have succeeded. runLighthouse can still tick
     // this if it gets there first; neither un-ticks the other.
     if (d.viewport === true) ck('c-mob');
     else if (d.viewport == null) unk('c-mob', d.viewportNote || 'could not read the homepage');
+    if (d.viewport != null) measured('c-mob');
     if (d.sitemap !== true && d.sitemapError) unk('c-sm', 'sitemap fetch failed: ' + d.sitemapError);
     renderCrawl(d);
   } catch(e) {
@@ -1310,6 +1344,7 @@ async function runLighthouse(url) {
       unk('c-mob', 'PageSpeed returned no viewport audit');
     if (d.isIndexable) ck('c-idx');
     if (d.hasMeta)     ck('c-meta');
+    if (d.hasMeta != null) measured('c-meta');
     // sitemap is driven by the real /sitemap.xml fetch in runSiteCheck, not by
     // robots.txt presence — so don't set c-sm here.
     if (d.speedPass)   ck('c-spd');
@@ -1596,6 +1631,88 @@ function mdToHtml(md) {
     .replace(/^(?!<[usp])/gm, '');
 }
 
+// ── AI mentions — DataForSEO LLM Mentions ─────────────────────────────────────
+// How often the firm actually turns up in AI answers people really asked, and
+// which domains get cited alongside them. Distinct from runAIVisibilityScore
+// below, which asks Claude directly over a small number of runs.
+async function runAIMentions(name, url) {
+  setStep('ai-ment', 'running');
+  const domain = url.replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+  try {
+    const r = await pf('/ai/mentions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, domain })
+    });
+    const d = await r.json();
+    console.log('AI MENTIONS:', JSON.stringify(d));
+    if (d.error) throw new Error(d.error);
+
+    AD.aiMentions = d;
+    const block = document.getElementById('aiment-block');
+    const body  = document.getElementById('aiment-body');
+    block.style.display = '';
+
+    const PLATS = [['google', 'Google AI Overview'], ['chat_gpt', 'ChatGPT']];
+    let html = '<div class="mg">';
+    let any = false;
+    for (const [k, label] of PLATS) {
+      const p = (d.platforms || {})[k] || {};
+      if (p.error) {
+        html += '<div class="mc"><div class="ml">' + label + '</div>' +
+                '<div class="mv">—</div><div class="mt">' + escHtml(p.error) + '</div></div>';
+        continue;
+      }
+      any = true;
+      html += '<div class="mc"><div class="ml">' + label + '</div>' +
+              '<div class="mv">' + (p.mentions != null ? p.mentions.toLocaleString() : '—') + '</div>' +
+              '<div class="mt">mentions' +
+              (p.searchVolume != null ? ' · ' + p.searchVolume.toLocaleString() + ' AI searches' : '') +
+              '</div></div>';
+      html += '<div class="mc"><div class="ml">' + label + ' — own site cited</div>' +
+              '<div class="mv">' + (p.ownCitedShare != null ? p.ownCitedShare + '%' : '—') + '</div>' +
+              '<div class="mt">' + (p.ownCitedMentions != null
+                ? p.ownCitedMentions.toLocaleString() + ' of ' + (p.mentions || 0).toLocaleString()
+                : 'their site was not cited') + '</div></div>';
+    }
+    html += '</div>';
+
+    // Who gets cited alongside them. The absence of their own domain from a
+    // long list is the finding, so it is stated rather than left to inference.
+    for (const [k, label] of PLATS) {
+      const p = (d.platforms || {})[k] || {};
+      const list = (p.cited || []).slice(0, 10);
+      if (!list.length) continue;
+      const own = list.find(x => x.own);
+      html += '<div style="margin-top:14px">' +
+        '<div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin-bottom:6px">' +
+        'Cited alongside them — ' + label + '</div>' +
+        (own ? '' : '<div style="font-size:11px;color:#b45309;margin-bottom:6px">' +
+                    'Their own site is not in this list.</div>') +
+        '<div class="srcs">' +
+        list.map(x => '<div class="src' + (x.own ? ' own' : '') + '">' +
+          '<span class="src-n">' + (x.mentions != null ? x.mentions.toLocaleString() : '—') + '</span>' +
+          '<span>' + escHtml(x.domain) + '</span>' +
+          (x.own ? '<span class="src-own">their site</span>' : '') +
+          '<span class="src-t">' + (x.searchVolume != null
+            ? x.searchVolume.toLocaleString() + ' AI searches' : '') + '</span>' +
+        '</div>').join('') +
+        '</div></div>';
+    }
+
+    body.innerHTML = html;
+    const g = (d.platforms || {}).google || {};
+    const c = (d.platforms || {}).chat_gpt || {};
+    const tot = (g.mentions || 0) + (c.mentions || 0);
+    setStep('ai-ment', any ? 'done' : 'error',
+      any ? tot.toLocaleString() + ' mention' + (tot === 1 ? '' : 's') + ' across both'
+          : 'neither platform returned data');
+  } catch (e) {
+    console.error('AI mentions error:', e.message);
+    setStep('ai-ment', 'error', e.message);
+  }
+}
+
 // ── AI: visibility ────────────────────────────────────────────────────────────
 async function runAIVisibility(name, url) {
   setStep('ai-vis', 'running');
@@ -1628,14 +1745,14 @@ Write a brief summary of your findings, then end with this EXACT block:
     if (j) {
       // j.chatgpt is deliberately ignored - the AI-answers box is driven by
       // runAIVisibilityScore(), which measures it instead of estimating it.
-      if (j.sitemap)   ck('c-sm');
+      if (j.sitemap)   ckAI('c-sm');
       // The summary used to land only if you pressed Build Report, so the
       // Visibility notes box looked empty after a normal run.
       if (j.summary) {
         const n = document.getElementById('n-vis');
         if (n && !n.value) n.value = j.summary;
       }
-      if (j.meta)      ck('c-meta');
+      if (j.meta)      ckAI('c-meta');
       if (j.reviewCTA) ck('c-rcta');
       if (j.awards)    ck('c-awd');
     }
@@ -2137,7 +2254,7 @@ function buildReport() {
   const visText = document.getElementById('ai-vis-text')?.innerText || '';
   const visJ = extractJSON(AD.aiVisibility || visText);
   if (visJ) {
-    if (visJ.sitemap)   { ck('c-sm');   filled++; }
+    if (visJ.sitemap)   { if (ckAI('c-sm'))   filled++; }
     if (visJ.meta)      { ck('c-meta'); filled++; }
     if (visJ.reviewCTA) { ck('c-rcta'); filled++; }
     if (visJ.awards)    { ck('c-awd');  filled++; }
@@ -3271,6 +3388,7 @@ function renderHist() {
 function clearAll() {
   UNK.clear();
   ['v','w','s'].forEach(c => { sv('adj-'+c,''); sv('adjr-'+c,''); });
+  DIRECT.clear();
   document.querySelectorAll('input[type=checkbox]').forEach(c => c.checked=false);
   document.querySelectorAll('input[type=number]').forEach(i => i.value='');
   document.querySelectorAll('textarea').forEach(t => t.value='');
