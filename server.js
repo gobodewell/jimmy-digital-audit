@@ -26,6 +26,9 @@ const SEM_KEY      = env('SEMRUSH_KEY');   // SEO numbers (DA/keywords/traffic)
 // SEMrush reports failures as plain text: "ERROR ## :: MESSAGE". Relayed raw,
 // the code means nothing to whoever is running the audit and says nothing
 // about where to fix it.
+// Label an error as SEMrush's without stuttering when it already says so.
+const semLabel = m => /semrush/i.test(String(m)) ? String(m) : 'SEMrush: ' + m;
+
 function semWhy(errText) {
   const code = (errText.match(/ERROR\s+(\d+)/i) || [])[1];
   const why = {
@@ -139,6 +142,11 @@ async function semFetch(url, opts) {
 // paths. The first that answers with data wins and is remembered for the life
 // of the process; a 404/405 moves on to the next. /semrush/diag reports which
 // one answered, so a route that moves can be pinned without guesswork.
+// Confirmed against the live API: /backlinks/v1/overview and /backlinks/v1/links
+// answer 403 (they exist; this account is not authorised for them), while every
+// other path probed answered 404. Routing is evaluated before authorisation, so
+// 403 means the path is real and 404 means it is not -- which is also how
+// /semrush/map finds the ones not documented anywhere reachable.
 const SEM_V4_ROUTES = {
   domainRank:  ['/analytics/v1/domain_rank', '/trends/v1/domain-rank',
                 '/domain/v1/rank', '/analytics/v1/overview'],
@@ -146,8 +154,20 @@ const SEM_V4_ROUTES = {
                 '/analytics/v1/backlinks_overview'],
   refDomains:  ['/backlinks/v1/refdomains', '/backlinks/v1/referring_domains',
                 '/backlinks/v1/referring-domains', '/backlinks/v1/domains',
+                '/backlinks/v1/refdomains_historical', '/backlinks/v1/ref_domains',
                 '/analytics/v1/backlinks_refdomains']
 };
+
+// Candidate segments for the route map. Worth probing because this API
+// distinguishes "not found" from "not allowed", so an unauthorised account can
+// still learn the shape of the surface.
+const SEM_V4_MAP_FAMILIES = ['/backlinks/v1', '/analytics/v1', '/trends/v1', '/projects/v1'];
+const SEM_V4_MAP_SEGMENTS = [
+  'overview', 'links', 'refdomains', 'referring_domains', 'referring-domains',
+  'domains', 'refips', 'referring_ips', 'anchors', 'pages', 'categories',
+  'tld', 'geo', 'historical', 'ascore_profile', 'authority_score',
+  'competitors', 'domain_rank', 'domain_ranks', 'rank', 'summary'
+];
 const semV4Found = {};   // report -> the path that worked
 
 async function semV4Raw(url, body) {
@@ -186,8 +206,8 @@ function semV4Parse(txt) {
     return { error: 'SEMrush v4 returned something this proxy could not read: ' + head };
   }
 
-  if (j && j.error)   return { error: 'SEMrush: ' + (j.error.message || j.error) };
-  if (j && j.message && !j.data && !j.rows) return { error: 'SEMrush: ' + j.message };
+  if (j && j.error)   return { error: semLabel(j.error.message || j.error) };
+  if (j && j.message && !j.data && !j.rows) return { error: semLabel(j.message) };
 
   const body = Array.isArray(j) ? j : (j.data || j.rows || j.items || j.result);
   if (Array.isArray(body)) {
@@ -242,8 +262,16 @@ async function semV4(report, params) {
       last = path + ' exists but rejects both GET and POST (HTTP 405)';
       continue;
     }
-    if (r.status === 401 || r.status === 403) {
-      return { error: 'SEMrush rejected the key (HTTP ' + r.status + ') — check SEMRUSH_KEY is the v4 token, whole and unexpired' };
+    if (r.status === 401) {
+      return { error: 'SEMrush did not accept the key (HTTP 401) — check SEMRUSH_KEY is the v4 token, whole and unexpired' };
+    }
+    // 403 on a v4 route means the path is right and the account is not cleared
+    // for it. That is a subscription question, not something to route around,
+    // so say so rather than moving to the next candidate and blaming the path.
+    if (r.status === 403) {
+      return { error: 'SEMrush returned 403 Forbidden for ' + path +
+        ' — the route exists but this account/token is not authorised for it. ' +
+        'The Backlinks API needs to be enabled on the Semrush plan (API units / Business plan).' };
     }
     if (r.status === 402) return { error: 'SEMrush: out of API units' };
     if (r.status === 429) return { error: 'SEMrush: rate limited — try again shortly' };
@@ -442,6 +470,46 @@ app.get('/semrush/diag', async (req, res) => {
   res.json(out);
 });
 
+// ── SEMrush route map ─────────────────────────────────────────────────────────
+// v4's route layout is not documented anywhere this proxy can reach, and the
+// paths moved. But the API answers 404 for a path that does not exist and 403
+// for one that does and this account cannot use -- routing runs before
+// authorisation -- so the surface can be mapped without being authorised for
+// any of it. Probes each family/segment pair and reports the ones that exist.
+// Costs no API units: every response is an error before any report is run.
+app.get('/semrush/map', async (req, res) => {
+  if (!SEM_KEY)  return res.json({ error: 'SEMRUSH_KEY not set' });
+  if (!SEM_V4)   return res.json({ error: 'this is a v3 key — the route map only applies to v4' });
+
+  const exists = [], missing = [], other = [];
+  const jobs = [];
+  for (const fam of SEM_V4_MAP_FAMILIES)
+    for (const seg of SEM_V4_MAP_SEGMENTS) jobs.push(fam + '/' + seg);
+
+  // Small batches: this is dozens of requests and the point is a map, not a
+  // stampede against someone else's rate limit.
+  for (let i = 0; i < jobs.length; i += 6) {
+    await Promise.all(jobs.slice(i, i + 6).map(async path => {
+      try {
+        const r = await semV4Raw(SEM_V4_BASE + path);
+        if (r.status === 403)      exists.push({ path, status: 403 });
+        else if (r.status === 404) missing.push(path);
+        else other.push({ path, status: r.status, sample: (r.text || '').trim().slice(0, 160) });
+      } catch (e) { other.push({ path, error: e.message }); }
+    }));
+  }
+
+  res.json({
+    note: '403 = the route exists but this account is not authorised for it. ' +
+          '404 = no such route. Anything else is listed under "other" and is the ' +
+          'most interesting: it means the account CAN reach that route.',
+    base: SEM_V4_BASE,
+    probed: jobs.length,
+    exists, other,
+    missingCount: missing.length
+  });
+});
+
 // ── 1. Domain overview — DA, keywords, traffic ────────────────────────────────
 // Endpoint: /v3/dataforseo_labs/google/domain_rank_overview/live
 app.get('/domain/overview', async (req, res) => {
@@ -457,10 +525,10 @@ app.get('/domain/overview', async (req, res) => {
         da: s.da, keywords: s.keywords, traffic: s.traffic,
         backlinks: s.backlinks, refDomains: s.refDomains, source: 'semrush'
       });
-      if (s && s.error && !DFS_LOGIN) return res.json({ da: 0, keywords: 0, traffic: 0, note: 'SEMrush: ' + s.error });
+      if (s && s.error && !DFS_LOGIN) return res.json({ da: null, keywords: null, traffic: null, note: semLabel(s.error) });
       // else fall through to DataForSEO
     } catch (e) {
-      if (!DFS_LOGIN) return res.status(500).json({ error: 'SEMrush: ' + e.message });
+      if (!DFS_LOGIN) return res.status(500).json({ error: semLabel(e.message) });
       // else fall through to DataForSEO
     }
   }
@@ -906,7 +974,7 @@ app.get('/directories', async (req, res) => {
       r = await semLegacy(base + '&display_sort=domain_ascore_desc');
       if (r.error) r = await semLegacy(base);
     }
-    if (r.error) return res.json({ error: 'SEMrush: ' + r.error });
+    if (r.error) return res.json({ error: semLabel(r.error) });
 
     // Read the domain column by name under either generation. A response that
     // parsed but carried no usable domain column is reported as unreadable, not

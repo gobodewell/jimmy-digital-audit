@@ -614,6 +614,7 @@ textarea{resize:vertical;min-height:60px}
       <button class="btn btn-primary" onclick="saveSettings()">Save settings</button>
       <button class="btn btn-ghost" onclick="testProxy()">Test proxy</button>
       <button class="btn btn-ghost" onclick="testSemrush()">Test SEMrush</button>
+      <button class="btn btn-ghost" onclick="mapSemrush()">Map SEMrush routes</button>
     </div>
     <div id="s-msg" style="margin-top:10px;font-size:13px;color:var(--text2);white-space:pre-wrap"></div>
   </div>
@@ -850,6 +851,32 @@ async function testSemrush() {
     // The full probe list is what gets pasted back for diagnosis.
     console.log('SEMRUSH DIAG:', JSON.stringify(d, null, 2));
     msg.textContent += '\n\nFull detail printed to the browser console (F12) — copy it from there.';
+  } catch (e) {
+    msg.textContent = '✗ ' + e.message;
+  }
+}
+
+// v4 answers 403 for a route that exists and 404 for one that does not, so the
+// surface can be mapped even by an account that cannot call any of it. This is
+// how the real report paths get found when the docs are unreachable.
+async function mapSemrush() {
+  const msg = document.getElementById('s-msg');
+  msg.textContent = 'Mapping SEMrush routes — this probes ~80 paths, give it a minute...';
+  try {
+    const r = await pf('/semrush/map');
+    const d = await r.json();
+    if (d.error) { msg.textContent = '✗ ' + d.error; return; }
+    const lines = [
+      'Probed ' + d.probed + ' paths.',
+      '',
+      'Routes that EXIST (403 — not authorised, but real):',
+      ...(d.exists.length ? d.exists.map(e => '   ' + e.path) : ['   (none)']),
+      '',
+      'Reachable by this account (anything but 403/404):',
+      ...(d.other.length ? d.other.map(e => '   ' + e.path + ' → ' + (e.status || e.error)) : ['   (none)'])
+    ];
+    msg.textContent = lines.join('\n');
+    console.log('SEMRUSH ROUTE MAP:', JSON.stringify(d, null, 2));
   } catch (e) {
     msg.textContent = '✗ ' + e.message;
   }
