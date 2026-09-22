@@ -363,16 +363,17 @@ textarea{resize:vertical;min-height:60px}
 
       <div id="aivis-block" class="card" style="display:none">
         <div class="ct">AI visibility — measured on <span id="aivis-model">Claude</span></div>
-        <div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin:2px 0 6px">Found without being named</div>
+        <div style="font-size:12px;color:var(--text3);margin:0 0 10px;line-height:1.5">
+          Every question below is asked <b>with web search on</b>, the way a real prospect uses
+          these tools. Asking about a firm <b>by name</b> will always find them — that is true of
+          any firm with a website. What matters is whether they come up when the prospect
+          <b>does not know them yet</b>.</div>
+        <div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin:2px 0 6px">The number that matters — asked for a recommendation, firm never named</div>
         <div class="mg">
-          <div class="mc"><div class="ml">Named in AI answers</div><div class="mv" id="m-aivis">—</div><div class="mt">Asked with no web search</div></div>
-          <div class="mc"><div class="ml">Cited as a source</div><div class="mv" id="m-aicite">—</div><div class="mt">Asked with web search on</div></div>
+          <div class="mc"><div class="ml">Surfaced in the answer</div><div class="mv" id="m-aicite">—</div><div class="mt">"Who are the best advisors in…" — does the firm come up at all</div></div>
+          <div class="mc"><div class="ml">Their site answers for them</div><div class="mv" id="m-aibcite">—</div><div class="mt">Asked by name — their own site vs third-party listings</div></div>
         </div>
-        <div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin:14px 0 6px">Asked about by name</div>
-        <div class="mg">
-          <div class="mc"><div class="ml">Known by name</div><div class="mv" id="m-aibrand">—</div><div class="mt">Answered rather than "no information"</div></div>
-          <div class="mc"><div class="ml">Own site cited</div><div class="mv" id="m-aibcite">—</div><div class="mt">Their site vs third-party listings</div></div>
-        </div>
+        <span id="m-aivis" style="display:none">—</span><span id="m-aibrand" style="display:none">—</span>
         <div id="aivis-evidence" style="margin-top:10px"></div>
         <div id="aivis-detail" style="font-size:11px;color:var(--text3);margin-top:8px"></div>
       </div>
@@ -2001,6 +2002,8 @@ async function runAIVisibilityScore(name, url, city) {
     AD.aiVisibilityScore = result.visibilityScore;
     AD.aiCitationShare   = result.citationShare;
 
+    // m-aivis and m-aibrand are the retired knowledge-mode tiles, kept as
+    // hidden spans so this still writes somewhere when knowledgeMode is on.
     setMV('aivis',   result.visibilityScore == null ? '-' : result.visibilityScore + '%', result.visibilityScore > 0);
     setMV('aicite',  result.citationShare   == null ? '-' : result.citationShare   + '%', result.citationShare   > 0);
     setMV('aibrand', result.brandedScore    == null ? '-' : result.brandedScore    + '%', result.brandedScore    > 0);
@@ -2016,9 +2019,19 @@ async function runAIVisibilityScore(name, url, city) {
     // discovery: a prospect asks for advisors and the firm comes up without
     // being named. The easier one is recognition: asked by name, the model
     // knows them and treats their own site as the source.
-    if (result.visibilityScore > 0 || result.citationShare > 0) ck('c-cgpt');
-    if (result.brandedScore > 0 && result.brandedCitation > 0) ck('c-aicite');
-    else if (result.brandedConflict) unk('c-aicite', 'the by-name result contradicted itself and was not scored');
+    // Search-on runs only. c-cgpt asks whether the firm surfaces when nobody
+    // names it; that is citationShare. The knowledge-mode figures no longer
+    // exist unless knowledgeMode was requested, and treating an absent run as
+    // a failure is the bug this audit exists to avoid.
+    if (result.citationShare > 0 || result.visibilityScore > 0) ck('c-cgpt');
+    else if (result.citationRuns === 0 && result.visibilityRuns === 0)
+      unk('c-cgpt', 'no discovery prompts completed');
+
+    // "AI knows the firm by name" is now answered with search on: the model
+    // was asked about them and cited their own site rather than only
+    // third-party listings.
+    if (result.brandedCitation > 0) ck('c-aicite');
+    else if (!result.brandedCiteRuns) unk('c-aicite', 'no by-name prompts completed');
 
     // Show what the model said it knew. A percentage on its own is not
     // checkable; the facts behind it are.
@@ -2027,8 +2040,9 @@ async function runAIVisibilityScore(name, url, city) {
       let e = '';
       if (result.brandedConflict) {
         e += '<div style="font-size:11px;color:#b45309;margin-bottom:6px">' +
-             'Scored as not knowing them, yet every searched answer cited their own site. ' +
-             'Treat the "known by name" figure as unreliable for this firm and read the specifics below.</div>';
+             'Not in the training data, yet every searched answer cited their own site. ' +
+             'That combination is normal for a firm founded recently — the model has to look them ' +
+             'up, and when it does, it finds them. Read the specifics below rather than the percentage.</div>';
       }
       if ((result.brandedSpecifics || []).length) {
         e += '<div style="font-size:11px;color:var(--text3)">What Claude said it knew: ' +

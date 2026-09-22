@@ -1877,14 +1877,26 @@ app.post('/ai/mentions/diag', async (req, res) => {
 // Model output varies run to run and temperature was removed on current models,
 // so a single answer is not a measurement — each prompt is repeated and scored
 // as a rate.
+// These ask for LONG lists on purpose.
+//
+// "Who are the best financial advisors in Houston" returns three or four
+// national names, so every independent firm in the country scores 0% and the
+// measurement says nothing about any of them. A prospect comparing options
+// does not stop at the first answer either — they ask for a list, then narrow.
+//
+// Asking for fifty, and asking in the specific terms a small firm can actually
+// win on — independent, fee-only, fiduciary, a named niche — measures
+// something a firm can move. Appearing 34th of 50 is a real, improvable
+// position; being absent from a list of four is noise.
 function visibilityPrompts(city) {
   const where = city ? ' in ' + city : '';
+  const forCity = city ? ` for ${city}-related searches` : '';
   return [
-    `Who are the best financial advisors${where}?`,
-    `I'm looking for a financial advisor${where} to help with retirement planning. Which firms should I consider?`,
-    `What are the top wealth management firms${where}?`,
-    `Who should I talk to about financial planning${where}?`,
-    `Recommend a few fee-only financial advisory firms${where}.`
+    `Who are the 50 financial advisory firms most visible${forCity}? List them.`,
+    `List 25 independent registered investment advisers serving ${city || 'clients in the US'}.`,
+    `Name 20 fee-only fiduciary financial planners${where}.`,
+    `Which financial advisory firms${where} work with clients approaching retirement? List as many as you can find.`,
+    `List the wealth management and financial planning firms headquartered${where || ' in the US'}.`
   ];
 }
 
@@ -2100,18 +2112,28 @@ app.post('/ai/visibility', async (req, res) => {
   res.flushHeaders?.();
   const send = obj => { try { res.write(JSON.stringify(obj) + '\n'); } catch (e) {} };
 
+  // Search stays ON. ChatGPT, Claude and Google's AI Overview all search by
+  // default now, so a no-search run measures a mode no prospect uses: it asks
+  // what the model memorised at training time, which for any firm founded in
+  // the last few years is nothing, and which no amount of marketing changes
+  // before the next training run. Answering "0%" to that and printing it next
+  // to the word "AI" made a normal firm look invisible.
+  //
+  // knowledgeMode: true brings the no-search runs back for comparison; nothing
+  // in the app asks for it.
+  const withKnowledge = req.body.knowledgeMode === true;
+  const modes = withKnowledge ? ['knowledge', 'citation'] : ['citation'];
+
   // One job per prompt per repetition per mode, across both prompt sets.
   const jobs = [];
   for (const p of prompts) {
     for (let i = 0; i < repeats; i++) {
-      jobs.push({ prompt: p, kind: 'discovery', mode: 'knowledge' });
-      jobs.push({ prompt: p, kind: 'discovery', mode: 'citation'  });
+      for (const mode of modes) jobs.push({ prompt: p, kind: 'discovery', mode });
     }
   }
   for (const p of branded) {
     for (let i = 0; i < repeats; i++) {
-      jobs.push({ prompt: p, kind: 'branded', mode: 'knowledge' });
-      jobs.push({ prompt: p, kind: 'branded', mode: 'citation'  });
+      for (const mode of modes) jobs.push({ prompt: p, kind: 'branded', mode });
     }
   }
 
@@ -2156,6 +2178,8 @@ app.post('/ai/visibility', async (req, res) => {
       model: pickModel(model),
       prompts: prompts.length,
       repeats,
+      searchOn: true,
+      knowledgeMode: withKnowledge,
       brandedPrompts: branded.length,
       // Discovery — the firm is never named in the question.
       // % of no-tool answers that named the firm at all
