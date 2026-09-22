@@ -42,6 +42,24 @@ function semWhy(errText) {
   }[code];
   return errText.trim().slice(0, 120) + (why ? ' — ' + why : '');
 }
+// A self-identifying UA ("GrowthLineAudit/1.0") is a bot signature, and the
+// managed WAFs in front of advisory-firm sites answer it with 403 — which the
+// audit then had to report as "could not measure" for indexability and schema
+// on sites that serve those pages to any browser. These are the headers a real
+// browser sends, for pages a human could open in one. Public pages only: this
+// does not touch robots.txt exclusions, which are still read and honoured.
+const BROWSER_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 ' +
+                '(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36',
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+  'Accept-Language': 'en-US,en;q=0.9',
+  'Cache-Control': 'no-cache',
+  'Sec-Fetch-Dest': 'document',
+  'Sec-Fetch-Mode': 'navigate',
+  'Sec-Fetch-Site': 'none',
+  'Upgrade-Insecure-Requests': '1'
+};
+
 const SF_BASE      = 'https://api.socialfetch.dev/v1';
 const DFS_BASE     = 'https://api.dataforseo.com/v3';
 
@@ -648,25 +666,52 @@ app.get('/domain/overview', async (req, res) => {
 
   if (!DFS_LOGIN) return res.status(500).json({ error: 'No SEO source configured (set SEMRUSH_KEY or DataForSEO)' });
   try {
+    // No location_code and no language_code: DataForSEO then returns one row
+    // per country-language pair the domain ranks in, rather than a single
+    // market. The previous call pinned location_code 2840 (United States), so
+    // everything outside the US was invisible.
     const d = await dfsPost('/dataforseo_labs/google/domain_rank_overview/live', [
-      { target: domain, location_code: 2840, language_code: 'en' }
+      { target: domain }
     ]);
     console.log('DFS domain full response:', JSON.stringify(d)?.slice(0, 500));
     // Top-level DataForSEO error (auth, credits, access).
     if (d && d.status_code && d.status_code !== 20000) {
-      return res.json({ da: 0, keywords: 0, traffic: 0, note: 'DataForSEO ' + d.status_code + ': ' + d.status_message });
+      return res.json({ da: null, keywords: null, traffic: null, note: 'DataForSEO ' + d.status_code + ': ' + d.status_message });
     }
     const task = d?.tasks?.[0];
     // Surface a real reason when DataForSEO didn't return usable data.
     if (task && task.status_code !== 20000) {
-      return res.json({ da: 0, keywords: 0, traffic: 0, note: 'DataForSEO ' + task.status_code + ': ' + task.status_message });
+      return res.json({ da: null, keywords: null, traffic: null, note: 'DataForSEO ' + task.status_code + ': ' + task.status_message });
     }
-    const item = task?.result?.[0]?.items?.[0];
-    console.log('DFS domain raw item:', JSON.stringify(item)?.slice(0, 300));
-    if (!item) return res.json({ da: 0, keywords: 0, traffic: 0, note: 'no data for this domain' });
-    const organic = item.metrics?.organic || item.organic || {};
-    const keywords = organic.count || ((organic.pos_1||0) + (organic.pos_2_3||0) + (organic.pos_4_10||0)) || 0;
-    const traffic = Math.round(organic.etv || organic.estimated_traffic || 0);
+    // Every locale row, not items[0]. Reading the first row alone would have
+    // reported whichever market DataForSEO happened to return first as if it
+    // were the whole picture.
+    const rows = (task?.result || []).flatMap(r => r.items || []);
+    console.log('DFS domain locales:', rows.length);
+    if (!rows.length) return res.json({ da: null, keywords: null, traffic: null, note: 'no data for this domain' });
+
+    const organicOf = it => it.metrics?.organic || it.organic || {};
+    // Estimated traffic is per-locale visits, so it adds up across markets.
+    const traffic = Math.round(rows.reduce((a, it) => a + (organicOf(it).etv || organicOf(it).estimated_traffic || 0), 0));
+    // Keyword counts are per-locale ranking positions. A keyword the firm ranks
+    // for in both the US and Canada is counted in both, so this is "ranking
+    // positions across all markets" rather than distinct keywords — worth
+    // knowing before the number is quoted to a client as "keywords".
+    const keywords = rows.reduce((a, it) => {
+      const o = organicOf(it);
+      return a + (o.count || ((o.pos_1||0) + (o.pos_2_3||0) + (o.pos_4_10||0)) || 0);
+    }, 0);
+
+    // Which market actually carries the firm, for context in the report.
+    const top = rows.reduce((best, it) =>
+      (organicOf(it).etv || 0) > (organicOf(best).etv || 0) ? it : best, rows[0]);
+    const scope = {
+      locales: rows.length,
+      topLocation: top?.location_code ?? null,
+      topLanguage: top?.language_code ?? null,
+      topTraffic: Math.round(organicOf(top).etv || 0)
+    };
+    const item = top;
 
     // domain_rank_overview carries no domain-authority field, so `da` used to
     // be 0 here no matter the firm -- a real number for every other metric and
@@ -677,7 +722,7 @@ app.get('/domain/overview', async (req, res) => {
     if (bl.error) blNote = bl.error;
     else { da = bl.da; backlinks = bl.backlinks; refDomains = bl.refDomains; }
 
-    res.json({ da, keywords, traffic, backlinks, refDomains,
+    res.json({ da, keywords, traffic, backlinks, refDomains, scope,
                source: 'dataforseo', note: blNote });
   } catch (e) {
     console.error('DFS domain/overview error:', e.message);
@@ -708,16 +753,51 @@ app.get('/site/lighthouse', async (req, res) => {
       encodeURIComponent(url) + '&strategy=' + strategy +
       '&category=performance&category=seo' + (GOOGLE_KEY ? '&key=' + GOOGLE_KEY : '');
     console.log('PageSpeed fetching:', psUrl.slice(0, 100));
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 60000);  // slow sites can take >30s for a full Lighthouse run
-    const r = await fetch(psUrl, { signal: controller.signal });
-    clearTimeout(timeout);
-    const d = await r.json();
-    const gMsg = d?.error?.message || (typeof d?.error === 'string' ? d.error : '') || d?.message || '';
+    // One retry. Lighthouse runs a real browser against a live site, so a
+    // failure is often transient — a slow first byte, a cold CDN, a redirect
+    // that resolved on the second attempt. Retrying once costs a minute and
+    // saves a check that would otherwise be reported as unmeasurable.
+    let d = null, gMsg = '', runtime = null;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 60000);  // slow sites can take >30s for a full Lighthouse run
+      try {
+        const r = await fetch(psUrl, { signal: controller.signal });
+        d = await r.json();
+      } finally { clearTimeout(timeout); }
+
+      gMsg = d?.error?.message || (typeof d?.error === 'string' ? d.error : '') || d?.message || '';
+      // "Lighthouse returned error: Something went wrong." is Google's generic
+      // wrapper; the code underneath it is the part that says what to do.
+      runtime = d?.lighthouseResult?.runtimeError || null;
+      if (d?.lighthouseResult?.audits) break;
+      if (attempt === 1) console.log('PageSpeed attempt 1 failed (' + (gMsg || 'no data') + '), retrying');
+    }
+
     console.log('PageSpeed response status:', d?.lighthouseResult ? 'ok' : (gMsg || 'no lighthouse result'));
     const audits = d?.lighthouseResult?.audits;
     const cats   = d?.lighthouseResult?.categories;
-    if (!audits) return res.status(502).json({ error: 'PageSpeed: ' + (gMsg || 'no data') + (GOOGLE_KEY ? '' : ' — no GOOGLE_API_KEY set') });
+    if (!audits) {
+      // Translate the codes that have a real remedy. Everything else is
+      // relayed with its code attached, which is still more than "Something
+      // went wrong" gave anyone to work with.
+      const code = runtime?.code || '';
+      const why = {
+        ERRORED_DOCUMENT_REQUEST:  'Lighthouse could not load the page at all — the server refused or reset the request. Sites behind a strict WAF often block it.',
+        FAILED_DOCUMENT_REQUEST:   'Lighthouse could not load the page at all — the server refused or reset the request.',
+        NO_FCP:                    'the page never rendered anything Lighthouse could measure, usually a redirect loop, a blocking script, or a consent wall.',
+        NO_LCP:                    'the page never painted a largest-contentful element Lighthouse could time.',
+        DNS_FAILURE:               'the domain did not resolve from Google\'s side.',
+        INVALID_URL:               'Google rejected the URL as malformed.'
+      }[code];
+      const detail = why ? code + ' — ' + why
+                   : code ? (runtime.message || gMsg || 'no data') + ' (' + code + ')'
+                   : (gMsg || 'no data');
+      return res.status(502).json({
+        error: 'PageSpeed: ' + detail +
+               (GOOGLE_KEY ? '' : ' — no GOOGLE_API_KEY set') +
+               ' · tried twice on the ' + strategy + ' run' });
+    }
 
     // Extract the metrics we need for the audit checklist
     const lcp      = audits['largest-contentful-paint']?.numericValue;
@@ -737,9 +817,11 @@ app.get('/site/lighthouse', async (req, res) => {
     // (does the page declare a mobile viewport?) and it is returned under both
     // strategies. Falls back to the old rule only if the audit is missing.
     const viewportAudit = audits['viewport']?.score;
-    const isMobile    = viewportAudit != null
-                      ? viewportAudit >= 0.9
-                      : (perfScore != null && perfScore >= 50);
+    // No fallback to perfScore. That rule measured SPEED, not mobile-
+    // friendliness, and under a desktop run it means nothing at all -- it is
+    // the exact conflation the note above describes removing, and leaving it
+    // here as a fallback quietly reinstated it. Unmeasured is null.
+    const isMobile    = viewportAudit != null ? viewportAudit >= 0.9 : null;
     // `?? 0` here used to turn a missing audit into a failed one: Lighthouse
     // reports score `null` when it could not evaluate a check, and that null
     // became `0 >= 0.9` -> false -> an unchecked box, indistinguishable from a
@@ -838,6 +920,24 @@ function readRobotsMeta(html) {
   return out;
 }
 
+// The mobile-viewport declaration, read straight from the page. PageSpeed's
+// `viewport` audit says the same thing, but it is one more thing that has to
+// have succeeded — and when it has not, the audit should say "not measured"
+// rather than fall back to a number that means something else entirely.
+// A declared viewport is a necessary condition for a usable mobile page, not
+// a sufficient one, which is why the check is named for the tag.
+function readViewport(html) {
+  for (const m of String(html).matchAll(/<meta\b[^>]*>/gi)) {
+    const tag  = m[0];
+    const name = (/\bname\s*=\s*["']?([^"'\s>]+)/i.exec(tag) || [])[1] || '';
+    if (!/^viewport$/i.test(name)) continue;
+    const content = (/\bcontent\s*=\s*["']([^"']*)["']/i.exec(tag) || [])[1] || '';
+    return { content: content.trim(),
+             ok: /\bwidth\s*=/i.test(content) || /\binitial-scale\s*=/i.test(content) };
+  }
+  return null;
+}
+
 // ── 3. Sitemap check — direct HTTP ping ──────────────────────────────────────
 app.get('/site/check', async (req, res) => {
   const { url } = req.query;
@@ -845,23 +945,62 @@ app.get('/site/check', async (req, res) => {
   try {
     const results = {};
     const base = url.replace(/\/$/, '');
-    const UA   = { 'User-Agent': 'Mozilla/5.0 (compatible; GrowthLineAudit/1.0)' };
+    const UA   = BROWSER_HEADERS;
 
-    // Check sitemap — entered URL + /sitemap.xml. Use GET (many servers reject
-    // HEAD with 403/405) and sniff the body so a soft-404 HTML page doesn't
-    // count as a sitemap.
-    const sitemapUrl = base + '/sitemap.xml';
+    // Find the sitemap the way a crawler does. Checking only /sitemap.xml
+    // missed most of them: robots.txt DECLARES the location and that line is
+    // authoritative, WordPress with Yoast publishes /sitemap_index.xml, and
+    // WordPress 5.5+ publishes /wp-sitemap.xml — none of which live at the
+    // one path this used to try. A firm with a perfectly good sitemap was
+    // being reported as having none.
+    //
+    // robots.txt is fetched first now because it answers both questions.
+    let robotsBody = '';
     try {
-      const sr = await fetch(sitemapUrl, { headers: UA, redirect: 'follow', signal: AbortSignal.timeout(10000) });
-      if (sr.ok) {
+      const rr = await fetch(base + '/robots.txt', { headers: UA, redirect: 'follow', signal: AbortSignal.timeout(8000) });
+      results.robotsTxt = rr.ok;
+      if (rr.ok) robotsBody = (await rr.text()).slice(0, 100000);
+    } catch (e) { results.robotsTxt = false; }
+
+    const declared = [...robotsBody.matchAll(/^\s*sitemap\s*:\s*(\S+)/gim)].map(m => m[1].trim());
+    const candidates = [
+      ...declared,
+      base + '/sitemap.xml',
+      base + '/sitemap_index.xml',     // Yoast, and most WordPress SEO plugins
+      base + '/wp-sitemap.xml',        // WordPress 5.5+ core
+      base + '/sitemap-index.xml',
+      base + '/sitemap1.xml'
+    ].filter((v, i, a) => a.indexOf(v) === i);
+    results.sitemapDeclared = declared;
+
+    results.sitemap = false;
+    results.sitemapTried = [];
+    for (const cand of candidates) {
+      try {
+        const sr = await fetch(cand, { headers: UA, redirect: 'follow', signal: AbortSignal.timeout(10000) });
+        if (!sr.ok) { results.sitemapTried.push(cand + ' → HTTP ' + sr.status); continue; }
+        // Sniff the body: a soft-404 that returns 200 with an HTML page is not
+        // a sitemap. Requiring <urlset or <sitemapindex rather than merely
+        // "<?xml" also stops an XML-formatted error page counting as one.
         const body = (await sr.text()).slice(0, 4000).toLowerCase();
-        results.sitemap = body.includes('<urlset') || body.includes('<sitemapindex') || body.includes('<?xml');
-      } else {
-        results.sitemap = false;
+        if (body.includes('<urlset') || body.includes('<sitemapindex')) {
+          results.sitemap    = true;
+          results.sitemapUrl = cand;
+          results.sitemapStatus = sr.status;
+          results.sitemapNote = declared.includes(cand)
+            ? 'declared in robots.txt' : 'found at ' + cand.replace(base, '');
+          break;
+        }
+        results.sitemapTried.push(cand + ' → 200 but not a sitemap');
+      } catch (e) {
+        results.sitemapTried.push(cand + ' → ' + e.message);
       }
-      results.sitemapStatus = sr.status;
-    } catch(e) { results.sitemap = false; results.sitemapError = e.message; }
-    results.sitemapUrl = sitemapUrl;
+    }
+    if (!results.sitemap) {
+      results.sitemapUrl  = base + '/sitemap.xml';
+      results.sitemapNote = 'none found — tried ' + candidates.length + ' locations' +
+                            (declared.length ? ', including the one robots.txt declares' : '');
+    }
 
     // Check HTTPS
     results.https = url.startsWith('https');
@@ -878,14 +1017,24 @@ app.get('/site/check', async (req, res) => {
       if (!pr.ok) {
         results.indexable = null;
         results.indexableNote = 'homepage returned HTTP ' + pr.status;
+        results.viewport = null;
+        results.viewportNote = 'homepage returned HTTP ' + pr.status;
       } else {
         const xRobots = (pr.headers.get('x-robots-tag') || '').trim();
-        const metas   = readRobotsMeta((await pr.text()).slice(0, 300000));
+        const html    = (await pr.text()).slice(0, 300000);
+        const metas   = readRobotsMeta(html);
         const blockers = [];
         if (/\bnoindex\b/i.test(xRobots)) blockers.push('X-Robots-Tag: ' + xRobots);
         for (const m of metas) {
           if (/\bnoindex\b/i.test(m.content)) blockers.push('<meta name="' + m.name + '" content="' + m.content + '">');
         }
+        const vp = readViewport(html);
+        results.viewport     = vp ? vp.ok : false;
+        results.viewportNote = vp
+          ? (vp.ok ? 'declares viewport: ' + vp.content
+                   : 'has a viewport tag but it sets neither width nor initial-scale: ' + vp.content)
+          : 'no <meta name="viewport"> on the homepage';
+
         results.indexable        = blockers.length === 0;
         results.indexableBlocked = blockers;
         results.robotsMeta       = metas.map(m => m.name + ': ' + m.content);
@@ -897,13 +1046,9 @@ app.get('/site/check', async (req, res) => {
     } catch (e) {
       results.indexable = null;
       results.indexableNote = 'could not fetch the homepage: ' + e.message;
+      results.viewport = null;
+      results.viewportNote = 'could not fetch the homepage: ' + e.message;
     }
-
-    // Check robots.txt — GET + UA, same reasons as the sitemap check
-    try {
-      const rr = await fetch(base + '/robots.txt', { headers: UA, redirect: 'follow', signal: AbortSignal.timeout(8000) });
-      results.robotsTxt = rr.ok;
-    } catch(e) { results.robotsTxt = false; }
 
     console.log('Site check results:', JSON.stringify(results));
     res.json(results);
@@ -948,7 +1093,7 @@ app.get('/site/schema', async (req, res) => {
   if (!url) return res.status(400).json({ error: 'url required' });
   try {
     const r = await fetch(url, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; GrowthLineAudit/1.0)' },
+      headers: BROWSER_HEADERS,
       redirect: 'follow',
       signal: AbortSignal.timeout(15000)
     });
@@ -1508,6 +1653,124 @@ app.post('/ai/message', async (req, res) => {
   }
 });
 
+// ── 5a. AI mentions — DataForSEO LLM Mentions ────────────────────────────────
+// What this measures, and why it is not the same as the Claude check below.
+//
+//   This endpoint        — how often the firm actually appears in AI answers
+//                          people really asked, across Google's AI Overview and
+//                          ChatGPT, from a prompt database of hundreds of
+//                          millions. A population, not a sample.
+//   /ai/visibility below — whether Claude, specifically, knows the firm, over a
+//                          dozen synthetic runs. Useful, but a dozen runs means
+//                          3/10 and 4/10 are the same number wearing different
+//                          clothes, and nobody's prospects ask Claude.
+//
+// Both are kept: they answer different questions. This one is what belongs in
+// front of a client.
+const AIM_BASE = '/ai_optimization/llm_mentions';
+const AIM_PLATFORMS = ['google', 'chat_gpt'];   // AI Overview (all locations), ChatGPT (US only)
+
+// The item field names are not something this proxy can verify from the
+// outside, and guessing one wrong would report a real number as missing. So
+// every figure is read by a list of plausible names, normalised, and anything
+// unmatched is reported as unmeasured rather than zero -- /ai/mentions/diag
+// prints the actual keys so they can be pinned once seen.
+const aimKey = k => String(k).toLowerCase().replace(/[^a-z0-9]/g, '');
+function aimNum(row, names) {
+  if (!row) return null;
+  const want = names.map(aimKey);
+  for (const k of Object.keys(row)) {
+    if (!want.includes(aimKey(k))) continue;
+    const v = row[k];
+    if (v == null || v === '') continue;
+    const num = typeof v === 'number' ? v : parseFloat(String(v).replace(/[^0-9.\-]/g, ''));
+    if (!Number.isNaN(num)) return num;
+  }
+  return null;
+}
+
+async function aimTargetMetrics({ targets, platform, locationCode, languageCode }) {
+  const d = await dfsPost(AIM_BASE + '/target_metrics/live', [{
+    target: targets,
+    platform,
+    location_code: locationCode || 2840,
+    language_code: languageCode || 'en',
+    internal_list_limit: 10
+  }]);
+  if (d && d.status_code && d.status_code !== 20000)
+    return { error: 'DataForSEO ' + d.status_code + ': ' + d.status_message };
+  const task = d?.tasks?.[0];
+  if (task && task.status_code !== 20000)
+    return { error: 'DataForSEO ' + task.status_code + ': ' + task.status_message };
+  const result = task?.result?.[0];
+  if (!result) return { error: 'DataForSEO returned no LLM mentions result for ' + targets.join(', ') };
+  return { result, items: result.items || [], totalCount: result.total_count ?? null };
+}
+
+app.post('/ai/mentions', async (req, res) => {
+  if (!DFS_LOGIN) return res.status(500).json({ error: 'DataForSEO not configured — LLM Mentions needs it' });
+  const { name, domain } = req.body || {};
+  if (!domain) return res.status(400).json({ error: 'domain required' });
+
+  const target = rootDomain(domain);
+  // The domain and the brand name are different targets: a firm can be talked
+  // about constantly and never have its site cited, which is exactly the gap
+  // worth reporting.
+  const targets = [target, ...(name ? [name] : [])];
+
+  const out = { target, targets, platforms: {} };
+  for (const platform of AIM_PLATFORMS) {
+    const r = await aimTargetMetrics({
+      targets, platform,
+      locationCode: parseInt(req.body.locationCode, 10) || 2840,
+      languageCode: req.body.languageCode || 'en'
+    });
+    if (r.error) { out.platforms[platform] = { error: r.error }; continue; }
+
+    // Sum across the returned rows: the endpoint groups by location, language,
+    // model and domain, so one row is a slice rather than the whole answer.
+    const items = r.items;
+    const sum = names => {
+      const vals = items.map(it => aimNum(it, names)).filter(v => v != null);
+      return vals.length ? vals.reduce((a, b) => a + b, 0) : null;
+    };
+    out.platforms[platform] = {
+      rows:        items.length,
+      totalCount:  r.totalCount,
+      mentions:    sum(['mentions_count', 'mentions', 'mention_count', 'count']),
+      citations:   sum(['citations_count', 'citations', 'citation_count']),
+      searchVolume: sum(['ai_search_volume', 'search_volume', 'monthly_searches']),
+      // Kept so a field name this proxy did not anticipate is visible rather
+      // than silently absent.
+      fields: items[0] ? Object.keys(items[0]) : []
+    };
+  }
+
+  const anyOk = Object.values(out.platforms).some(p => !p.error);
+  if (!anyOk) return res.status(502).json({ error: 'LLM Mentions returned nothing: ' +
+    Object.entries(out.platforms).map(([k, v]) => k + ' → ' + v.error).join(' · ') });
+  res.json(out);
+});
+
+// Prints what DataForSEO actually returns, so the field names above can be
+// pinned to the real ones instead of a plausible list.
+app.post('/ai/mentions/diag', async (req, res) => {
+  if (!DFS_LOGIN) return res.json({ error: 'DataForSEO not configured' });
+  const target = rootDomain(req.body?.domain || 'fisherinvestments.com');
+  const out = { target, platforms: {} };
+  for (const platform of AIM_PLATFORMS) {
+    const r = await aimTargetMetrics({ targets: [target], platform });
+    out.platforms[platform] = r.error ? { error: r.error } : {
+      totalCount: r.totalCount,
+      rows: r.items.length,
+      resultKeys: Object.keys(r.result || {}),
+      itemKeys: r.items[0] ? Object.keys(r.items[0]) : [],
+      firstItem: r.items[0] || null
+    };
+  }
+  res.json(out);
+});
+
 // ── 5b. AI visibility — does Claude know this firm, and does it cite them? ────
 // Two measurements, both real rather than inferred:
 //   visibility — ask the questions a prospect's clients ask, with NO tools, and
@@ -1600,21 +1863,28 @@ function mentionsName(text, name) {
   return !!n && normaliseName(text).includes(n);
 }
 
-// Pull every URL Claude actually cited out of the web_search result blocks.
+// Pull every source Claude actually read out of the web_search result blocks.
 // Errors come back on the same block with `content` as an OBJECT rather than a
 // list (and HTTP 200, no exception), so branch on that before iterating.
-function citedDomains(blocks) {
-  const out = new Set();
+//
+// Returns the domains AND what was read at each one. The boolean "was the
+// firm's own site among them" is only one question this answers; the list
+// itself is the more useful finding, because it names the sources that speak
+// for the firm when an AI answers questions about them.
+function citedSources(blocks) {
+  const out = new Map();   // domain -> { domain, url, title }
   for (const b of blocks || []) {
     if (b.type !== 'web_search_tool_result') continue;
     if (!Array.isArray(b.content)) continue;          // error object, not results
     for (const r of b.content) {
       const d = rootDomain(r && r.url);
-      if (d) out.add(d);
+      if (!d) continue;
+      if (!out.has(d)) out.set(d, { domain: d, url: r.url || null, title: (r.title || '').slice(0, 140) });
     }
   }
   return out;
 }
+const citedDomains = blocks => new Set(citedSources(blocks).keys());
 
 // Small concurrency limiter — keeps a burst of prompts from hammering the API.
 async function mapLimit(items, limit, fn) {
@@ -1684,14 +1954,27 @@ Write the summary paragraph for the cover of the report. Rules:
 - Plain prose. No headings, no bullets, no preamble. Return the paragraph only.`;
 
   try {
+    // The paragraph is capped at 440 characters, but the budget is not what the
+    // paragraph costs. Thinking is billed against max_tokens and is deliberately
+    // excluded from the text this returns, so a model that reasons for a few
+    // hundred tokens hit the old 700 ceiling before emitting a single visible
+    // character -- an empty string reported as "no summary returned". Only
+    // generated tokens are charged, so headroom here costs nothing when unused.
     const out = await claudeOnce({
       messages: [{ role: 'user', content: prompt }],
-      maxTokens: 700,
+      maxTokens: 4000,
       model
     });
     if (out.error) return res.status(502).json({ error: out.error });
     const text = (out.text || '').trim();
-    if (!text) return res.status(502).json({ error: 'no summary returned' });
+    if (!text) {
+      // Say which empty this is. They have different fixes and used to look
+      // identical from the app.
+      return res.status(502).json({ error: out.stopReason === 'max_tokens'
+        ? 'the model used its whole token budget before writing anything — raise maxTokens on /ai/summary'
+        : 'the model returned no text' +
+          (out.stopReason ? ' (stopped on: ' + out.stopReason + ')' : '') });
+    }
     res.json({ summary: text, model: pickModel(model) });
   } catch (e) {
     console.error('AI summary error:', e.message);
@@ -1757,7 +2040,9 @@ app.post('/ai/visibility', async (req, res) => {
         hit: job.kind === 'branded' ? v.knew : mentionsName(out.text, name),
         specifics: job.kind === 'branded' ? v.specifics : [],
         verdictSource: job.kind === 'branded' ? v.source : null,
-        cited: job.mode === 'citation' ? citedDomains(out.blocks).has(want) : false
+        cited: job.mode === 'citation' ? citedDomains(out.blocks).has(want) : false,
+        // The sources themselves, not just whether ours was among them.
+        sources: job.mode === 'citation' ? [...citedSources(out.blocks).values()] : []
       };
     });
 
@@ -1796,6 +2081,23 @@ app.post('/ai/visibility', async (req, res) => {
       // rather than taken on faith.
       brandedSpecifics: [...new Set(bKnow.concat(bCite).flatMap(r => r.specifics || []))].slice(0, 6),
       brandedFallbacks: bKnow.filter(r => r.verdictSource === 'heuristic').length,
+      // Every source Claude read across the searched runs, most-cited first,
+      // with how many runs each appeared in and whether it is the firm's own
+      // site. This is the answer to "who speaks for us when an AI is asked" --
+      // and when the firm's own domain is absent from a long list, that is the
+      // finding, not the absence of data.
+      sources: (() => {
+        const seen = new Map();
+        for (const r of citation.concat(bCite)) {
+          for (const src of r.sources || []) {
+            const cur = seen.get(src.domain);
+            if (cur) { cur.runs++; continue; }
+            seen.set(src.domain, { ...src, runs: 1, own: src.domain === want });
+          }
+        }
+        return [...seen.values()].sort((a, b) => b.runs - a.runs).slice(0, 40);
+      })(),
+      sourceRuns: citation.length + bCite.length,
       // A firm the model cites but is scored as not knowing is a contradiction,
       // and it was exactly this shape that exposed the first scoring bug.
       brandedConflict: pct(bKnow.filter(r => r.hit).length, bKnow.length) === 0 &&

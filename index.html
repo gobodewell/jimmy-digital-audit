@@ -142,7 +142,17 @@ textarea{resize:vertical;min-height:60px}
 .sc-b{font-size:10px;margin-top:3px;font-weight:600;letter-spacing:.03em}
 .sc-b.A{color:var(--green)}.sc-b.B{color:var(--blue)}.sc-b.C{color:var(--amber)}.sc-b.D{color:var(--red)}
 .sc-r{font-size:9px;color:var(--text3);margin-top:2px;font-family:'DM Mono',monospace}
-.adj{display:flex;align-items:center;gap:8px;padding:10px 12px;border-top:1px solid var(--line);font-size:12px;flex-wrap:wrap}
+.adj{display:flex;align-items:center;gap:8px;padding:10px 12px;font-size:12px;flex-wrap:wrap}
+.adjnote{padding:10px 12px 0;font-size:12px;color:var(--text3);line-height:1.5}
+.srcs{display:flex;flex-direction:column;gap:3px;max-height:320px;overflow:auto}
+.src{display:flex;align-items:baseline;gap:8px;font-size:12px;padding:3px 0;border-bottom:1px solid var(--line)}
+.src:last-child{border-bottom:0}
+.src-n{font-family:'DM Mono',monospace;font-size:11px;color:var(--text3);min-width:20px;text-align:right}
+.src a{color:var(--accent);text-decoration:none}
+.src a:hover{text-decoration:underline}
+.src.own a,.src.own span{font-weight:600}
+.src-own{font-size:10px;background:var(--accent);color:#fff;border-radius:3px;padding:1px 5px}
+.src-t{color:var(--text3);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
 .adj label{color:var(--text2);white-space:nowrap}
 .adj input[type=number]{width:56px;padding:4px 6px;border:1px solid var(--line);border-radius:5px;font-family:'DM Mono',monospace;font-size:12px;text-align:center}
 .adj input[type=text]{flex:1;min-width:160px;padding:4px 8px;border:1px solid var(--line);border-radius:5px;font-size:12px}
@@ -379,8 +389,15 @@ textarea{resize:vertical;min-height:60px}
           <label class="ci"><input type="checkbox" id="c-awd" onchange="recalc()"/><span class="ci-l">Industry awards shown</span></label>
           <label class="ci"><input type="checkbox" id="c-aicite" onchange="recalc()"/><span class="ci-l">AI knows the firm by name<span class="aeo">AEO</span></span></label>
         </div>
+      </div>
+
+      <div class="sl">Manual credit</div>
+      <div class="card">
+        <div class="adjnote">For something real the 40 checks do not ask about. It is added to the
+          visibility subtotal before the score is indexed, and the reason is printed in the report —
+          so write it for the client, not for yourself.</div>
         <div class="adj">
-          <label for="adj-v">Manual credit</label>
+          <label for="adj-v">Points to add</label>
           <input type="number" id="adj-v" min="0" max="10" placeholder="0" oninput="recalc()"/>
           <input type="text" id="adjr-v" placeholder="Reason — what earned it (required)" oninput="recalc()"/>
           <span id="adjw-v" class="warn"></span>
@@ -426,8 +443,15 @@ textarea{resize:vertical;min-height:60px}
           <label class="ci"><input type="checkbox" id="c-res" onchange="recalc()"/><span class="ci-l">Blog/resources section<span class="aeo">AEO</span></span></label>
           <label class="ci"><input type="checkbox" id="c-sch" onchange="recalc()"/><span class="ci-l">Schema markup<span class="aeo">AEO</span></span></label>
         </div>
+      </div>
+
+      <div class="sl">Manual credit</div>
+      <div class="card">
+        <div class="adjnote">For something real the 40 checks do not ask about. It is added to the
+          website subtotal before the score is indexed, and the reason is printed in the report —
+          so write it for the client, not for yourself.</div>
         <div class="adj">
-          <label for="adj-w">Manual credit</label>
+          <label for="adj-w">Points to add</label>
           <input type="number" id="adj-w" min="0" max="10" placeholder="0" oninput="recalc()"/>
           <input type="text" id="adjr-w" placeholder="Reason — what earned it (required)" oninput="recalc()"/>
           <span id="adjw-w" class="warn"></span>
@@ -480,8 +504,15 @@ textarea{resize:vertical;min-height:60px}
           <label class="ci"><input type="checkbox" id="c-tag" onchange="recalc()"/><span class="ci-l">Tagging other pages</span></label>
           <label class="ci"><input type="checkbox" id="c-lgp" onchange="recalc()"/><span class="ci-l">Logo as profile pic</span></label>
         </div>
+      </div>
+
+      <div class="sl">Manual credit</div>
+      <div class="card">
+        <div class="adjnote">For something real the 40 checks do not ask about. It is added to the
+          social subtotal before the score is indexed, and the reason is printed in the report —
+          so write it for the client, not for yourself.</div>
         <div class="adj">
-          <label for="adj-s">Manual credit</label>
+          <label for="adj-s">Points to add</label>
           <input type="number" id="adj-s" min="0" max="10" placeholder="0" oninput="recalc()"/>
           <input type="text" id="adjr-s" placeholder="Reason — what earned it (required)" oninput="recalc()"/>
           <span id="adjw-s" class="warn"></span>
@@ -615,6 +646,7 @@ textarea{resize:vertical;min-height:60px}
       <button class="btn btn-ghost" onclick="testProxy()">Test proxy</button>
       <button class="btn btn-ghost" onclick="testSemrush()">Test SEMrush</button>
       <button class="btn btn-ghost" onclick="mapSemrush()">Map SEMrush routes</button>
+      <button class="btn btn-ghost" onclick="testMentions()">Test AI mentions</button>
     </div>
     <div id="s-msg" style="margin-top:10px;font-size:13px;color:var(--text2);white-space:pre-wrap"></div>
   </div>
@@ -882,6 +914,37 @@ async function mapSemrush() {
   }
 }
 
+// LLM Mentions returns figures under field names this proxy cannot verify from
+// the outside, so this prints the real ones from a live call. Uses a firm with
+// a large AI footprint by default — a small local firm can legitimately return
+// nothing, which tells you nothing about whether the wiring works.
+async function testMentions() {
+  const msg = document.getElementById('s-msg');
+  const dom = (getVal('clientURL') || 'fisherinvestments.com').replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+  msg.textContent = 'Asking DataForSEO about ' + dom + ' — this can take up to two minutes...';
+  try {
+    const r = await pf('/ai/mentions/diag', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ domain: dom })
+    });
+    const d = await r.json();
+    if (d.error) { msg.textContent = '✗ ' + d.error; return; }
+    const lines = ['Target: ' + d.target, ''];
+    for (const [plat, p] of Object.entries(d.platforms || {})) {
+      lines.push(plat + ':');
+      if (p.error) { lines.push('   ✗ ' + p.error); continue; }
+      lines.push('   ' + p.rows + ' row(s), total_count ' + p.totalCount);
+      lines.push('   fields: ' + (p.itemKeys || []).join(', '));
+    }
+    lines.push('', 'Full response printed to the browser console (F12) — copy it from there.');
+    msg.textContent = lines.join('\n');
+    console.log('AI MENTIONS DIAG:', JSON.stringify(d, null, 2));
+  } catch (e) {
+    msg.textContent = '✗ ' + e.message;
+  }
+}
+
 async function testProxy() {
   const proxy = lg('cfg_proxy') || DEFAULT_PROXY;
   const msg = document.getElementById('s-msg');
@@ -1008,6 +1071,12 @@ async function runSiteCheck(url) {
     // longer reads as "not indexable".
     if (d.indexable === true) ck('c-idx');
     else if (d.indexable == null) unk('c-idx', d.indexableNote || 'could not read the homepage');
+
+    // Read straight from the page rather than waiting on PageSpeed, which is
+    // one more thing that has to have succeeded. runLighthouse can still tick
+    // this if it gets there first; neither un-ticks the other.
+    if (d.viewport === true) ck('c-mob');
+    else if (d.viewport == null) unk('c-mob', d.viewportNote || 'could not read the homepage');
     if (d.sitemap !== true && d.sitemapError) unk('c-sm', 'sitemap fetch failed: ' + d.sitemapError);
     renderCrawl(d);
   } catch(e) {
@@ -1037,14 +1106,26 @@ async function runDomain(domain) {
     setMV('bl', backlinks  != null ? (backlinks||0).toLocaleString()  : '—', backlinks  > 0  ? true : null);
     setMV('rd', refDomains != null ? (refDomains||0).toLocaleString() : '—', refDomains > 10 ? true : null);
     AD.da = da; AD.keywords = keywords; AD.traffic = traffic;
+    // Which provider produced the authority number. SEMrush Authority Score and
+    // DataForSEO's rank are different proprietary metrics built on different
+    // link indexes, so the same firm scores differently on each. Recording the
+    // source is what stops a provider change reading as a ranking change.
+    AD.daSource = d.blSource || d.source || null;
     AD.backlinks = backlinks; AD.refDomains = refDomains;
     if (da != null && da > 5) ck('c-da5');
     else if (da == null) unk('c-da5', 'no authority score returned');
     // d.source = 'semrush' when SEMrush fed the numbers; d.note carries the
     // provider status when no usable data came back.
     const src = d.source === 'semrush' ? 'via SEMrush' : 'via DataForSEO';
+    // Say how wide the numbers are. They are summed across every country and
+    // language the firm ranks in, not a single market, and "1,240 keywords"
+    // reads very differently depending on which one you assume.
+    AD.seoScope = d.scope || null;
+    const scope = d.scope && d.scope.locales
+      ? ' · ' + d.scope.locales + ' market' + (d.scope.locales > 1 ? 's' : '') + ' worldwide'
+      : '';
     setStep('domain', 'done', d.note ||
-      (keywords == null && traffic == null ? 'no organic data returned' : src));
+      ((keywords == null && traffic == null ? 'no organic data returned' : src) + scope));
   } catch(e) {
     console.error('Domain error:', e.message);
     setStep('domain', 'error', e.message);
@@ -1220,7 +1301,13 @@ async function runLighthouse(url) {
 
     // Auto-check boxes
     if (d.isHttps)     ck('c-https');
-    if (d.isMobile)    ck('c-mob');
+    // null means PageSpeed did not return the viewport audit. The direct read
+    // in runSiteCheck is the primary source, so only record the gap if that
+    // did not resolve it either -- an unticked box with no reason was how a
+    // missing measurement came to look like a failed one.
+    if (d.isMobile)         ck('c-mob');
+    else if (d.isMobile == null && !document.getElementById('c-mob')?.checked)
+      unk('c-mob', 'PageSpeed returned no viewport audit');
     if (d.isIndexable) ck('c-idx');
     if (d.hasMeta)     ck('c-meta');
     // sitemap is driven by the real /sitemap.xml fetch in runSiteCheck, not by
@@ -1816,6 +1903,31 @@ async function runAIVisibilityScore(name, url, city) {
         e += '<div style="font-size:11px;color:var(--text3);margin-top:4px">' +
              result.brandedFallbacks + ' of the by-name runs returned no verdict block and fell back to text matching.</div>';
       }
+
+      // The sources themselves. The percentages say how often the firm's own
+      // site was cited; this says who WAS cited instead — which is the more
+      // actionable finding, because those are the pages an AI reads when a
+      // prospect asks about this firm.
+      const srcs = result.sources || [];
+      if (srcs.length) {
+        const own = srcs.filter(x => x.own);
+        e += '<div style="margin-top:12px">' +
+             '<div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin-bottom:6px">' +
+             'Sources Claude read (' + srcs.length + ' across ' + result.sourceRuns + ' searched runs)</div>' +
+             (own.length ? '' :
+               '<div style="font-size:11px;color:#b45309;margin-bottom:6px">Their own site was not among them — ' +
+               'every answer about this firm was built from third-party pages.</div>') +
+             '<div class="srcs">' +
+             srcs.map(x =>
+               '<div class="src' + (x.own ? ' own' : '') + '">' +
+                 '<span class="src-n">' + x.runs + '</span>' +
+                 (x.url ? '<a href="' + escHtml(x.url) + '" target="_blank" rel="noopener">' + escHtml(x.domain) + '</a>'
+                        : '<span>' + escHtml(x.domain) + '</span>') +
+                 (x.own ? '<span class="src-own">their site</span>' : '') +
+                 (x.title ? '<span class="src-t">' + escHtml(x.title) + '</span>' : '') +
+               '</div>').join('') +
+             '</div></div>';
+      }
       ev.innerHTML = e;
     }
 
@@ -1826,6 +1938,7 @@ async function runAIVisibilityScore(name, url, city) {
         result.brandedCiteHits + '/' + result.brandedCiteRuns + ' cited their site' : 'not run') + '  ·  ' +
       (result.prompts + result.brandedPrompts) + ' prompts x ' + result.repeats + ' runs' +
       (result.errors ? '  ·  ' + result.errors + ' failed' + (result.errorNote ? ': ' + result.errorNote : '') : '');
+    AD.aiSources = result.sources || [];
     setStep('ai-score', 'done');
   } catch (e) {
     console.error('AI visibility error:', e.message);
@@ -2314,7 +2427,14 @@ function priorAudit() {
   const me = key({ clientURL: getVal('clientURL'), clientName: getVal('clientName') });
   if (!me) return null;
   let h; try { h = JSON.parse(lg('audit_history') || '[]'); } catch (_) { return null; }
-  return h.find(a => key(a) === me && a.scores && typeof a.scores.overall === 'number') || null;
+  const now = AD.daSource || null;
+  return h.find(a => key(a) === me && a.scores && typeof a.scores.overall === 'number'
+    // Don't compare across a provider change. SEMrush and DataForSEO score
+    // authority differently, so the DA check can flip on the same firm with
+    // nothing about the firm having changed — and the delta line would present
+    // that as movement. Audits saved before the source was recorded have no
+    // daSource at all, which is treated as "cannot tell" and skipped too.
+    && (a.daSource || null) === now) || null;
 }
 
 function catScore(cat) {
@@ -2874,7 +2994,9 @@ function assembleReport() {
       section('v', [
         { label:'Business listings', value: dirs ? dirs.freeFound : null,
           unit: dirs ? `of ${dirs.freeTotal} free` : '', good:'Above 3 is good', ok: dirs && dirs.freeFound >= 3 },
-        { label:'Domain authority', value: AD.da ?? null, unit:'/ 100', good:'Above 5 is good', ok: AD.da > 5 },
+        { label:'Domain authority', value: AD.da ?? null,
+          unit: AD.daSource === 'dataforseo' ? '/ 100 (DataForSEO)' : '/ 100',
+          good:'Above 5 is good', ok: AD.da > 5 },
         { label:'Organic traffic', value: AD.traffic ?? null, unit:'visits / mo', good:'Above 50 is good', ok: AD.traffic > 50 },
         { label:'Ranking keywords', value: AD.keywords ?? null, unit:'keywords', good:'Above 75 is good', ok: AD.keywords > 75 }
       ]),
