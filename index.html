@@ -370,8 +370,12 @@ textarea{resize:vertical;min-height:60px}
           <b>does not know them yet</b>.</div>
         <div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin:2px 0 6px">The number that matters — asked for a recommendation, firm never named</div>
         <div class="mg">
-          <div class="mc"><div class="ml">Surfaced in the answer</div><div class="mv" id="m-aicite">—</div><div class="mt">"Who are the best advisors in…" — does the firm come up at all</div></div>
-          <div class="mc"><div class="ml">Their site answers for them</div><div class="mv" id="m-aibcite">—</div><div class="mt">Asked by name — their own site vs third-party listings</div></div>
+          <div class="mc"><div class="ml">Named in the answer</div><div class="mv" id="m-ainamed">—</div><div class="mt">Asked for a list of firms — did they make it</div></div>
+          <div class="mc"><div class="ml">Their site cited as a source</div><div class="mv" id="m-aicite">—</div><div class="mt">Same answers — was their own site among the pages read</div></div>
+        </div>
+        <div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin:14px 0 6px">Asked about by name</div>
+        <div class="mg">
+          <div class="mc"><div class="ml">Their site answers for them</div><div class="mv" id="m-aibcite">—</div><div class="mt">Their own site vs third-party listings</div></div>
         </div>
         <span id="m-aivis" style="display:none">—</span><span id="m-aibrand" style="display:none">—</span>
         <div id="aivis-evidence" style="margin-top:10px"></div>
@@ -392,10 +396,10 @@ textarea{resize:vertical;min-height:60px}
           <label class="ci"><input type="checkbox" id="c-meta" onchange="recalc()"/><span class="ci-l">Meta descriptions<span class="aeo">AEO</span></span></label>
           <label class="ci"><input type="checkbox" id="c-ga" onchange="recalc()"/><span class="ci-l">Google Analytics</span></label>
           <label class="ci"><input type="checkbox" id="c-da5" onchange="recalc()"/><span class="ci-l">DA above 5<span class="aeo">AEO</span></span></label>
-          <label class="ci"><input type="checkbox" id="c-cgpt" onchange="recalc()"/><span class="ci-l">AI surfaces the firm unprompted<span class="aeo">AEO</span></span></label>
+          <label class="ci"><input type="checkbox" id="c-cgpt" onchange="recalc()"/><span class="ci-l">Firm name appears in AI<span class="aeo">AEO</span></span></label>
           <label class="ci"><input type="checkbox" id="c-rcta" onchange="recalc()"/><span class="ci-l">Review CTA on site<span class="aeo">AEO</span></span></label>
           <label class="ci"><input type="checkbox" id="c-awd" onchange="recalc()"/><span class="ci-l">Industry awards shown</span></label>
-          <label class="ci"><input type="checkbox" id="c-aicite" onchange="recalc()"/><span class="ci-l">AI knows the firm by name<span class="aeo">AEO</span></span></label>
+          <label class="ci"><input type="checkbox" id="c-aicite" onchange="recalc()"/><span class="ci-l">Your site is the source AI quotes<span class="aeo">AEO</span></span></label>
         </div>
       </div>
 
@@ -1037,6 +1041,11 @@ async function runAudit() {
     runDirectories(domain)
   ]);
 
+  // Phase 1b - resolve what the direct fetch could not, from evidence already
+  // in hand. Runs after Phase 1 because it needs results from two calls that
+  // run in parallel.
+  reconcileFromRankings();
+
   // Phase 2 - AI reviews in PARALLEL (each writes its own section) — ~3x faster
   await Promise.allSettled([
     runAIVisibility(name, url),
@@ -1094,14 +1103,17 @@ async function runSiteCheck(url) {
     const d = await r.json();
     console.log('SITE CHECK:', JSON.stringify(d));
     if (d.sitemap) ck('c-sm');
+    else if (d.sitemapBlocked) unk('c-sm', d.sitemapNote || 'every location refused this server');
     // Decided either way: found, or looked for in every known location and not
-    // found. Only a fetch failure leaves it genuinely unmeasured.
-    if (!d.sitemapError) measured('c-sm');
+    // found. A fetch error, or every location refusing this server, leaves it
+    // genuinely unmeasured — and unmeasured is not the same as absent.
+    if (!d.sitemapError && !d.sitemapBlocked) measured('c-sm');
     if (d.https)   ck('c-https');
     // Indexability now comes from reading the page's own robots directives.
     // PageSpeed's is-crawlable audit still runs and can also tick this box,
     // but it is no longer the only thing that can, and a null from it no
     // longer reads as "not indexable".
+    AD.indexable = d.indexable;
     if (d.indexable === true) ck('c-idx');
     else if (d.indexable == null) unk('c-idx', d.indexableNote || 'could not read the homepage');
     if (d.indexable != null) measured('c-idx');
@@ -1165,6 +1177,40 @@ async function runDomain(domain) {
     console.error('Domain error:', e.message);
     setStep('domain', 'error', e.message);
   }
+}
+
+// Some sites sit behind a WAF that refuses this proxy's datacenter IP — the
+// homepage comes back 403 and indexability is left unmeasured, which counts as
+// not passed. But a site Google has de-indexed does not rank for hundreds of
+// keywords or collect thousands of organic visits a month, and the audit
+// already has both numbers from DataForSEO.
+//
+// So where the fetch was refused, rankings settle it. This is an inference,
+// not a measurement, and it says so: the note names the evidence and the box
+// records how it was resolved. It only ever resolves UPWARD — a site that
+// fetched cleanly and declared noindex keeps that answer, because that is a
+// measurement and this is not.
+function reconcileFromRankings() {
+  const el = document.getElementById('c-idx');
+  if (!el || el.checked) return;
+  if (AD.indexable != null) return;              // the fetch answered; leave it
+  const kw = AD.keywords, tr = AD.traffic;
+  if (!(kw > 0 || tr > 0)) return;               // no evidence either way
+
+  const why = 'blocked from reading the page, but the site ranks for ' +
+              (kw > 0 ? kw.toLocaleString() + ' keywords' : '') +
+              (kw > 0 && tr > 0 ? ' and ' : '') +
+              (tr > 0 ? tr.toLocaleString() + ' organic visits a month' : '') +
+              ' — Google has it indexed';
+  ck('c-idx');
+  UNK.delete('c-idx');
+  AD.indexableInferred = why;
+  const body = document.getElementById('crawl-body');
+  if (body) {
+    body.innerHTML += '<div style="font-size:11px;color:var(--text3);margin-top:8px">' +
+      'Indexability resolved from search performance: ' + escHtml(why) + '.</div>';
+  }
+  recalc();
 }
 
 // ── Directory listings ───────────────────────────────────────────────────────
@@ -1249,6 +1295,19 @@ async function runSchema(url) {
     AD.schema = d;
     block.style.display = '';
 
+    // Nothing could read the markup, so there is no finding either way. This
+    // rendered as "No structured data found on the homepage" — a claim about a
+    // page the audit never saw, and one that costs a check the firm may pass.
+    if (d.blocked) {
+      body.innerHTML = '<span style="color:#b45309;font-size:12px">Could not read the homepage markup: ' +
+        escHtml(d.note || 'the page refused every request') + '</span>' +
+        '<div style="font-size:11px;color:var(--text3);margin-top:6px">' +
+        'Not a finding either way — the markup was never seen.</div>';
+      unk('c-sch', d.note || 'could not read the homepage markup');
+      setStep('schema', 'error', 'could not read the page');
+      return;
+    }
+
     const yes = '<span style="color:#16a34a;font-weight:600">yes</span>';
     const no  = '<span style="color:#dc2626;font-weight:600">no</span>';
     const line = (label, ok, extra) =>
@@ -1304,7 +1363,8 @@ async function runSchema(url) {
     AD.schemaSummary = d.types.join(', ') +
       (d.hasAddress ? ' | address' : ' | NO address') +
       (d.isFinancialService ? ' | FinancialService' : '');
-    setStep('schema', 'done', d.businessTypes[0] || 'no business type');
+    setStep('schema', 'done',
+      (d.readVia === 'onpage' ? 'read by OnPage · ' : '') + (d.businessTypes[0] || 'no business type'));
   } catch (e) {
     console.error('Schema error:', e.message);
     block.style.display = '';
@@ -2005,6 +2065,8 @@ async function runAIVisibilityScore(name, url, city) {
     // m-aivis and m-aibrand are the retired knowledge-mode tiles, kept as
     // hidden spans so this still writes somewhere when knowledgeMode is on.
     setMV('aivis',   result.visibilityScore == null ? '-' : result.visibilityScore + '%', result.visibilityScore > 0);
+    // Making the list and having your site read are different achievements.
+    setMV('ainamed', result.namedScore     == null ? '-' : result.namedScore     + '%', result.namedScore     > 0);
     setMV('aicite',  result.citationShare   == null ? '-' : result.citationShare   + '%', result.citationShare   > 0);
     setMV('aibrand', result.brandedScore    == null ? '-' : result.brandedScore    + '%', result.brandedScore    > 0);
     setMV('aibcite', result.brandedCitation == null ? '-' : result.brandedCitation + '%', result.brandedCitation > 0);
@@ -2023,11 +2085,13 @@ async function runAIVisibilityScore(name, url, city) {
     // names it; that is citationShare. The knowledge-mode figures no longer
     // exist unless knowledgeMode was requested, and treating an absent run as
     // a failure is the bug this audit exists to avoid.
-    if (result.citationShare > 0 || result.visibilityScore > 0) ck('c-cgpt');
-    else if (result.citationRuns === 0 && result.visibilityRuns === 0)
+    // Being named in the answer is the check. Their site being read is a
+    // stronger result, so either one passes it.
+    if (result.namedScore > 0 || result.citationShare > 0 || result.visibilityScore > 0) ck('c-cgpt');
+    else if (!result.namedRuns && !result.citationRuns && !result.visibilityRuns)
       unk('c-cgpt', 'no discovery prompts completed');
 
-    // "AI knows the firm by name" is now answered with search on: the model
+    // The by-name check is answered with search on now: the model
     // was asked about them and cited their own site rather than only
     // third-party listings.
     if (result.brandedCitation > 0) ck('c-aicite');
@@ -2080,11 +2144,17 @@ async function runAIVisibilityScore(name, url, city) {
       ev.innerHTML = e;
     }
 
+    // Read the counts off the runs that actually happened. This said "By name:
+    // not run" while the by-name tile showed 100%, because it was counting the
+    // no-search runs that are now off by default.
     det.textContent =
-      'Unprompted: ' + result.visibilityHits + '/' + result.visibilityRuns + ' named, ' +
-      result.citationHits + '/' + result.citationRuns + ' cited  ·  ' +
-      'By name: ' + (result.brandedRuns ? result.brandedHits + '/' + result.brandedRuns + ' knew them, ' +
-        result.brandedCiteHits + '/' + result.brandedCiteRuns + ' cited their site' : 'not run') + '  ·  ' +
+      'Asked for a list: ' + (result.namedHits ?? 0) + '/' + (result.namedRuns ?? 0) + ' named them, ' +
+      (result.citationHits ?? 0) + '/' + (result.citationRuns ?? 0) + ' read their site  ·  ' +
+      'By name: ' + (result.brandedCiteRuns
+        ? result.brandedCiteHits + '/' + result.brandedCiteRuns + ' cited their site'
+        : 'not run') +
+      (result.visibilityRuns ? '  ·  No-search: ' + result.visibilityHits + '/' + result.visibilityRuns + ' named' : '') +
+      '  ·  ' +
       (result.prompts + result.brandedPrompts) + ' prompts x ' + result.repeats + ' runs' +
       (result.errors ? '  ·  ' + result.errors + ' failed' + (result.errorNote ? ': ' + result.errorNote : '') : '');
     AD.aiSources = result.sources || [];
@@ -2406,8 +2476,10 @@ const CHECKS = [
     label:'Site indexable',
     action:'Confirm with your web provider that your site is not set to block search engine crawlers.' },
   { id:'c-cgpt',  cat:'v', grp:'Website Search', pts:9,  type:'sampled',  aeo:1, effort:'medium',
-    q:'Do AI assistants surface your firm unprompted?',
-    label:'AI surfaces the firm unprompted',
+    // "Surface unprompted" is jargon. The distinction that matters is that
+    // nobody typed the firm's name — so say that, in the question.
+    q:'Is your firm name appearing in AI?',
+    label:'Firm name appears in AI',
     action:'Publish substantive, attributable content and earn mentions on sites AI tools already trust, so assistants can describe your firm accurately when a prospect asks.' },
   { id:'c-sm',    cat:'v', grp:'Website Search', pts:8,  type:'measured', aeo:1, effort:'low',
     q:'Does the site have a sitemap?',
@@ -2418,8 +2490,10 @@ const CHECKS = [
     label:'Meta descriptions',
     action:"Write unique meta descriptions for each page via your website's SEO tool." },
   { id:'c-aicite',cat:'v', grp:'Website Search', pts:7,  type:'sampled',  aeo:1, effort:'medium',
-    q:'Do AI assistants know your firm and cite your site when asked by name?',
-    label:'AI knows the firm by name',
+    // Measured with search on: asked about the firm by name, did the model
+    // quote their own site or a directory page about them.
+    q:'When AI is asked about your firm by name, does it quote your site?',
+    label:'Your site is the source AI quotes',
     action:'Make the site the clearest source about your firm — a complete About page, named advisors with bios, services described in plain language — so AI tools quote you rather than a directory.' },
   { id:'c-da5',   cat:'v', grp:'Website Search', pts:7,  type:'measured', aeo:1, effort:'medium',
     q:'Is the domain authority above 5?',
@@ -3467,8 +3541,8 @@ function clearAll() {
 const AID_CATALOG = [
   ['c-res','Blog / resources section'],['c-faq','FAQ page with Q&A'],
   ['c-awd','Industry awards shown'],['c-rcta','Review/testimonial CTA'],
-  ['c-cgpt','AI surfaces the firm unprompted'],['c-nav','Simple navigation'],
-  ['c-aicite','AI knows the firm by name'],['c-sch','Schema markup'],
+  ['c-cgpt','Firm name appears in AI'],['c-nav','Simple navigation'],
+  ['c-aicite','Your site is the source AI quotes'],['c-sch','Schema markup'],
   ['c-gbp-f','GBP listing visible'],['c-gbp-d','GBP business description'],
   ['c-gbp-p','Photos on GBP'],
   ['c-lnk','Content links to other pages'],['c-pho','High-quality photos'],

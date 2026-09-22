@@ -966,6 +966,171 @@ function readViewport(html) {
   return null;
 }
 
+// ── DataForSEO OnPage — a crawler that gets through ──────────────────────────
+// Some sites refuse this proxy's datacenter IP outright: browser headers do not
+// help because the User-Agent was never the problem. OnPage is a real crawler
+// with its own infrastructure and JS rendering, so it reads pages this server
+// cannot. It costs money per call, which is why it is a FALLBACK — the direct
+// fetch runs first and is free, and OnPage is only asked when that is refused.
+//
+// The item field names are not verifiable from outside this proxy, so each
+// figure is read by a list of plausible names and anything unmatched reports as
+// unmeasured rather than as a finding. /site/onpage/diag prints the real keys.
+function opGet(obj, names) {
+  if (!obj) return undefined;
+  const want = names.map(n => String(n).toLowerCase().replace(/[^a-z0-9]/g, ''));
+  for (const k of Object.keys(obj)) {
+    if (want.includes(String(k).toLowerCase().replace(/[^a-z0-9]/g, ''))) return obj[k];
+  }
+  return undefined;
+}
+
+// Raw page HTML via OnPage, for the checks that need to read the markup
+// itself rather than a summary of it. Tries instant_pages with raw HTML asked
+// for, then the content parser, and reports what it got rather than guessing.
+async function onPageHtml(url) {
+  const attempts = [
+    { path: '/on_page/instant_pages',
+      body: { url, enable_javascript: true, store_raw_html: true } },
+    { path: '/on_page/content_parsing/live',
+      body: { url, enable_javascript: true } }
+  ];
+  const tried = [];
+  for (const a of attempts) {
+    let d;
+    try { d = await dfsPost(a.path, [a.body]); }
+    catch (e) { tried.push(a.path + ' → ' + e.message); continue; }
+    const task = d?.tasks?.[0];
+    if (d?.status_code && d.status_code !== 20000) {
+      tried.push(a.path + ' → DataForSEO ' + d.status_code + ': ' + d.status_message); continue;
+    }
+    if (task && task.status_code !== 20000) {
+      tried.push(a.path + ' → DataForSEO ' + task.status_code + ': ' + task.status_message); continue;
+    }
+    const item = task?.result?.[0]?.items?.[0] || task?.result?.[0];
+    const html = opGet(item || {}, ['raw_html', 'html', 'page_content', 'content']);
+    if (typeof html === 'string' && /<[a-z!]/i.test(html)) return { html, via: a.path };
+    tried.push(a.path + ' → no HTML in the response');
+  }
+  return { error: 'OnPage returned no page HTML', tried };
+}
+
+async function onPageFetch(url, opts) {
+  const d = await dfsPost('/on_page/instant_pages', [{
+    url,
+    enable_javascript: (opts && opts.js) !== false,
+    load_resources: false
+  }]);
+  if (d && d.status_code && d.status_code !== 20000)
+    return { error: 'DataForSEO ' + d.status_code + ': ' + d.status_message };
+  const task = d?.tasks?.[0];
+  if (task && task.status_code !== 20000)
+    return { error: 'DataForSEO ' + task.status_code + ': ' + task.status_message };
+  const item = task?.result?.[0]?.items?.[0];
+  if (!item) return { error: 'OnPage returned no page data for ' + url };
+  return { item };
+}
+
+// Turn an OnPage item into the same shape /site/check already speaks.
+function onPageRead(item) {
+  const meta   = opGet(item, ['meta']) || {};
+  const checks = opGet(item, ['checks']) || {};
+  const status = opGet(item, ['status_code', 'statusCode']);
+
+  // Indexability, by whichever of these the response actually carries. A page
+  // the crawler could not load says nothing about indexability either way.
+  let indexable = null, why = '';
+  const noIndex = opGet(checks, ['no_index', 'noindex', 'is_noindex']);
+  const follow  = opGet(meta,   ['follow']);
+  const robots  = opGet(meta,   ['robots', 'meta_robots', 'robots_directives']);
+  if (typeof status === 'number' && status >= 400) {
+    why = 'OnPage also could not load the page (HTTP ' + status + ')';
+  } else if (typeof noIndex === 'boolean') {
+    indexable = !noIndex;
+    why = noIndex ? 'OnPage read a noindex directive' : 'OnPage read the page and found no noindex directive';
+  } else if (typeof robots === 'string' && robots) {
+    indexable = !/\bnoindex\b/i.test(robots);
+    why = 'OnPage read robots: ' + robots;
+  } else if (typeof follow === 'boolean') {
+    // follow is about link-following rather than indexing, so it is only used
+    // when nothing better is present, and the note says which signal it was.
+    indexable = true;
+    why = 'OnPage loaded the page (HTTP ' + status + ') and reported no indexing block';
+  } else if (typeof status === 'number' && status < 400) {
+    indexable = true;
+    why = 'OnPage loaded the page (HTTP ' + status + ') and reported no indexing block';
+  }
+
+  const description = opGet(meta, ['description']);
+  const title       = opGet(meta, ['title']);
+  const noDesc      = opGet(checks, ['no_description', 'nodescription']);
+  const hasMeta = typeof noDesc === 'boolean' ? !noDesc
+                : typeof description === 'string' ? description.trim().length > 0
+                : null;
+
+  return {
+    status: status ?? null,
+    indexable, indexableNote: why,
+    hasMeta,
+    title: title || null,
+    description: description || null,
+    metaFields:  Object.keys(meta),
+    checkFields: Object.keys(checks)
+  };
+}
+
+// Ask OnPage for what the direct fetch could not read, and record that it was
+// OnPage that answered. Never overwrites a value the direct fetch established:
+// it only fills nulls.
+async function onPageRescue(url, results, whyDirectFailed) {
+  if (!DFS_LOGIN) { results.onPage = 'not configured'; return; }
+  const r = await onPageFetch(url, { js: true });
+  if (r.error) { results.onPage = 'failed: ' + r.error; return; }
+
+  const op = onPageRead(r.item);
+  results.onPage = 'used';
+  results.onPageStatus = op.status;
+  if (results.indexable == null && op.indexable != null) {
+    results.indexable = op.indexable;
+    results.indexableNote = whyDirectFailed + ' — ' + op.indexableNote;
+  }
+  if (results.hasMeta == null && op.hasMeta != null) {
+    results.hasMeta = op.hasMeta;
+    results.hasMetaNote = 'read by OnPage';
+  }
+  if (op.title) results.title = op.title;
+  if (op.description) results.description = op.description;
+}
+
+app.get('/site/onpage', async (req, res) => {
+  const { url } = req.query;
+  if (!url) return res.status(400).json({ error: 'url required' });
+  if (!DFS_LOGIN) return res.status(500).json({ error: 'DataForSEO not configured — OnPage needs it' });
+  const r = await onPageFetch(url, { js: req.query.js !== '0' });
+  if (r.error) return res.status(502).json({ error: r.error });
+  res.json(Object.assign({ source: 'onpage' }, onPageRead(r.item)));
+});
+
+// Prints what OnPage actually returns, so the readers above can be pinned to
+// the real field names rather than a plausible list.
+app.get('/site/onpage/diag', async (req, res) => {
+  if (!DFS_LOGIN) return res.json({ error: 'DataForSEO not configured' });
+  const url = req.query.url || 'https://totuswm.com';
+  const r = await onPageFetch(url, { js: true });
+  if (r.error) return res.json({ url, error: r.error });
+  const item = r.item;
+  res.json({
+    url,
+    itemKeys: Object.keys(item),
+    metaKeys: Object.keys(opGet(item, ['meta']) || {}),
+    checkKeys: Object.keys(opGet(item, ['checks']) || {}),
+    read: onPageRead(item),
+    // A string, not a re-parsed slice: truncating JSON and parsing it back
+    // throws far more often than it works.
+    sample: JSON.stringify(item).slice(0, 2000)
+  });
+});
+
 // ── 3. Sitemap check — direct HTTP ping ──────────────────────────────────────
 app.get('/site/check', async (req, res) => {
   const { url } = req.query;
@@ -1025,9 +1190,34 @@ app.get('/site/check', async (req, res) => {
       }
     }
     if (!results.sitemap) {
-      results.sitemapUrl  = base + '/sitemap.xml';
-      results.sitemapNote = 'none found — tried ' + candidates.length + ' locations' +
-                            (declared.length ? ', including the one robots.txt declares' : '');
+      // Every candidate refused with the same status? That is the WAF blocking
+      // this server, not a firm without a sitemap — and calling it "none found"
+      // costs them a check they deserve. OnPage crawls from its own
+      // infrastructure, so ask it about the likeliest location.
+      const allBlocked = results.sitemapTried.length > 0 &&
+        results.sitemapTried.every(t => /→ HTTP (40[13]|429|5\d\d)/.test(t));
+      if (allBlocked && DFS_LOGIN) {
+        const probe = declared[0] || base + '/sitemap.xml';
+        const r = await onPageFetch(probe, { js: false });
+        const st = r.item ? opGet(r.item, ['status_code', 'statusCode']) : null;
+        if (typeof st === 'number' && st < 400) {
+          results.sitemap       = true;
+          results.sitemapUrl    = probe;
+          results.sitemapStatus = st;
+          results.sitemapNote   = 'this server was blocked, but OnPage loaded it (HTTP ' + st + ')';
+          results.onPageSitemap = 'used';
+        } else {
+          results.sitemapUrl  = probe;
+          results.sitemapNote = 'every location refused this server' +
+            (r.error ? ', and OnPage could not check either: ' + r.error
+                     : ' and OnPage got HTTP ' + st);
+          results.sitemapBlocked = true;
+        }
+      } else {
+        results.sitemapUrl  = base + '/sitemap.xml';
+        results.sitemapNote = 'none found — tried ' + candidates.length + ' locations' +
+                              (declared.length ? ', including the one robots.txt declares' : '');
+      }
     }
 
     // Check HTTPS
@@ -1047,6 +1237,10 @@ app.get('/site/check', async (req, res) => {
         results.indexableNote = 'homepage returned HTTP ' + pr.status;
         results.viewport = null;
         results.viewportNote = 'homepage returned HTTP ' + pr.status;
+        // A refusal is exactly what OnPage is for. It is only asked here, on
+        // the failure path, because it is billed per call and the plain fetch
+        // costs nothing.
+        await onPageRescue(url, results, 'homepage returned HTTP ' + pr.status);
       } else {
         const xRobots = (pr.headers.get('x-robots-tag') || '').trim();
         const html    = (await pr.text()).slice(0, 300000);
@@ -1076,6 +1270,7 @@ app.get('/site/check', async (req, res) => {
       results.indexableNote = 'could not fetch the homepage: ' + e.message;
       results.viewport = null;
       results.viewportNote = 'could not fetch the homepage: ' + e.message;
+      await onPageRescue(url, results, 'could not fetch the homepage: ' + e.message);
     }
 
     console.log('Site check results:', JSON.stringify(results));
@@ -1125,8 +1320,21 @@ app.get('/site/schema', async (req, res) => {
       redirect: 'follow',
       signal: AbortSignal.timeout(15000)
     });
-    if (!r.ok) return res.json({ found: false, note: 'page returned HTTP ' + r.status });
-    const html = await r.text();
+    let html, via = 'direct';
+    if (!r.ok) {
+      // A blocked page is not a page without markup. Reporting "no structured
+      // data found" for a 403 is a finding the audit did not measure, and it
+      // costs the firm a check they may well pass.
+      const op = await onPageHtml(url);
+      if (op.error) {
+        return res.json({ found: false, blocked: true, readVia: 'none',
+          note: 'page returned HTTP ' + r.status + ' and OnPage could not read it either' +
+                (op.tried ? ' (' + op.tried.join('; ') + ')' : '') });
+      }
+      html = op.html; via = 'onpage';
+    } else {
+      html = await r.text();
+    }
 
     // JSON-LD blocks
     const blocks = [...html.matchAll(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)]
@@ -1163,6 +1371,7 @@ app.get('/site/schema', async (req, res) => {
     const sameAs = [...new Set(nodes.flatMap(n => [].concat(n.sameAs || [])).filter(Boolean).map(String))];
 
     res.json({
+      readVia: via,
       found: types.length > 0,
       types,
       jsonLdBlocks: blocks.length,
@@ -2182,7 +2391,21 @@ app.post('/ai/visibility', async (req, res) => {
       knowledgeMode: withKnowledge,
       brandedPrompts: branded.length,
       // Discovery — the firm is never named in the question.
-      // % of no-tool answers that named the firm at all
+      //
+      // Two different questions, and conflating them is how a firm that Claude
+      // read six times scored 0%:
+      //   named — the firm appears in the answer. This is "did we make the list".
+      //   cited — their DOMAIN is among the sources the model read. Stricter:
+      //           a firm can be listed from a directory page without its own
+      //           site ever being opened.
+      //
+      // Both are now measured over the searched runs. The name rate used to be
+      // computed only over the no-search runs, so turning search on left it
+      // dividing by zero and the tile fell back to the citation figure.
+      namedScore: pct(citation.filter(r => r.hit).length, citation.length),
+      namedHits:  citation.filter(r => r.hit).length,
+      namedRuns:  citation.length,
+      // Kept for the opt-in knowledge comparison; null when those runs are off.
       visibilityScore: pct(knowledge.filter(r => r.hit).length, knowledge.length),
       visibilityHits:  knowledge.filter(r => r.hit).length,
       visibilityRuns:  knowledge.length,
