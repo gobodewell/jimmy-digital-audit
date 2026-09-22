@@ -427,6 +427,20 @@ textarea{resize:vertical;min-height:60px}
         <div class="mc"><div class="ml">Performance score</div><div class="mv" id="m-ps">—</div><div class="mt">Google score 0–100</div></div>
       </div>
 
+      <!-- Google's API fails intermittently on sites it can reach perfectly well
+           a minute later. The run already retries three times on its own; this
+           is the manual fourth, for when that was not enough. Hidden until the
+           automatic attempts are spent, so it never invites a pointless click. -->
+      <div id="psi-retry" class="card" style="display:none;border-color:#fcd34d;background:#fffbeb">
+        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+          <div style="flex:1;min-width:220px">
+            <div style="font-size:12px;font-weight:600;color:#92400e">Google PageSpeed did not return</div>
+            <div id="psi-retry-why" style="font-size:11px;color:#92400e;margin-top:3px"></div>
+          </div>
+          <button class="btn btn-ghost" id="psi-retry-btn" onclick="retryLighthouse()">Run it again</button>
+        </div>
+      </div>
+
       <div id="weight-block" class="card" style="display:none">
         <div class="ct">Page weight — what is loading, and from where</div>
         <div id="weight-body"></div>
@@ -917,6 +931,17 @@ async function testMentions() {
       lines.push('   ' + p.rows + ' row(s), total_count ' + p.totalCount);
       lines.push('   fields: ' + (p.itemKeys || []).join(', '));
     }
+    // Zero rows could be coverage or a wrong parameter. The probe says which.
+    if (d.scopeProbe && d.scopeProbe.length) {
+      lines.push('', 'Target variants tried:');
+      d.scopeProbe.forEach(v => lines.push(
+        '   ' + (v.mentions != null ? String(v.mentions).padStart(6) : '     —') +
+        '  mentions · ' + v.label + (v.message ? '  [' + v.message + ']' : '')));
+      const any = d.scopeProbe.some(v => v.mentions > 0);
+      lines.push('', any
+        ? 'At least one variant returns data — the live call is asking the wrong way.'
+        : 'No variant returns data — this firm is not in the prompt database.');
+    }
     lines.push('', 'Full response printed to the browser console (F12) — copy it from there.');
     msg.textContent = lines.join('\n');
     console.log('AI MENTIONS DIAG:', JSON.stringify(d, null, 2));
@@ -1393,6 +1418,9 @@ async function runLighthouse(url) {
     else if (d.hasGA == null)     unk('c-ga',  'PageSpeed returned no third-party summary');
 
     renderPageWeight(d);
+    // It worked, so the manual control has nothing left to offer.
+    const rt = document.getElementById('psi-retry');
+    if (rt) rt.style.display = 'none';
     // Say when it needed more than one go. A check that only works on the third
     // attempt is not the same as one that works, and the pattern is worth
     // seeing across runs rather than being smoothed away.
@@ -1402,7 +1430,37 @@ async function runLighthouse(url) {
   } catch(e) {
     console.error('Lighthouse error:', e.message);
     setStep('lighthouse', 'error', e.message);
+    // Three automatic attempts are spent. Offer the fourth by hand rather than
+    // leaving the tab with three em dashes and no way forward.
+    const rt  = document.getElementById('psi-retry');
+    const why = document.getElementById('psi-retry-why');
+    if (rt && why) {
+      why.textContent = e.message + ' — the run tried three times. Nothing here is '
+        + 'recorded as a failure; these checks are simply unmeasured until it answers.';
+      rt.style.display = '';
+      const b = document.getElementById('psi-retry-btn');
+      if (b) { b.disabled = false; b.textContent = 'Run it again'; }
+    }
   }
+}
+
+// The manual fourth attempt. Runs the same call against the same URL, so a
+// success lands in the normal path and sets the same boxes -- there is no
+// second code path that could disagree with the first.
+async function retryLighthouse() {
+  const b = document.getElementById('psi-retry-btn');
+  const url = getVal('clientURL');
+  if (!url) {
+    const why = document.getElementById('psi-retry-why');
+    if (why) why.textContent = 'Enter the firm\'s website URL first.';
+    return;
+  }
+  if (b) { b.disabled = true; b.textContent = 'Running...'; }
+  let u = url;
+  if (!/^https?:\/\//i.test(u)) u = 'https://' + u;
+  await runLighthouse(u.replace(/\/$/, ''));
+  // runLighthouse re-enables the button itself on failure and hides the whole
+  // control on success, so there is nothing to reset here.
 }
 
 // ── DataForSEO: GBP ───────────────────────────────────────────────────────────
@@ -1706,14 +1764,30 @@ async function runAIMentions(name, url) {
         continue;
       }
       any = true;
+      // `covered` false means this firm has no rows in DataForSEO's sampled
+      // prompt database. That is a limit of the sample, not a fact about the
+      // firm — a firm ChatGPT names by name can still be outside it. So the
+      // tile reads "not tracked", never "no mentions".
+      // Keyed off the figure itself, not a flag: the server returns null for a
+      // firm outside the sample and 0 for a measured zero, so the value already
+      // carries the distinction. A missing `covered` field then cannot relabel
+      // a firm with real mentions as untracked.
+      const uncovered = p.mentions == null;
       html += '<div class="mc"><div class="ml">' + label + '</div>' +
               '<div class="mv">' + (p.mentions != null ? p.mentions.toLocaleString() : '—') + '</div>' +
-              '<div class="mt">mentions' +
+              '<div class="mt">' + (uncovered
+                ? 'not tracked in this database — not a measure of their AI presence'
+                : 'mentions') +
               (p.searchVolume != null ? ' · ' + p.searchVolume.toLocaleString() + ' AI searches' : '') +
               '</div></div>';
+      // With no measured mentions there is nothing for a share to be a share
+      // OF, so the tile says so rather than printing 0% or a bare em dash.
+      const noneAtAll = uncovered || !p.mentions;
       html += '<div class="mc"><div class="ml">' + label + ' — own site cited</div>' +
-              '<div class="mv">' + (p.ownCitedShare != null ? p.ownCitedShare + '%' : '—') + '</div>' +
-              '<div class="mt">' + (p.ownCitedMentions != null
+              '<div class="mv">' + (noneAtAll ? '—' : (p.ownCitedShare != null ? p.ownCitedShare + '%' : '—')) + '</div>' +
+              '<div class="mt">' + (uncovered ? 'nothing tracked to measure against'
+                : noneAtAll ? 'no mentions to be cited in'
+                : p.ownCitedMentions != null
                 ? p.ownCitedMentions.toLocaleString() + ' of ' + (p.mentions || 0).toLocaleString()
                 : 'their site was not cited') + '</div></div>';
     }
@@ -1745,10 +1819,14 @@ async function runAIMentions(name, url) {
     body.innerHTML = html;
     const g = (d.platforms || {}).google || {};
     const c = (d.platforms || {}).chat_gpt || {};
-    const tot = (g.mentions || 0) + (c.mentions || 0);
+    const meas = [g, c].filter(p => p && !p.error && p.mentions != null);
+    const tot  = meas.reduce((n, p) => n + (p.mentions || 0), 0);
+    // "0 mentions across both" reads as a verdict. When neither platform is in
+    // the sample there is no verdict to give, so say what happened instead.
     setStep('ai-ment', any ? 'done' : 'error',
-      any ? tot.toLocaleString() + ' mention' + (tot === 1 ? '' : 's') + ' across both'
-          : 'neither platform returned data');
+      !any ? 'neither platform returned data'
+      : meas.length ? tot.toLocaleString() + ' mention' + (tot === 1 ? '' : 's') + ' tracked'
+      : 'this firm is not in the tracked-prompt database');
   } catch (e) {
     console.error('AI mentions error:', e.message);
     // Show the panel WITH the failure. Leaving it hidden meant a failed call
@@ -2834,6 +2912,34 @@ function failedChecks() {
 // comes from `d` -- nothing is fetched, inferred or written here.
 //
 // Tokens are the Cetera design system's, named as it names them.
+// The booking link on the report's call to action. The month parameter Calendly
+// puts in a shared URL pins the calendar to that month — harmless when it is
+// the current one, an empty grid a year later — so it is left off.
+const CTA_LINK = 'https://calendly.com/growthline/30min';
+const ROADMAP_LINK = 'https://growth360.actifi.com/auth/wall?relayState=GrowthLineRecommendations';
+
+// The banner both calls to action are built from: a gold rule, the copy, and a
+// gold button. Heading is optional — the roadmap banner on the scorecard pages
+// is one line and does not need one. Every piece carries the link, so a reader
+// who clicks the words rather than the button still gets there.
+function ctaBar(link, heading, body, button, gap) {
+  return { columns: [
+      { width: 3, canvas: [{ type: 'rect', x: 0, y: 0, w: 3, h: heading ? 52 : 38, color: RC.gold }] },
+      { width: '*', stack: [
+          ...(heading ? [{ text: heading, font: 'Display', bold: true, fontSize: 13,
+                           color: '#1F2A33', margin: [12, 2, 0, 4], link }] : []),
+          { text: body, font: 'Body', fontSize: 8.8, color: RC.gray, lineHeight: 1.4,
+            margin: [12, heading ? 0 : 6, 12, 0], link }
+        ] },
+      { width: 132, table: { widths: [132], body: [[{
+            text: button, font: 'Body', bold: true, fontSize: 10.5,
+            color: '#1F2A33', alignment: 'center', margin: [0, 9, 0, 9], link
+          }]] },
+        layout: { hLineWidth: () => 0, vLineWidth: () => 0, fillColor: () => RC.gold },
+        margin: [0, heading ? 6 : 2, 0, 0] }
+    ], columnGap: 0, margin: [0, gap == null ? 20 : gap, 0, 0] };
+}
+
 const RC = {
   purple:  '#37006E',
   magenta: '#87006E',
@@ -2986,11 +3092,14 @@ function priorities(d, logoPurple) {
     rows.push([
       { text: String(i + 1), font: 'Display', fontSize: 15, color: RC.g200, margin: [0, 3, 0, 0] },
       { stack: [
+          // Two lines only. The scorecard question was tried here as a third and
+          // pushed the report to six pages; the box it came from is named in the
+          // title, and the question is on its own scorecard page.
           { text: a.title, font: 'Body', bold: true, fontSize: 10.5, color: RC.purple, margin: [0, 2, 0, 4] },
           { text: a.why, font: 'Body', fontSize: 9, color: RC.gray, lineHeight: 1.38, margin: [0, 0, 0, 5] },
           { text: [a.cat, ' · ', a.effort, a.aeo ? ' · Impacts AEO' : ''].join(''),
             font: 'Body', fontSize: 7.8, color: RC.grayMid }
-        ] }
+        ].filter(Boolean) }
     ]);
   });
 
@@ -3025,7 +3134,14 @@ function priorities(d, logoPurple) {
       margin: [0, 0, 0, 12] },
 
     { text: 'Ranked by the score each fix unlocks, hardest-hitting first. Your GrowthLine consultant can walk through the detail with you.',
-      font: 'Body', fontSize: 8, color: RC.grayMid }
+      font: 'Body', fontSize: 8, color: RC.grayMid },
+
+    // The call to action, at the foot of the priorities page — the moment the
+    // reader has just seen what six fixes are worth to their score.
+    ctaBar(CTA_LINK, 'Schedule a Free Digital Audit Review',
+      'Connect with the Cetera GrowthLine team to get a 30-minute review of this audit ' +
+      'and gain more valuable resources to improve your digital presence.',
+      'Schedule Now')
   ];
 }
 
@@ -3115,7 +3231,13 @@ function scorecard(sec, logoPurple) {
         { width: 11, ...chip('unknown', 11) },
         { width: 68, text: 'Not measured', font: 'Body', fontSize: 7.4, color: RC.gray, margin: [4, 1.5, 0, 0] },
         { width: '*', text: sec.legend || '', font: 'Body', fontSize: 7.4, color: RC.grayMid, margin: [0, 1.5, 0, 0] }
-      ], columnGap: 0, margin: [0, 14, 0, 0] }
+      ], columnGap: 0, margin: [0, 14, 0, 0] },
+
+    // Every scorecard page ends with the roadmap, so whichever section the
+    // reader stops on has the next step on it.
+    ctaBar(ROADMAP_LINK, null,
+      'Add and follow the Implement GrowthLine Audit Recommendations roadmap in Growth360.',
+      'Launch Roadmap', 16)
   ];
 }
 
@@ -3210,7 +3332,13 @@ function assembleReport() {
     ptsAvailable: `+${projected - s.overall} pts`,
     projected, projectedBand: bandFor(projected).label,
     actions: top6.map(c => ({
-      title: c.action.split('. ')[0].replace(/\.$/, ''),
+      // The title is the check that failed, named exactly as the scorecard
+      // pages name it, so a reader can trace each item back to the box it came
+      // from. It used to be the first sentence of the action, which for a
+      // one-sentence action is the action — so the row printed the same text
+      // twice and read as though it had been invented.
+      title: c.label,
+      q:     c.q,
       why:   c.action,
       pts:   Math.max(1, Math.round(c.pts * CAT_WEIGHT[c.cat] * (100 - SCORE_FLOOR) / 100)),
       cat:   CAT_NAME[c.cat], effort: EFFORT_LABEL[c.effort], aeo: !!c.aeo

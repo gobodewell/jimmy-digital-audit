@@ -954,6 +954,46 @@ function readRobotsMeta(html) {
 // rather than fall back to a number that means something else entirely.
 // A declared viewport is a necessary condition for a usable mobile page, not
 // a sufficient one, which is why the check is named for the tag.
+// When a site refuses us, WHO refused matters: a CDN/WAF edge rule (Cloudflare,
+// Akamai, Sucuri, Imperva) blocks by network reputation and will refuse Google
+// and DataForSEO the same way, while an origin 403 is the site's own config.
+// The audit cannot fix either, but naming the gatekeeper turns "we could not
+// read the page" into something the firm's web vendor can actually action.
+// Read from response headers only -- no extra request, no guessing.
+function blockerFrom(headers) {
+  if (!headers) return null;
+  const h = n => { try { return headers.get(n) || ''; } catch { return ''; } };
+  const server = h('server');
+  // Two signals, and they are not interchangeable. Some edges announce
+  // themselves in `server`; others put a distinctive header on the response
+  // whose mere PRESENCE is the fingerprint -- Imperva's x-iinfo holds an
+  // opaque id, so matching its value finds nothing and the block gets
+  // misattributed to the origin nginx behind it.
+  const byHeader = [
+    ['cf-ray',       'Cloudflare'],
+    ['x-sucuri-id',  'Sucuri'],
+    ['x-iinfo',      'Imperva/Incapsula'],
+    ['x-amz-cf-id',  'AWS CloudFront'],
+    ['x-akamai-transformed', 'Akamai'],
+    ['x-wpe-backend',        'WP Engine']
+  ];
+  for (const [hdr, name] of byHeader) if (h(hdr)) return name;
+
+  const byServer = [
+    [/cloudflare/i,        'Cloudflare'],
+    [/sucuri|cloudproxy/i, 'Sucuri'],
+    [/akamai/i,            'Akamai'],
+    [/incapsula|imperva/i, 'Imperva/Incapsula'],
+    [/cloudfront|awselb/i, 'AWS CloudFront'],
+    [/fastly/i,            'Fastly'],
+    [/wpengine/i,          'WP Engine'],
+    [/sitelock/i,          'SiteLock']
+  ];
+  for (const [re, name] of byServer) if (re.test(server)) return name;
+  // Not a known edge. Say what the server called itself rather than nothing.
+  return server ? 'origin server (' + server.slice(0, 40) + ')' : null;
+}
+
 function readViewport(html) {
   for (const m of String(html).matchAll(/<meta\b[^>]*>/gi)) {
     const tag  = m[0];
@@ -1013,6 +1053,42 @@ async function onPageHtml(url) {
     tried.push(a.path + ' → no HTML in the response');
   }
   return { error: 'OnPage returned no page HTML', tried };
+}
+
+// Last resort for markup: ask Claude to fetch the page and hand back the
+// JSON-LD blocks verbatim. Claude's web_fetch runs from different
+// infrastructure and demonstrably reads sites that refuse both this server and
+// OnPage — the visibility run cites their pages.
+//
+// Claude is used ONLY as a fetcher. What comes back is parsed by the same
+// parser as a direct fetch, so a model that paraphrased or invented a block
+// produces JSON that fails to parse, or schema that does not match the site.
+// Nothing here trusts its reading of the page.
+async function claudeFetchLd(url) {
+  if (!ANTHROPIC_KEY) return { error: 'ANTHROPIC_KEY not set' };
+  const prompt = `web_fetch ${url} and find every <script type="application/ld+json"> block in the HTML.
+
+Return ONLY this, nothing else:
+---LD---
+[paste each block's contents here verbatim, one per line, exactly as written in the page]
+---END---
+
+Rules:
+- Copy the JSON exactly as it appears. Do not reformat, summarise, correct or complete it.
+- If there are no JSON-LD blocks, return the markers with nothing between them.
+- Do not write any commentary.`;
+  try {
+    const out = await claudeRun({ prompt, tools: WEB_TOOLS, maxTokens: 8000 });
+    if (out.error) return { error: out.error };
+    const m = (out.text || '').match(/---LD---([\s\S]*?)---END---/);
+    if (!m) return { error: 'the model did not return the block' };
+    const body = m[1].trim();
+    if (!body) return { html: '', empty: true };
+    // Wrap each line back into a script tag so the existing parser reads it.
+    const blocks = body.split(/\n(?=\s*[\[{])/).map(b => b.trim()).filter(Boolean);
+    return { html: blocks.map(b =>
+      '<script type="application/ld+json">' + b + '</script>').join('\n') };
+  } catch (e) { return { error: e.message }; }
 }
 
 async function onPageFetch(url, opts) {
@@ -1079,6 +1155,35 @@ function onPageRead(item) {
   };
 }
 
+// The page <head>, fetched by Claude. Same rule as the JSON-LD fetch: Claude is
+// a fetcher, not a reader. What comes back is parsed by the same functions a
+// direct fetch would go through, so a paraphrase yields no tags rather than a
+// believed answer.
+async function claudeFetchHead(url) {
+  if (!ANTHROPIC_KEY) return { error: 'ANTHROPIC_KEY not set' };
+  const prompt = `web_fetch ${url} and copy out the page's <head> section.
+
+Return ONLY this, nothing else:
+---HEAD---
+[the raw HTML between <head> and </head>, exactly as written]
+---END---
+
+Rules:
+- Copy the markup verbatim. Do not summarise, reformat, correct or add tags.
+- If you cannot load the page, return the markers with nothing between them.
+- No commentary.`;
+  try {
+    const out = await claudeRun({ prompt, tools: WEB_TOOLS, maxTokens: 8000 });
+    if (out.error) return { error: out.error };
+    const m = (out.text || '').match(/---HEAD---([\s\S]*?)---END---/);
+    if (!m) return { error: 'the model did not return the block' };
+    const head = m[1].trim();
+    if (!head || !/<\s*meta|<\s*title|<\s*link/i.test(head))
+      return { error: 'the model returned no markup' };
+    return { html: head };
+  } catch (e) { return { error: e.message }; }
+}
+
 // Ask OnPage for what the direct fetch could not read, and record that it was
 // OnPage that answered. Never overwrites a value the direct fetch established:
 // it only fills nulls.
@@ -1090,6 +1195,28 @@ async function onPageRescue(url, results, whyDirectFailed) {
   const op = onPageRead(r.item);
   results.onPage = 'used';
   results.onPageStatus = op.status;
+
+  // OnPage reached the host but was refused the page as well. Claude's fetcher
+  // is the one that still gets through — it is reading these sites during the
+  // visibility run — so parse its <head> with the same readers.
+  if (op.indexable == null && typeof op.status === 'number' && op.status >= 400) {
+    const ai = await claudeFetchHead(url);
+    if (ai.error) { results.onPage = 'used, blocked too (HTTP ' + op.status + '); model fetch: ' + ai.error; return; }
+    const metas = readRobotsMeta(ai.html);
+    const blockers = metas.filter(m => /\bnoindex\b/i.test(m.content));
+    results.indexable     = blockers.length === 0;
+    results.indexableNote = whyDirectFailed + ' — OnPage was blocked too, so the head was fetched by the model: ' +
+      (blockers.length ? 'it declares ' + blockers.map(b => b.name + ': ' + b.content).join(', ')
+                       : metas.length ? 'it declares ' + metas.map(m => m.name + ': ' + m.content).join(', ')
+                                      : 'no robots directive found, which means indexable');
+    const vp = readViewport(ai.html);
+    if (vp) { results.viewport = vp.ok;
+              results.viewportNote = 'read from the model-fetched head: ' + vp.content; }
+    const desc = /<meta\b[^>]*name\s*=\s*["']?description["']?[^>]*content\s*=\s*["']([^"']*)["']/i.exec(ai.html);
+    if (desc) { results.hasMeta = desc[1].trim().length > 0; results.hasMetaNote = 'read from the model-fetched head'; }
+    results.readVia = 'claude-fetch';
+    return;
+  }
   if (results.indexable == null && op.indexable != null) {
     results.indexable = op.indexable;
     results.indexableNote = whyDirectFailed + ' — ' + op.indexableNote;
@@ -1233,14 +1360,17 @@ app.get('/site/check', async (req, res) => {
       const pr = await fetch(url, { headers: UA, redirect: 'follow', signal: AbortSignal.timeout(15000) });
       results.homeStatus = pr.status;
       if (!pr.ok) {
+        const who = blockerFrom(pr.headers);
+        const why = 'homepage returned HTTP ' + pr.status + (who ? ' from ' + who : '');
+        results.homeBlockedBy = who;
         results.indexable = null;
-        results.indexableNote = 'homepage returned HTTP ' + pr.status;
+        results.indexableNote = why;
         results.viewport = null;
-        results.viewportNote = 'homepage returned HTTP ' + pr.status;
+        results.viewportNote = why;
         // A refusal is exactly what OnPage is for. It is only asked here, on
         // the failure path, because it is billed per call and the plain fetch
         // costs nothing.
-        await onPageRescue(url, results, 'homepage returned HTTP ' + pr.status);
+        await onPageRescue(url, results, why);
       } else {
         const xRobots = (pr.headers.get('x-robots-tag') || '').trim();
         const html    = (await pr.text()).slice(0, 300000);
@@ -1326,12 +1456,18 @@ app.get('/site/schema', async (req, res) => {
       // data found" for a 403 is a finding the audit did not measure, and it
       // costs the firm a check they may well pass.
       const op = await onPageHtml(url);
-      if (op.error) {
-        return res.json({ found: false, blocked: true, readVia: 'none',
-          note: 'page returned HTTP ' + r.status + ' and OnPage could not read it either' +
-                (op.tried ? ' (' + op.tried.join('; ') + ')' : '') });
+      if (!op.error) { html = op.html; via = 'onpage'; }
+      else {
+        // Claude's fetcher gets through where both of the others are refused.
+        const ai = await claudeFetchLd(url);
+        if (ai.error) {
+          return res.json({ found: false, blocked: true, readVia: 'none',
+            note: 'page returned HTTP ' + r.status + ', OnPage could not read it' +
+                  (op.tried ? ' (' + op.tried.join('; ') + ')' : '') +
+                  ', and the model fetch failed: ' + ai.error });
+        }
+        html = ai.html; via = 'claude-fetch';
       }
-      html = op.html; via = 'onpage';
     } else {
       html = await r.text();
     }
@@ -2024,15 +2160,31 @@ app.post('/ai/mentions', async (req, res) => {
     // model and domain, so one row is a slice rather than the whole answer.
     const agg      = r.agg || {};
     const total    = agg.total || {};
+    // LLM Mentions is a SAMPLE of tracked prompts, not a census of every answer
+    // the models give. So the aggregate block carrying no `total` row does not
+    // mean the firm is absent from AI — it means the firm is absent from
+    // DataForSEO's sample. Those are different claims, and only the first one
+    // is ours to make. Calling it a measured zero told a firm that is cited by
+    // name on ChatGPT, Claude and Google that they have no AI presence.
+    //
+    // The line is drawn at the `total` row: present with a figure (0 included)
+    // is a real measurement; absent is a coverage gap, reported as unmeasured.
+    const covered  = aimNum(total, 'mentions') != null;
+    const num = k => (covered ? (aimNum(total, k) != null ? aimNum(total, k) : 0) : null);
     const cited    = aimSources(agg.sources_domain, target);
     const retrieved = aimSources(agg.search_results_domain, target);
     const ownCited = cited.find(x => x.own) || null;
-    const mentions = aimNum(total, 'mentions');
+    const mentions = num('mentions');
 
     out.platforms[platform] = {
       targetShape:  r.shape,
       mentions,
-      searchVolume: aimNum(total, 'ai_search_volume'),
+      searchVolume: num('ai_search_volume'),
+      // Says which of the two zero-shaped answers this is: `covered` false
+      // means the firm has no rows in the sampled prompt database, which is
+      // NOT a finding about their AI presence.
+      answered: covered,
+      covered,
       // How much of the firm's own AI presence is built on their own site
       // versus everyone else's. The headline finding on this page.
       ownCitedMentions: ownCited ? ownCited.mentions : null,
@@ -2072,6 +2224,40 @@ app.post('/ai/mentions/diag', async (req, res) => {
       itemKeys: r.items[0] ? Object.keys(r.items[0]) : [],
       firstItem: r.items[0] || null
     };
+  }
+
+  // Zero rows for a firm that plainly IS discussed by AI could be coverage —
+  // the database indexes prompts people actually asked — or it could be this
+  // proxy asking the wrong question. Each target object takes a per-entity
+  // search_scope, and the live call sends none. Probe the variants so the two
+  // can be told apart rather than assumed.
+  const name = req.body?.name || null;
+  const variants = [
+    { label: 'domain, no scope',              t: { domain: target } },
+    { label: 'domain, scope=citations',       t: { domain: target, search_scope: 'citations' } },
+    { label: 'domain, scope=mentions',        t: { domain: target, search_scope: 'mentions' } },
+    { label: 'www domain, no scope',          t: { domain: 'www.' + target } },
+    ...(name ? [
+      { label: 'brand keyword, no scope',     t: { keyword: name } },
+      { label: 'brand keyword, brand_entities', t: { keyword: name, search_scope: 'brand_entities' } }
+    ] : [])
+  ];
+  out.scopeProbe = [];
+  for (const v of variants) {
+    const d = await dfsPost(AIM_BASE + '/target_metrics/live', [{
+      target: [v.t], platform: 'google', location_code: 2840, language_code: 'en', internal_list_limit: 5
+    }]);
+    const task = d?.tasks?.[0];
+    const agg  = task?.result?.[0]?.aggregated_metrics || null;
+    out.scopeProbe.push({
+      label: v.label,
+      sent: v.t,
+      status: task?.status_code ?? d?.status_code ?? null,
+      message: (task?.status_code !== 20000 ? task?.status_message : null) || null,
+      aggKeys: agg ? Object.keys(agg) : null,
+      mentions: agg && agg.total ? agg.total.mentions ?? null : null,
+      sources: agg && Array.isArray(agg.sources_domain) ? agg.sources_domain.length : null
+    });
   }
 
   res.json(out);
