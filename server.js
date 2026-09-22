@@ -1720,7 +1720,12 @@ async function aimTargetMetricsOnce({ targets, platform, locationCode, languageC
   const result = task?.result?.[0];
   if (!result) return { error: 'DataForSEO returned no LLM mentions result for ' +
     targets.map(t => t.value).join(', ') };
-  return { result, items: result.items || [], totalCount: result.total_count ?? null, shape: shape.name };
+  return { result, items: result.items || [],
+           // The totals live here, not in items. Reading only items reported a
+           // firm with real AI presence as having none whenever the per-row
+           // breakdown came back empty.
+           agg: result.aggregated_metrics || null,
+           totalCount: result.total_count ?? null, shape: shape.name };
 }
 
 async function aimTargetMetrics(opts) {
@@ -1763,7 +1768,12 @@ app.post('/ai/mentions', async (req, res) => {
     // Sum across the returned rows: the endpoint groups by location, language,
     // model and domain, so one row is a slice rather than the whole answer.
     const items = r.items;
-    const sum = names => {
+    // Take the aggregate block when it carries the figure, and only fall back
+    // to summing the rows when it does not — the rows group by location,
+    // language and model, so summing them is a reconstruction, not the source.
+    const read = names => {
+      const fromAgg = aimNum(r.agg, names);
+      if (fromAgg != null) return fromAgg;
       const vals = items.map(it => aimNum(it, names)).filter(v => v != null);
       return vals.length ? vals.reduce((a, b) => a + b, 0) : null;
     };
@@ -1771,12 +1781,13 @@ app.post('/ai/mentions', async (req, res) => {
       rows:        items.length,
       totalCount:  r.totalCount,
       targetShape: r.shape,
-      mentions:    sum(['mentions_count', 'mentions', 'mention_count', 'count']),
-      citations:   sum(['citations_count', 'citations', 'citation_count']),
-      searchVolume: sum(['ai_search_volume', 'search_volume', 'monthly_searches']),
+      mentions:    read(['mentions_count', 'mentions', 'mention_count', 'count']),
+      citations:   read(['citations_count', 'citations', 'citation_count']),
+      searchVolume: read(['ai_search_volume', 'search_volume', 'monthly_searches']),
       // Kept so a field name this proxy did not anticipate is visible rather
       // than silently absent.
-      fields: items[0] ? Object.keys(items[0]) : []
+      aggFields:   r.agg ? Object.keys(r.agg) : [],
+      fields:      items[0] ? Object.keys(items[0]) : []
     };
   }
 
@@ -1800,9 +1811,46 @@ app.post('/ai/mentions/diag', async (req, res) => {
       totalCount: r.totalCount,
       rows: r.items.length,
       resultKeys: Object.keys(r.result || {}),
+      // The whole aggregate block verbatim — this is where the totals are, and
+      // a plain key list does not say whether they are populated.
+      aggregatedMetrics: r.agg,
       itemKeys: r.items[0] ? Object.keys(r.items[0]) : [],
       firstItem: r.items[0] || null
     };
+  }
+
+  // A valid request returning total_count 0 for a firm this size means the
+  // query is too narrow, not that the firm is absent. Probe a small matrix on
+  // one platform and report what each variant returned -- a rejected
+  // search_scope usually comes back naming the values it will accept.
+  const name = req.body?.name || null;
+  const variants = [
+    { label: 'domain, no scope',            t: { value: target, kind: 'domain' } },
+    { label: 'domain, scope=citations',     t: { value: target, kind: 'domain' }, scope: 'citations' },
+    { label: 'domain, scope=mentions',      t: { value: target, kind: 'domain' }, scope: 'mentions' },
+    ...(name ? [
+      { label: 'brand keyword, no scope',   t: { value: name, kind: 'keyword' } },
+      { label: 'brand keyword, brand_entities', t: { value: name, kind: 'keyword' }, scope: 'brand_entities' }
+    ] : [])
+  ];
+  out.probe = [];
+  for (const v of variants) {
+    const shape = AIM_TARGET_SHAPES.find(x => x.name === (aimShape?.name || 'domain/keyword')) || AIM_TARGET_SHAPES[0];
+    const built = Object.assign(shape.build(v.t), v.scope ? { search_scope: v.scope } : {});
+    const d = await dfsPost(AIM_BASE + '/target_metrics/live', [{
+      target: [built], platform: 'google', location_code: 2840, language_code: 'en', internal_list_limit: 10
+    }]);
+    const task = d?.tasks?.[0];
+    const result = task?.result?.[0];
+    out.probe.push({
+      label: v.label,
+      sent: built,
+      status: task?.status_code ?? d?.status_code ?? null,
+      message: (task?.status_code !== 20000 ? task?.status_message : null) || null,
+      totalCount: result?.total_count ?? null,
+      rows: (result?.items || []).length,
+      agg: result?.aggregated_metrics || null
+    });
   }
   res.json(out);
 });
