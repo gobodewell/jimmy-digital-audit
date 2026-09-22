@@ -1670,32 +1670,50 @@ app.post('/ai/message', async (req, res) => {
 const AIM_BASE = '/ai_optimization/llm_mentions';
 const AIM_PLATFORMS = ['google', 'chat_gpt'];   // AI Overview (all locations), ChatGPT (US only)
 
-// The item field names are not something this proxy can verify from the
-// outside, and guessing one wrong would report a real number as missing. So
-// every figure is read by a list of plausible names, normalised, and anything
-// unmatched is reported as unmeasured rather than zero -- /ai/mentions/diag
-// prints the actual keys so they can be pinned once seen.
-const aimKey = k => String(k).toLowerCase().replace(/[^a-z0-9]/g, '');
-function aimNum(row, names) {
-  if (!row) return null;
-  const want = names.map(aimKey);
-  for (const k of Object.keys(row)) {
-    if (!want.includes(aimKey(k))) continue;
-    const v = row[k];
-    if (v == null || v === '') continue;
-    const num = typeof v === 'number' ? v : parseFloat(String(v).replace(/[^0-9.\-]/g, ''));
-    if (!Number.isNaN(num)) return num;
-  }
-  return null;
+// The real shape, confirmed against the live API. `items` and `total_count`
+// describe a detail list that comes back empty for these queries; everything
+// worth reporting is in `aggregated_metrics`:
+//
+//   total                  { mentions, ai_search_volume }
+//   location / language /
+//   platform               the same pair, broken down
+//   sources_domain         ranked: domains CITED in answers that mention the firm
+//   search_results_domain  ranked: domains the model RETRIEVED (ChatGPT only)
+//   brand_entities_*       brands named alongside
+//
+// Reading only `items` reported a firm with 855 mentions as having none.
+const aimNum = (o, k) => {
+  const v = o && o[k];
+  if (v == null || v === '') return null;
+  const num = typeof v === 'number' ? v : parseFloat(String(v).replace(/[^0-9.\-]/g, ''));
+  return Number.isNaN(num) ? null : num;
+};
+
+// Domain keys arrive as markdown links — "[www.example.com](https://www.example.com)"
+// — mixed in with bare ones like "en.wikipedia.org". Pull the label out of the
+// link, then normalise, or every cited domain prints with its own URL glued on.
+function aimDomain(key) {
+  const k = String(key || '').trim();
+  const md = k.match(/^\[([^\]]+)\]\((.*)\)$/);
+  return rootDomain(md ? md[1] : k);
+}
+
+// A ranked source list, normalised and flagged against the firm's own domain.
+function aimSources(list, own, limit) {
+  return (Array.isArray(list) ? list : []).map(r => ({
+    domain: aimDomain(r.key),
+    mentions: aimNum(r, 'mentions'),
+    searchVolume: aimNum(r, 'ai_search_volume')
+  })).filter(r => r.domain)
+     .map(r => ({ ...r, own: r.domain === own }))
+     .slice(0, limit || 15);
 }
 
 // `target` is an array of OBJECTS — up to ten, each carrying a domain or a
 // keyword plus optional per-entity settings. Passing plain strings returns
-// "Invalid Field: 'Each target item must be an object.'". The exact key names
-// are not verifiable from outside this proxy, so the candidates below are tried
-// in order and the one the API validates is remembered for the life of the
-// process. A validation error moves to the next shape; anything else (credits,
-// auth, no data) stops, because those mean the shape was fine.
+// "Invalid Field: 'Each target item must be an object.'". The domain/keyword
+// shape is the one the live API accepts; the others are kept as fallbacks in
+// case it changes, tried only on a validation error.
 const AIM_TARGET_SHAPES = [
   { name: 'domain/keyword', build: t => t.kind === 'domain' ? { domain: t.value } : { keyword: t.value } },
   { name: 'target+type',    build: t => ({ target: t.value, type: t.kind }) },
@@ -1767,27 +1785,27 @@ app.post('/ai/mentions', async (req, res) => {
 
     // Sum across the returned rows: the endpoint groups by location, language,
     // model and domain, so one row is a slice rather than the whole answer.
-    const items = r.items;
-    // Take the aggregate block when it carries the figure, and only fall back
-    // to summing the rows when it does not — the rows group by location,
-    // language and model, so summing them is a reconstruction, not the source.
-    const read = names => {
-      const fromAgg = aimNum(r.agg, names);
-      if (fromAgg != null) return fromAgg;
-      const vals = items.map(it => aimNum(it, names)).filter(v => v != null);
-      return vals.length ? vals.reduce((a, b) => a + b, 0) : null;
-    };
+    const agg      = r.agg || {};
+    const total    = agg.total || {};
+    const cited    = aimSources(agg.sources_domain, target);
+    const retrieved = aimSources(agg.search_results_domain, target);
+    const ownCited = cited.find(x => x.own) || null;
+    const mentions = aimNum(total, 'mentions');
+
     out.platforms[platform] = {
-      rows:        items.length,
-      totalCount:  r.totalCount,
-      targetShape: r.shape,
-      mentions:    read(['mentions_count', 'mentions', 'mention_count', 'count']),
-      citations:   read(['citations_count', 'citations', 'citation_count']),
-      searchVolume: read(['ai_search_volume', 'search_volume', 'monthly_searches']),
-      // Kept so a field name this proxy did not anticipate is visible rather
-      // than silently absent.
-      aggFields:   r.agg ? Object.keys(r.agg) : [],
-      fields:      items[0] ? Object.keys(items[0]) : []
+      targetShape:  r.shape,
+      mentions,
+      searchVolume: aimNum(total, 'ai_search_volume'),
+      // How much of the firm's own AI presence is built on their own site
+      // versus everyone else's. The headline finding on this page.
+      ownCitedMentions: ownCited ? ownCited.mentions : null,
+      ownCitedShare: (ownCited && mentions) ? Math.round((ownCited.mentions / mentions) * 100) : null,
+      // Who the model cites, and separately what it retrieved. They differ:
+      // ChatGPT reads more of the firm's own site than it ends up citing.
+      cited,
+      retrieved,
+      brands: aimSources(agg.brand_entities_title, target, 10),
+      aggFields: Object.keys(agg)
     };
   }
 
@@ -1819,39 +1837,6 @@ app.post('/ai/mentions/diag', async (req, res) => {
     };
   }
 
-  // A valid request returning total_count 0 for a firm this size means the
-  // query is too narrow, not that the firm is absent. Probe a small matrix on
-  // one platform and report what each variant returned -- a rejected
-  // search_scope usually comes back naming the values it will accept.
-  const name = req.body?.name || null;
-  const variants = [
-    { label: 'domain, no scope',            t: { value: target, kind: 'domain' } },
-    { label: 'domain, scope=citations',     t: { value: target, kind: 'domain' }, scope: 'citations' },
-    { label: 'domain, scope=mentions',      t: { value: target, kind: 'domain' }, scope: 'mentions' },
-    ...(name ? [
-      { label: 'brand keyword, no scope',   t: { value: name, kind: 'keyword' } },
-      { label: 'brand keyword, brand_entities', t: { value: name, kind: 'keyword' }, scope: 'brand_entities' }
-    ] : [])
-  ];
-  out.probe = [];
-  for (const v of variants) {
-    const shape = AIM_TARGET_SHAPES.find(x => x.name === (aimShape?.name || 'domain/keyword')) || AIM_TARGET_SHAPES[0];
-    const built = Object.assign(shape.build(v.t), v.scope ? { search_scope: v.scope } : {});
-    const d = await dfsPost(AIM_BASE + '/target_metrics/live', [{
-      target: [built], platform: 'google', location_code: 2840, language_code: 'en', internal_list_limit: 10
-    }]);
-    const task = d?.tasks?.[0];
-    const result = task?.result?.[0];
-    out.probe.push({
-      label: v.label,
-      sent: built,
-      status: task?.status_code ?? d?.status_code ?? null,
-      message: (task?.status_code !== 20000 ? task?.status_message : null) || null,
-      totalCount: result?.total_count ?? null,
-      rows: (result?.items || []).length,
-      agg: result?.aggregated_metrics || null
-    });
-  }
   res.json(out);
 });
 
