@@ -1356,7 +1356,12 @@ async function runLighthouse(url) {
     else if (d.hasGA == null)     unk('c-ga',  'PageSpeed returned no third-party summary');
 
     renderPageWeight(d);
-    setStep('lighthouse', 'done', (d.speed || d.sizeMB) ? '' : 'no PageSpeed metrics returned');
+    // Say when it needed more than one go. A check that only works on the third
+    // attempt is not the same as one that works, and the pattern is worth
+    // seeing across runs rather than being smoothed away.
+    const retried = d.attempts > 1 ? 'succeeded on attempt ' + d.attempts : '';
+    setStep('lighthouse', 'done',
+      (d.speed || d.sizeMB) ? retried : (retried ? retried + ', no metrics' : 'no PageSpeed metrics returned'));
   } catch(e) {
     console.error('Lighthouse error:', e.message);
     setStep('lighthouse', 'error', e.message);
@@ -1709,6 +1714,19 @@ async function runAIMentions(name, url) {
           : 'neither platform returned data');
   } catch (e) {
     console.error('AI mentions error:', e.message);
+    // Show the panel WITH the failure. Leaving it hidden meant a failed call
+    // and a call that never ran looked identical — an absent section, with the
+    // reason buried in the progress list.
+    const block = document.getElementById('aiment-block');
+    const body  = document.getElementById('aiment-body');
+    if (block && body) {
+      block.style.display = '';
+      body.innerHTML = '<span style="color:var(--red);font-size:12px">Could not read AI mentions: ' +
+        escHtml(e.message) + '</span>' +
+        '<div style="font-size:11px;color:var(--text3);margin-top:6px">' +
+        'This needs the LLM Mentions endpoints on the DataForSEO account. ' +
+        'Settings → Test AI mentions runs the same call on its own.</div>';
+    }
     setStep('ai-ment', 'error', e.message);
   }
 }

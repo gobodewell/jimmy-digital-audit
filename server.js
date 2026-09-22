@@ -753,17 +753,37 @@ app.get('/site/lighthouse', async (req, res) => {
       encodeURIComponent(url) + '&strategy=' + strategy +
       '&category=performance&category=seo' + (GOOGLE_KEY ? '&key=' + GOOGLE_KEY : '');
     console.log('PageSpeed fetching:', psUrl.slice(0, 100));
-    // One retry. Lighthouse runs a real browser against a live site, so a
-    // failure is often transient — a slow first byte, a cold CDN, a redirect
-    // that resolved on the second attempt. Retrying once costs a minute and
-    // saves a check that would otherwise be reported as unmeasurable.
-    let d = null, gMsg = '', runtime = null;
-    for (let attempt = 1; attempt <= 2; attempt++) {
+    // Lighthouse drives a real browser against a live site, so failures here are
+    // mostly transient: a slow first byte, a cold CDN, a redirect that settles
+    // on the next try, Google's own capacity. One retry was not enough — this
+    // check was the one most often reported as unmeasurable.
+    //
+    // Backoff between attempts, because an immediate retry hits whatever was
+    // busy a second ago. Nothing is retried that cannot succeed: a malformed
+    // URL and a rejected API key fail the same way every time, and burning
+    // three minutes to confirm it helps nobody.
+    const PSI_ATTEMPTS = 3;
+    const PSI_BACKOFF  = [0, 5000, 12000];
+    const PSI_PERMANENT = ['INVALID_URL', 'DNS_FAILURE'];
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+    let d = null, gMsg = '', runtime = null, tries = 0;
+    for (let attempt = 0; attempt < PSI_ATTEMPTS; attempt++) {
+      if (PSI_BACKOFF[attempt]) await sleep(PSI_BACKOFF[attempt]);
+      tries = attempt + 1;
+
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 60000);  // slow sites can take >30s for a full Lighthouse run
       try {
         const r = await fetch(psUrl, { signal: controller.signal });
         d = await r.json();
+      } catch (e) {
+        // A timeout or a dropped connection is exactly the transient case this
+        // loop exists for, so record it and try again rather than throwing out.
+        d = null;
+        gMsg = e.name === 'AbortError' ? 'timed out after 60s' : e.message;
+        console.log('PageSpeed attempt ' + tries + ' failed (' + gMsg + ')');
+        continue;
       } finally { clearTimeout(timeout); }
 
       gMsg = d?.error?.message || (typeof d?.error === 'string' ? d.error : '') || d?.message || '';
@@ -771,7 +791,13 @@ app.get('/site/lighthouse', async (req, res) => {
       // wrapper; the code underneath it is the part that says what to do.
       runtime = d?.lighthouseResult?.runtimeError || null;
       if (d?.lighthouseResult?.audits) break;
-      if (attempt === 1) console.log('PageSpeed attempt 1 failed (' + (gMsg || 'no data') + '), retrying');
+
+      const code = runtime?.code || '';
+      if (PSI_PERMANENT.includes(code) || /API key|keyInvalid|quota/i.test(gMsg)) {
+        console.log('PageSpeed failed permanently (' + (code || gMsg) + ') — not retrying');
+        break;
+      }
+      console.log('PageSpeed attempt ' + tries + ' failed (' + (code || gMsg || 'no data') + ')');
     }
 
     console.log('PageSpeed response status:', d?.lighthouseResult ? 'ok' : (gMsg || 'no lighthouse result'));
@@ -796,7 +822,8 @@ app.get('/site/lighthouse', async (req, res) => {
       return res.status(502).json({
         error: 'PageSpeed: ' + detail +
                (GOOGLE_KEY ? '' : ' — no GOOGLE_API_KEY set') +
-               ' · tried twice on the ' + strategy + ' run' });
+               ' · ' + tries + (tries === 1 ? ' attempt' : ' attempts') +
+               ' on the ' + strategy + ' run' });
     }
 
     // Extract the metrics we need for the audit checklist
@@ -893,6 +920,7 @@ app.get('/site/lighthouse', async (req, res) => {
 
     res.json({
       strategy,
+      attempts: tries,
       speed, sizeMB, perfScore, seoScore,
       isHttps, isMobile, isIndexable, hasMeta, robotsTxtValid,
       speedPass, sizePass, imagesOk, imgList, hasGA,
