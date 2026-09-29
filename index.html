@@ -275,6 +275,14 @@ textarea{resize:vertical;min-height:60px}
            device. A teammate opening this app for the first time has an empty
            one, and every step 401s. Checked on load so they see it before they
            spend a run finding out. -->
+      <!-- The page and the proxy deploy separately, so uploading one and not
+           the other leaves a fix half-applied with no visible symptom except
+           that it does not work. Checked on load against /health. -->
+      <div id="build-warn" class="card" style="display:none;border-color:#fcd34d;background:#fffbeb;margin-bottom:12px">
+        <div style="font-size:12px;font-weight:600;color:#92400e">The app and the proxy are different builds</div>
+        <div id="build-warn-detail" style="font-size:11px;color:#92400e;margin-top:4px"></div>
+      </div>
+
       <div id="key-warn" class="card" style="display:none;border-color:#fca5a5;background:#fef2f2;margin-bottom:12px">
         <div style="font-size:12px;font-weight:600;color:#991b1b">This browser is missing the shared audit key</div>
         <div style="font-size:11px;color:#991b1b;margin-top:4px">
@@ -663,6 +671,14 @@ textarea{resize:vertical;min-height:60px}
       <div class="kr"><input type="password" id="s-audit" placeholder="must match AUDIT_KEY on the proxy"/><span class="ks" id="ks-audit">not set</span></div>
       <div style="font-size:11px;color:var(--text3);margin-top:6px;line-height:1.5">Anthropic, DataForSEO, SocialFetch and Airtable keys now live on the proxy server (Render env vars), not in the browser. Only this access key is stored here — it just unlocks your proxy.</div>
 
+      <div class="sl" style="margin-top:12px">Build</div>
+      <div style="font-size:11px;color:var(--text3);line-height:1.5">
+        This page: <strong id="build-stamp" style="font-family:'DM Mono',monospace">—</strong>
+        · proxy: <strong id="build-stamp-proxy" style="font-family:'DM Mono',monospace">checking…</strong><br>
+        They should match. index.html is uploaded to Netlify and server.js to Render, and
+        the audit tab warns you when they have drifted apart.
+      </div>
+
       <div class="sl" style="margin-top:12px">Page speed test</div>
       <div class="kr">
         <select id="s-psi" class="field-select" style="width:100%;padding:8px;border:1px solid var(--line);border-radius:6px;font-family:inherit;font-size:13px">
@@ -797,6 +813,11 @@ textarea{resize:vertical;min-height:60px}
 
 <script>
 // ── Constants & state ─────────────────────────────────────────────────────────
+// This page and the proxy are deployed separately, so they can end up
+// different vintages. Both carry the same stamp and the app compares them,
+// because "did you upload both files?" is not something anyone should have
+// to remember -- and a half-upload looks exactly like a fix that did not work.
+const BUILD = '2026-09-29.2';
 const DEFAULT_PROXY = 'https://jimmy-digital-audit.onrender.com';
 let AD = {}; // audit data store
 
@@ -931,13 +952,38 @@ async function checkKeyNeeded() {
     if (!r.ok) return;                       // proxy asleep; not a key problem
     const d = await r.json();
     el.style.display = (d.locked && !(lg('cfg_audit') || '').trim()) ? '' : 'none';
+
+    // Same call, second question: are these two the same vintage?
+    const bw = document.getElementById('build-warn');
+    const bd = document.getElementById('build-warn-detail');
+    if (bw && bd) {
+      if (!d.build) {
+        // A proxy too old to report a build is, by definition, out of date.
+        bw.style.display = '';
+        bd.textContent = 'This page is build ' + BUILD + '. The proxy is older than the ' +
+          'build stamp, so it predates it. Upload the latest server.js to Render.';
+      } else if (d.build !== BUILD) {
+        bw.style.display = '';
+        bd.textContent = 'This page is build ' + BUILD + ' and the proxy is ' + d.build +
+          '. Upload whichever is behind — index.html goes to Netlify, server.js to Render, ' +
+          'and both come from the same zip.';
+      } else {
+        bw.style.display = 'none';
+      }
+    }
+    const bp = document.getElementById('build-stamp-proxy');
+    if (bp) bp.textContent = d.build || 'older than the build stamp';
   } catch (_) {
+    const bp = document.getElementById('build-stamp-proxy');
+    if (bp) bp.textContent = 'could not reach it';
     // Could not reach the proxy at all. That is a different failure with a
     // different fix, and claiming a missing key would send them the wrong way.
   }
 }
 
 function updateKeyStatus() {
+  const bs = document.getElementById('build-stamp');
+  if (bs) bs.textContent = BUILD;
   const el = document.getElementById('ks-audit');
   if (!el) return;
   const val = lg('cfg_audit');

@@ -2,6 +2,10 @@ const express = require('express');
 const cors    = require('cors');
 
 const app  = express();
+// Bumped whenever a build is handed over. /health reports it so the app can
+// tell the user their page and their proxy are different vintages -- the
+// failure mode is a fix that silently is not there.
+const BUILD = '2026-09-29.2';
 const PORT = process.env.PORT || 3001;
 
 // Every one of these is trimmed. A key pasted into a hosting panel's env
@@ -521,7 +525,7 @@ function rootDomain(u) {
 app.get('/health', (req, res) => res.json({ ok: true, dfs: !!DFS_LOGIN,
   sem: !!(SEM_KEY_V3 || SEM_KEY_V4), semV3: !!SEM_KEY_V3, semV4: !!SEM_KEY_V4,
   sf: !!SF_KEY, ai: !!ANTHROPIC_KEY, at: !!AIRTABLE_TOKEN, google: !!GOOGLE_KEY,
-  locked: !!AUDIT_KEY, model: AI_MODEL }));
+  locked: !!AUDIT_KEY, model: AI_MODEL, build: BUILD }));
 
 // ── SEMrush diagnostics ───────────────────────────────────────────────────────
 // Probes every candidate v4 route and reports what each one answered. v4 is
@@ -1344,6 +1348,42 @@ async function richResults(url) {
   };
 }
 
+// Claude as a plain fetcher for any URL, returning the opening bytes verbatim.
+//
+// The AI assistant in the app reads these sites without trouble -- it quotes
+// their viewport tag and their nav markup -- which is proof its fetcher gets
+// through where ours, DataForSEO's and Google's are all refused. The rest of
+// the audit already leans on that for the <head>; this extends it to files.
+//
+// It is a FETCHER and nothing else. What comes back is matched by the same
+// test a direct fetch would face, so a model that paraphrased or invented the
+// content produces something that fails the test rather than a believed
+// answer. No prose is ever accepted as evidence.
+async function claudeFetchRaw(url, chars) {
+  if (!ANTHROPIC_KEY) return { error: 'ANTHROPIC_KEY not set' };
+  const n = chars || 600;
+  const prompt = `web_fetch ${url} and copy out the first ${n} characters of the response body.
+
+Return ONLY this, nothing else:
+---BODY---
+[the raw content, exactly as written, no reformatting]
+---END---
+
+Rules:
+- Copy verbatim. Do not summarise, describe, correct or pretty-print it.
+- If the URL does not load, or returns an error page, return the markers with nothing between them.
+- No commentary.`;
+  try {
+    const out = await claudeRun({ prompt, tools: WEB_TOOLS, maxTokens: 4000 });
+    if (out.error) return { error: out.error };
+    const m = (out.text || '').match(/---BODY---([\s\S]*?)---END---/);
+    if (!m) return { error: 'the model did not return the block' };
+    const body = m[1].trim();
+    if (!body) return { error: 'the model could not load it' };
+    return { body };
+  } catch (e) { return { error: e.message }; }
+}
+
 // The last two routes, tried in order, for a site whose server refuses every
 // crawler we have. Neither needs the firm's cooperation.
 //
@@ -1543,9 +1583,14 @@ app.get('/site/check', async (req, res) => {
       // infrastructure, so ask it about the likeliest location.
       const allBlocked = results.sitemapTried.length > 0 &&
         results.sitemapTried.every(t => /→ HTTP (40[13]|429|5\d\d)/.test(t));
-      if (allBlocked && DFS_LOGIN) {
+      if (allBlocked) {
         const probe = declared[0] || base + '/sitemap.xml';
-        const r = await onPageFetch(probe, { js: false });
+        // Without DataForSEO there is no OnPage step, but a blocked site is
+        // still blocked -- falling through to "none found" would report a
+        // refusal as a missing sitemap, which is the error this whole branch
+        // exists to prevent.
+        const r  = DFS_LOGIN ? await onPageFetch(probe, { js: false })
+                             : { error: 'OnPage not configured' };
         const st = r.item ? opGet(r.item, ['status_code', 'statusCode']) : null;
         if (typeof st === 'number' && st < 400) {
           results.sitemap       = true;
@@ -1554,11 +1599,25 @@ app.get('/site/check', async (req, res) => {
           results.sitemapNote   = 'this server was blocked, but OnPage loaded it (HTTP ' + st + ')';
           results.onPageSitemap = 'used';
         } else {
-          results.sitemapUrl  = probe;
-          results.sitemapNote = 'every location refused this server' +
-            (r.error ? ', and OnPage could not check either: ' + r.error
-                     : ' and OnPage got HTTP ' + st);
-          results.sitemapBlocked = true;
+          // OnPage was refused too. One fetcher left that demonstrably is not.
+          const ai = await claudeFetchRaw(probe, 600);
+          if (!ai.error && /<\s*(urlset|sitemapindex)\b/i.test(ai.body)) {
+            // The same test a direct fetch would face: prose describing a
+            // sitemap fails it, so only real markup can pass.
+            results.sitemap     = true;
+            results.sitemapUrl  = probe;
+            results.sitemapNote = 'this server and OnPage were both blocked; ' +
+              'the file was fetched by the model and is a real sitemap';
+            results.sitemapVia  = 'claude-fetch';
+          } else {
+            results.sitemapUrl  = probe;
+            results.sitemapNote = 'every location refused this server' +
+              (r.error ? ', and OnPage could not check either: ' + r.error
+                       : ' and OnPage got HTTP ' + st) +
+              (ai.error ? ', and the model fetch failed: ' + ai.error
+                        : ', and what the model fetched was not sitemap markup');
+            results.sitemapBlocked = true;
+          }
         }
       } else {
         results.sitemapUrl  = base + '/sitemap.xml';
