@@ -271,6 +271,19 @@ textarea{resize:vertical;min-height:60px}
           <div class="fg"><label>Airtable record ID (optional — patches existing record)</label><input type="text" id="atRecordId" placeholder="rec..."/></div>
         </div>
       </div>
+      <!-- The audit key lives in localStorage, which is per browser and per
+           device. A teammate opening this app for the first time has an empty
+           one, and every step 401s. Checked on load so they see it before they
+           spend a run finding out. -->
+      <div id="key-warn" class="card" style="display:none;border-color:#fca5a5;background:#fef2f2;margin-bottom:12px">
+        <div style="font-size:12px;font-weight:600;color:#991b1b">This browser is missing the shared audit key</div>
+        <div style="font-size:11px;color:#991b1b;margin-top:4px">
+          The proxy is locked, and the key is stored per browser — so it does not travel with the app.
+          Open <strong>Settings → Audit key</strong> and paste the same key the server was given,
+          or every step will fail with &ldquo;unauthorized&rdquo;.
+        </div>
+      </div>
+
       <div id="stepsWrap" style="display:none">
         <div class="sl">Progress</div>
         <div class="steps" id="stepsList"></div>
@@ -430,6 +443,30 @@ textarea{resize:vertical;min-height:60px}
         <div class="mc"><div class="ml">Page speed (LCP)</div><div class="mv" id="m-spd">—</div><div class="mt">Under 3s is good</div></div>
         <div class="mc"><div class="ml">Homepage size</div><div class="mv" id="m-sz">—</div><div class="mt">Under 3MB is good</div></div>
         <div class="mc"><div class="ml">Performance score</div><div class="mv" id="m-ps">—</div><div class="mt">Google score 0–100</div></div>
+      </div>
+
+      <!-- Google's API is refused outright by some CDNs, so on those sites the
+           only way to get these numbers is for a person to run Lighthouse
+           themselves and type them in. That is a real measurement and it is
+           allowed to score -- but it is recorded as hand-entered, because who
+           measured a figure is part of what the figure means. -->
+      <div class="card" style="margin-top:12px">
+        <div class="ct">Enter the technical numbers by hand</div>
+        <div style="font-size:11px;color:var(--text3);margin:-4px 0 10px">
+          For sites that refuse Google's crawler. Run Lighthouse in Chrome DevTools
+          and type the results here — they will score exactly as a measured run does,
+          and the report will say they were entered by hand. Leave a field empty to
+          go back to whatever the audit found.
+        </div>
+        <div class="fr">
+          <div class="fg"><label>Page speed — LCP, seconds</label>
+            <input type="number" step="0.1" min="0" id="man-spd" placeholder="e.g. 4.2" oninput="applyManualTech()"/></div>
+          <div class="fg"><label>Homepage size — MB</label>
+            <input type="number" step="0.1" min="0" id="man-sz" placeholder="e.g. 5.4" oninput="applyManualTech()"/></div>
+          <div class="fg"><label>Performance score — 0–100</label>
+            <input type="number" step="1" min="0" max="100" id="man-ps" placeholder="e.g. 38" oninput="applyManualTech()"/></div>
+        </div>
+        <div id="man-tech-msg" style="font-size:11px;color:var(--text3);margin-top:6px"></div>
       </div>
 
       <!-- Google's API fails intermittently on sites it can reach perfectly well
@@ -677,6 +714,7 @@ textarea{resize:vertical;min-height:60px}
       <button class="btn btn-ghost" onclick="testProxy()">Test proxy</button>
       <button class="btn btn-ghost" onclick="testMentions()">Test AI mentions</button>
       <button class="btn btn-ghost" onclick="testOnPage()">Test OnPage</button>
+      <button class="btn btn-ghost" onclick="testGBPImages()">Test GBP images</button>
     </div>
     <div id="s-msg" style="margin-top:10px;font-size:13px;color:var(--text2);white-space:pre-wrap"></div>
   </div>
@@ -868,6 +906,7 @@ function saveSettings() {
   toast('Settings saved ✓');
   document.getElementById('s-msg').textContent = 'Saved ' + new Date().toLocaleTimeString();
   updateKeyStatus();
+  checkKeyNeeded();
 }
 
 function loadSettings() {
@@ -876,6 +915,26 @@ function loadSettings() {
   S_KEYS.forEach(k => { const e=document.getElementById('s-'+k); if(e) e.value=lg('cfg_'+k); });
   F_KEYS.forEach(k => { const e=document.getElementById('f-'+k); if(e) e.value=lg('fld_'+k); });
   updateKeyStatus();
+  checkKeyNeeded();
+}
+
+// /health is the one route the server leaves open when it is locked, and it
+// reports whether a key is required. Comparing that against what this browser
+// holds is the whole diagnosis, so it runs on load rather than waiting for
+// eleven steps to fail one at a time.
+async function checkKeyNeeded() {
+  const el = document.getElementById('key-warn');
+  if (!el) return;
+  const proxy = lg('cfg_proxy') || DEFAULT_PROXY;
+  try {
+    const r = await fetch(proxy + '/health');
+    if (!r.ok) return;                       // proxy asleep; not a key problem
+    const d = await r.json();
+    el.style.display = (d.locked && !(lg('cfg_audit') || '').trim()) ? '' : 'none';
+  } catch (_) {
+    // Could not reach the proxy at all. That is a different failure with a
+    // different fix, and claiming a missing key would send them the wrong way.
+  }
 }
 
 function updateKeyStatus() {
@@ -901,6 +960,17 @@ function pf(path, opts) {
   // instance asleep or restarting, or the request cut off partway (the long
   // PageSpeed and GBP calls are the ones that hit this).
   return fetch(proxy + path, Object.assign({}, opts, { headers }))
+    .then(r => {
+      // The server is locked with a shared key and this browser does not have
+      // it. Every step then fails with a bare "unauthorized", which reads like
+      // eleven broken integrations instead of one empty settings field.
+      if (r.status === 401) {
+        throw new Error(key
+          ? 'the proxy rejected this audit key — check Settings → Audit key matches the AUDIT_KEY set on the server'
+          : 'this proxy needs a shared audit key, and none is set in this browser — paste it in Settings → Audit key');
+      }
+      return r;
+    })
     .catch(e => {
       if (e && e.name === 'TypeError') {
         throw new Error('could not reach the proxy at ' + proxy + path.split('?')[0] +
@@ -959,6 +1029,58 @@ async function testMentions() {
 // fails too, the useful detail is which field names came back — that is what
 // says whether the page was unreachable or merely shaped differently than the
 // readers expect.
+// Two GBP checks read image fields whose shape has never been confirmed, and
+// the code cannot tell an absent field from an absent photo. This prints what
+// the listing actually carries, including whether anything distinguishes a
+// Street View capture of the building from a photo the firm uploaded.
+async function testGBPImages() {
+  const msg  = document.getElementById('s-msg');
+  const name = getVal('clientName');
+  const url  = getVal('clientURL');
+  if (!name) { msg.textContent = '✗ Enter the firm name on the audit tab first.'; return; }
+  let loc = (getVal('clientCity') || '').trim().replace(/\s*,\s*/g, ',');
+  if (loc && !/united states|usa/i.test(loc)) loc += ',United States';
+  msg.textContent = 'Reading the Google listing for ' + name + '...';
+  try {
+    const r = await pf('/gbp/diag?name=' + encodeURIComponent(name) +
+                       (url ? '&url=' + encodeURIComponent(url) : '') +
+                       (loc ? '&location=' + encodeURIComponent(loc) : ''));
+    const d = await r.json();
+    if (d.error) { msg.textContent = '✗ ' + d.error; return; }
+    console.log('GBP IMAGE DIAG:', JSON.stringify(d, null, 2));
+
+    const lines = [
+      d.title + '  (matched on ' + d.matchedOn + ')',
+      '',
+      'What the audit currently concludes:',
+      '  has photos: ' + d.currentReading.hasPhotos + '   has logo: ' + d.currentReading.hasLogo,
+      '',
+      'Image-shaped fields actually returned: ' + (d.imageKeys.length ? d.imageKeys.join(', ') : 'NONE')
+    ];
+    for (const [k, v] of Object.entries(d.imageFields || {})) {
+      lines.push('  ' + k + ' → ' + v.type + (v.length != null ? ' (' + v.length + ')' : '') +
+                 (v.keys ? ' keys: ' + v.keys.join(', ') : '') +
+                 (v.value ? ' = ' + v.value : ''));
+      if (v.firstItem && v.firstItem.keys) lines.push('      item keys: ' + v.firstItem.keys.join(', '));
+      else if (typeof v.firstItem === 'string') lines.push('      first: ' + v.firstItem);
+    }
+    lines.push('');
+    // The verdict the whole question turns on, stated rather than left to be
+    // inferred from a key dump.
+    const blob = JSON.stringify(d.imageFields || {});
+    const attributed = /attribution|source|category|owner|author|by_|street/i.test(blob);
+    const streetHost = /streetview|ggpht|geo\d|panoramio/i.test(blob);
+    lines.push(!d.imageKeys.length
+      ? 'No image fields at all — "no photos" is currently unmeasured, not a finding.'
+      : attributed || streetHost
+      ? 'A field distinguishes the image source — the owner/Street View split can be read deterministically.'
+      : 'Nothing marks who supplied the image. A Street View shot of the building is ' +
+        'indistinguishable from an uploaded photo in this data.');
+    lines.push('', 'Full response printed to the browser console (F12).');
+    msg.textContent = lines.join('\n');
+  } catch (e) { msg.textContent = '✗ ' + e.message; }
+}
+
 async function testOnPage() {
   const msg = document.getElementById('s-msg');
   const url = getVal('clientURL') || 'https://totuswm.com';
@@ -1395,12 +1517,21 @@ async function runSchema(url) {
     if (!d.found) {
       body.innerHTML = '<div style="font-size:13px;color:#dc2626;font-weight:600">No structured data found on the homepage.</div>' +
         '<div style="font-size:11px;color:var(--text3);margin-top:6px">Nothing tells a search or AI engine what this business is, where it is, or who works there. ' +
-        'Note this reads the HTML as served — markup injected later by JavaScript would not be seen here.</div>';
+        // The served HTML is no longer the last word: a short read is re-read
+        // with JavaScript run, so this caveat only applies if that also failed.
+        (d.renderedRead
+          ? 'The page was also read with JavaScript run, and still declared none.'
+          : 'This reads the HTML as served; the JavaScript-rendered read could not be done.') + '</div>';
       setStep('schema', 'done', 'none found');
       return;
     }
 
-    let html = '<div style="margin-bottom:10px">' + d.types.map(t =>
+    let html = (d.readVia === 'onpage-js'
+      ? '<div style="font-size:11px;color:#b45309;margin-bottom:8px">' +
+        'This markup is injected by JavaScript — it is not in the HTML as served. ' +
+        'Google renders pages and will see it; some other crawlers and AI fetchers do not.</div>'
+      : '') +
+      '<div style="margin-bottom:10px">' + d.types.map(t =>
       '<span style="display:inline-block;font-size:11px;font-family:\'DM Mono\',monospace;background:var(--bg2);border:1px solid var(--line);border-radius:4px;padding:2px 7px;margin:0 4px 4px 0">' +
       escHtml(t) + '</span>').join('') + '</div>';
 
@@ -1442,6 +1573,88 @@ async function runSchema(url) {
   }
 }
 
+// Hand-entered technical numbers.
+//
+// Some CDNs refuse Google's crawler outright, so on those sites nobody can
+// measure these automatically and the tiles sit empty. A person running
+// Lighthouse in Chrome and typing the result in IS a measurement -- a better
+// one than any inference -- so it scores exactly as an automatic run does.
+//
+// What it must NOT do is disappear. These are the figures a consultant went
+// and fetched because the tool could not, so a later automatic run does not
+// silently replace them; it says the two disagree and leaves the human's
+// number standing until they clear the field.
+const MANUAL_TECH = new Set();
+
+function manualNum(id) {
+  const el = document.getElementById(id);
+  if (!el) return null;
+  const raw = (el.value || '').trim();
+  if (!raw) return null;
+  const n = parseFloat(raw);
+  return Number.isFinite(n) ? n : null;
+}
+
+function applyManualTech() {
+  const spd = manualNum('man-spd');
+  const sz  = manualNum('man-sz');
+  const ps  = manualNum('man-ps');
+  const said = [];
+
+  MANUAL_TECH.clear();
+
+  if (spd != null) {
+    AD.speed = String(spd);
+    AD.speedSource = 'entered by hand';
+    setMV('spd', spd + 's', spd < 3);
+    setCk('c-spd', spd < 3);
+    measured('c-spd'); MANUAL_TECH.add('c-spd');
+    said.push('LCP ' + spd + 's — ' + (spd < 3 ? 'passes' : 'fails') + ' the under-3s check');
+  } else if (AD.speedSource === 'entered by hand') {
+    // Cleared. Do not leave a hand-typed value scoring after its field is empty.
+    AD.speed = null; AD.speedSource = null;
+    setMV('spd', '—', null); setCk('c-spd', false);
+    unk('c-spd', 'the hand-entered figure was cleared');
+  }
+
+  if (sz != null) {
+    AD.size = String(sz);
+    AD.sizeSource = 'entered by hand';
+    setMV('sz', sz + 'MB', sz < 3);
+    setCk('c-szp', sz < 3);
+    measured('c-szp'); MANUAL_TECH.add('c-szp');
+    said.push('page weight ' + sz + 'MB — ' + (sz < 3 ? 'passes' : 'fails') + ' the under-3MB check');
+  } else if (AD.sizeSource === 'entered by hand') {
+    AD.size = null; AD.sizeSource = null;
+    setMV('sz', '—', null); setCk('c-szp', false);
+    unk('c-szp', 'the hand-entered figure was cleared');
+  }
+
+  if (ps != null) {
+    AD.perfScore = ps; AD.perfSource = 'entered by hand';
+    setMV('ps', ps, ps >= 50);
+    said.push('performance score ' + ps);
+  } else if (AD.perfSource === 'entered by hand') {
+    AD.perfScore = null; AD.perfSource = null;
+    setMV('ps', '—', null);
+  }
+
+  const msg = document.getElementById('man-tech-msg');
+  if (msg) msg.textContent = said.length
+    ? 'Recorded as hand-entered: ' + said.join(' · ')
+    : 'Nothing entered — these tiles show whatever the audit measured.';
+  recalc();
+}
+
+// ck() only ever ticks. A hand-entered figure has to be able to record a
+// FAILURE too, so this sets the box either way.
+function setCk(id, on) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.checked = !!on;
+  if (on) UNK.delete(id);
+}
+
 // ── DataForSEO: Lighthouse ────────────────────────────────────────────────────
 async function runLighthouse(url) {
   setStep('lighthouse', 'running');
@@ -1454,9 +1667,34 @@ async function runLighthouse(url) {
     if (d.error) throw new Error(d.error);
 
     // Metrics display
-    if (d.speed)    { setMV('spd', d.speed+'s', parseFloat(d.speed)<3); AD.speed=d.speed; }
-    if (d.sizeMB)   { setMV('sz',  d.sizeMB+'MB', parseFloat(d.sizeMB)<3); AD.size=d.sizeMB; }
-    if (d.perfScore!=null) setMV('ps', d.perfScore, d.perfScore>=50);
+    // A hand-entered figure is one a person went and measured because this call
+    // could not. Overwriting it silently would throw that away and leave the
+    // consultant's own reading nowhere -- so the automatic value is reported
+    // beside it and the human's stands until they clear the field.
+    const clash = [];
+    const keepManual = (src, label, mine, theirs) => {
+      if (src !== 'entered by hand') return false;
+      if (theirs != null && String(theirs) !== String(mine)) {
+        clash.push(label + ': you entered ' + mine + ', PageSpeed now says ' + theirs);
+      }
+      return true;
+    };
+
+    if (!keepManual(AD.speedSource, 'LCP', AD.speed, d.speed) && d.speed) {
+      setMV('spd', d.speed+'s', parseFloat(d.speed)<3); AD.speed=d.speed;
+    }
+    if (!keepManual(AD.sizeSource, 'Page weight', AD.size, d.sizeMB) && d.sizeMB) {
+      setMV('sz',  d.sizeMB+'MB', parseFloat(d.sizeMB)<3); AD.size=d.sizeMB;
+    }
+    if (!keepManual(AD.perfSource, 'Performance score', AD.perfScore, d.perfScore) && d.perfScore!=null) {
+      setMV('ps', d.perfScore, d.perfScore>=50);
+    }
+    const mtm = document.getElementById('man-tech-msg');
+    if (mtm && clash.length) {
+      mtm.textContent = 'PageSpeed answered on a later attempt and disagrees — ' +
+        clash.join(' · ') + '. Your figures are being used. Clear a field to take Google\'s.';
+      mtm.style.color = '#b45309';
+    }
     // Say which run these numbers came from — a mobile run is throttled and its
     // LCP is several times a desktop figure, so the two are not comparable.
     const stratEl = document.getElementById('psi-strat');
@@ -1477,13 +1715,25 @@ async function runLighthouse(url) {
     if (d.hasMeta != null) measured('c-meta');
     // sitemap is driven by the real /sitemap.xml fetch in runSiteCheck, not by
     // robots.txt presence — so don't set c-sm here.
-    if (d.speedPass)   ck('c-spd');
-    else if (d.speedPass == null) unk('c-spd', 'PageSpeed returned no LCP');
-    if (d.sizePass)    ck('c-szp');
-    else if (d.sizePass == null)  unk('c-szp', 'PageSpeed returned no page weight');
+    if (!MANUAL_TECH.has('c-spd')) {
+      if (d.speedPass)   ck('c-spd');
+      else if (d.speedPass == null) unk('c-spd', 'PageSpeed returned no LCP');
+    }
+    if (!MANUAL_TECH.has('c-szp')) {
+      if (d.sizePass)    ck('c-szp');
+      else if (d.sizePass == null)  unk('c-szp', 'PageSpeed returned no page weight');
+    }
     if (d.imagesOk)    ck('c-img');
+    // Never measured is not a pass, and it was ticking this box for free.
+    else if (d.imagesOk == null)
+      unk('c-img', 'PageSpeed returned no per-image sizes');
+    if (d.imagesOk != null) measured('c-img');
     if (d.hasGA)       ck('c-ga');
     else if (d.hasGA == null)     unk('c-ga',  'PageSpeed returned no third-party summary');
+    // PageSpeed enumerates the third-party scripts on the page, so a GA tag is
+    // either there or it is not. Without this the model's impression could
+    // overwrite it -- the one thing this audit is built not to do.
+    if (d.hasGA != null) measured('c-ga');
 
     renderPageWeight(d);
     // It worked, so the manual control has nothing left to offer.
@@ -1936,7 +2186,7 @@ function renderAIMentions() {
   // mention counts does not need a substitute, and showing both invites the
   // two to be read as one number.
   const tracked = vals.some(p => p && !p.error && p.mentions != null);
-  const v = AD.aiVisibility;
+  const v = AD.aiVisScore;
   if (tracked || !v) { el.innerHTML = ''; return; }
 
   const rows = [
@@ -2077,7 +2327,7 @@ Definitions:
       if (j.faqs)         ck('c-faq');
       if (j.reviewCTA)    ck('c-rcta');
       if (j.awards)       ck('c-awd');
-      if (j.analytics)    ck('c-ga');
+      if (j.analytics)    ckAI('c-ga');
       if (j.notes) {
         const n = document.getElementById('n-web');
         if (n && !n.value) n.value = j.notes;
@@ -2243,7 +2493,7 @@ async function runAIVisibilityScore(name, url, city) {
     // Kept whole: for a firm outside DataForSEO's sampled prompt database this
     // live run is the ONLY measurement of their AI presence, and the mentions
     // panel falls back to it rather than printing four em dashes.
-    AD.aiVisibility = result;
+    AD.aiVisScore = result;
     // The two run in parallel, so whichever lands second repaints the panel.
     if (typeof renderAIMentions === 'function') renderAIMentions();
 
@@ -2541,10 +2791,13 @@ function buildReport() {
   const visText = document.getElementById('ai-vis-text')?.innerText || '';
   const visJ = extractJSON(AD.aiVisibility || visText);
   if (visJ) {
-    if (visJ.sitemap)   { if (ckAI('c-sm'))   filled++; }
-    if (visJ.meta)      { ck('c-meta'); filled++; }
-    if (visJ.reviewCTA) { ck('c-rcta'); filled++; }
-    if (visJ.awards)    { ck('c-awd');  filled++; }
+    // ckAI, not ck: every one of these is the model's reading, and c-meta in
+    // particular is measured directly by the page fetch. Bare ck() here walked
+    // straight past the guard and let a guess overwrite the measurement.
+    if (visJ.sitemap)   { if (ckAI('c-sm'))    filled++; }
+    if (visJ.meta)      { if (ckAI('c-meta'))  filled++; }
+    if (visJ.reviewCTA) { if (ckAI('c-rcta'))  filled++; }
+    if (visJ.awards)    { if (ckAI('c-awd'))   filled++; }
     if (visJ.summary) {
       const n = document.getElementById('n-vis');
       if (n) n.value = visJ.summary;
@@ -2554,16 +2807,16 @@ function buildReport() {
   // Parse website JSON
   const webJ = extractJSON(AD.aiWebsite || '');
   if (webJ) {
-    if (webJ.nav)          { ck('c-nav'); filled++; }
-    if (webJ.linkedContent) { ck('c-lnk'); filled++; }
-    if (webJ.photos)       { ck('c-pho'); filled++; }
-    if (webJ.headlines)    { ck('c-hdl'); filled++; }
-    if (webJ.ctas)         { ck('c-cta'); filled++; }
-    if (webJ.resources)    { ck('c-res'); filled++; }
-    if (webJ.faqs)         { ck('c-faq'); filled++; }
-    if (webJ.reviewCTA)    { ck('c-rcta'); filled++; }
-    if (webJ.awards)       { ck('c-awd'); filled++; }
-    if (webJ.analytics)    { ck('c-ga');  filled++; }
+    if (webJ.nav)           { if (ckAI('c-nav'))  filled++; }
+    if (webJ.linkedContent) { if (ckAI('c-lnk'))  filled++; }
+    if (webJ.photos)        { if (ckAI('c-pho'))  filled++; }
+    if (webJ.headlines)     { if (ckAI('c-hdl'))  filled++; }
+    if (webJ.ctas)          { if (ckAI('c-cta'))  filled++; }
+    if (webJ.resources)     { if (ckAI('c-res'))  filled++; }
+    if (webJ.faqs)          { if (ckAI('c-faq'))  filled++; }
+    if (webJ.reviewCTA)     { if (ckAI('c-rcta')) filled++; }
+    if (webJ.awards)        { if (ckAI('c-awd'))  filled++; }
+    if (webJ.analytics)     { if (ckAI('c-ga'))   filled++; }
     if (webJ.notes) {
       const n = document.getElementById('n-web');
       if (n && !n.value) n.value = webJ.notes;
@@ -2989,8 +3242,10 @@ function summaryPayload() {
       'Organic keywords': AD.keywords,
       'Monthly organic traffic': AD.traffic,
       'Referring domains': AD.refDomains,
-      'Homepage size (MB)': AD.size,
-      'Load time (s, desktop LCP)': AD.speed,
+      'Homepage size (MB)': AD.size == null ? null
+        : AD.size + (AD.sizeSource === 'entered by hand' ? ' (entered by hand)' : ''),
+      'Load time (s, desktop LCP)': AD.speed == null ? null
+        : AD.speed + (AD.speedSource === 'entered by hand' ? ' (entered by hand)' : ''),
       'Google reviews': AD.gbpReviews,
       'Google rating': AD.gbpRating,
       'Free directories claimed': AD.directories
@@ -3640,7 +3895,7 @@ Domain Authority: ${AD.da||'-'} | Keywords: ${AD.keywords||'-'} | Traffic: ${AD.
 Backlinks: ${AD.backlinks??'-'} | Referring Domains: ${AD.refDomains??'-'}
 AI Visibility (unprompted): ${AD.aiVisibilityScore??'-'}% named | ${AD.aiCitationShare??'-'}% cited
 AI Visibility (by name):    ${AD.aiBrandedScore??'-'}% knew them | ${AD.aiBrandedCitation??'-'}% cited own site
-Page Speed (${AD.psiStrategy||'desktop'} LCP): ${AD.speed||'-'}s | Page Size: ${AD.size||'-'}MB
+Page Speed (${AD.speedSource === 'entered by hand' ? 'hand-entered' : (AD.psiStrategy||'desktop')} LCP): ${AD.speed||'-'}s | Page Size: ${AD.size||'-'}MB${AD.sizeSource === 'entered by hand' ? ' (hand-entered)' : ''}
 GBP Reviews: ${AD.gbpReviews??'-'} | GBP Rating: ${AD.gbpRating||'-'}
 Last social post: ${AD.socialLastPost||'-'}
 

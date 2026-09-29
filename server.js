@@ -870,7 +870,46 @@ app.get('/site/lighthouse', async (req, res) => {
     // Oversized images
     const imgItems  = audits['uses-optimized-images']?.details?.items || 
                       audits['uses-responsive-images']?.details?.items || [];
-    const imagesOk  = imgItems.length === 0;
+
+    // The box says "Images under 500KB", so that is what this has to measure.
+    // It was reading the uses-optimized-images / uses-responsive-images lists
+    // and passing when they were EMPTY. Those audits flag images that could be
+    // compressed or resized -- a saving of a few KB, nothing to do with 500KB.
+    // A page with one well-compressed 2MB hero passed it; a page of thumbnails
+    // each wasting 5KB failed it.
+    //
+    // Worse, `[] === empty` also meant an audit Lighthouse never ran scored as
+    // a PASS: unmeasured silently earning the firm ten points. speedPass and
+    // sizePass above were fixed for exactly this; this one was missed.
+    const IMG_LIMIT_KB = 500;
+    // network-requests lists every resource the page actually pulled, with its
+    // real transfer size -- the only audit that can speak for ALL images.
+    // Field names read defensively; one wrong guess here is a silent wrong
+    // answer, not an error.
+    const bytesOf = i => {
+      for (const k of ['transferSize', 'resourceSize', 'totalBytes']) {
+        if (typeof i[k] === 'number') return i[k];
+      }
+      return null;
+    };
+    const netAudit = audits['network-requests'];
+    const netImgs  = (netAudit?.details?.items || [])
+      .filter(i => /image/i.test(String(i.resourceType || i.mimeType || '')));
+
+    let imagesOk = null, imgOver = [];
+    if (netImgs.length) {
+      imgOver  = netImgs.filter(i => (bytesOf(i) || 0) > IMG_LIMIT_KB * 1024);
+      imagesOk = imgOver.length === 0;
+    } else if (netAudit) {
+      imagesOk = true;                 // the audit ran; the page loads no images
+    } else if (imgItems.length) {
+      // Fallback. This list holds only the images Lighthouse thinks could be
+      // improved, so it can PROVE a failure and never a pass: an image outside
+      // the list is simply unlisted, not known to be small.
+      imgOver  = imgItems.filter(i => (bytesOf(i) || 0) > IMG_LIMIT_KB * 1024);
+      imagesOk = imgOver.length ? false : null;
+    }
+    // else: nothing measured it, and null says so.
     // The filename alone was kept and the URL thrown away, which left no way to
     // see WHERE the weight comes from — and on these sites it is nearly always
     // one vendor CDN serving unresized originals, which is the finding worth
@@ -924,6 +963,14 @@ app.get('/site/lighthouse', async (req, res) => {
       speed, sizeMB, perfScore, seoScore,
       isHttps, isMobile, isIndexable, hasMeta, robotsTxtValid,
       speedPass, sizePass, imagesOk, imgList, hasGA,
+      imgLimitKb: IMG_LIMIT_KB,
+      imgOverCount: imgOver.length,
+      imgOver: imgOver.slice(0, 10).map(i => ({
+        url:  i.url || '',
+        name: (i.url || '').split('/').pop().split('?')[0] || 'unknown',
+        kb:   bytesOf(i) ? Math.round(bytesOf(i) / 1024) : null,
+        host: rootDomain(i.url)
+      })),
       heavy, hosts, byType
     });
   } catch (e) {
@@ -1635,6 +1682,88 @@ app.get('/site/schema/diag', async (req, res) => {
   });
 });
 
+// Reading the markup is now separate from fetching it, because the same page
+// may have to be read twice: once as served, and again after JavaScript has
+// run. Advisory-firm sites overwhelmingly inject their schema from a plugin or
+// a tag manager, so the served HTML is frequently bare while the rendered page
+// carries a full FinancialService + PostalAddress block.
+function readSchemaFrom(html) {
+  // JSON-LD blocks
+  const blocks = [...html.matchAll(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)]
+    .map(m => m[1]);
+
+  const nodes = [];
+  let parseErrors = 0;
+  for (const raw of blocks) {
+    // CDATA is usually comment-wrapped inside a script tag — //<![CDATA[ or
+    // /*<![CDATA[*/ — so the marker alone is not enough to strip.
+    const cleaned = raw
+      .replace(/^\s*(?:\/\/|\/\*)?\s*<!\[CDATA\[\s*(?:\*\/)?/, '')
+      .replace(/(?:\/\*)?\s*\]\]>\s*(?:\*\/|\/\/)?\s*$/, '')
+      .trim();
+    if (!cleaned) continue;
+    try { flattenLd(JSON.parse(cleaned), nodes); } catch (_) { parseErrors++; }
+  }
+
+  // Microdata / RDFa, still common on older builds
+  const micro = [...html.matchAll(/itemtype=["']https?:\/\/schema\.org\/([A-Za-z]+)["']/gi)]
+    .map(m => m[1]);
+
+  const ldTypes = nodes.flatMap(typesOf);
+  const types = [...new Set(ldTypes.concat(micro))].sort();
+
+  const has = t => types.includes(t);
+  const businessTypes = BUSINESS_TYPES.filter(has);
+
+  // Location signals, read off whichever node carries them.
+  const withAddr = nodes.filter(n => n.address);
+  const addrNode = withAddr[0];
+  const addr = addrNode && typeof addrNode.address === 'object' ? addrNode.address : null;
+
+  const sameAs = [...new Set(nodes.flatMap(n => [].concat(n.sameAs || [])).filter(Boolean).map(String))];
+
+  return {
+    // readVia is the CALLER's business: this function is handed markup and does
+    // not know which of the four routes produced it.
+    found: types.length > 0,
+    types,
+    jsonLdBlocks: blocks.length,
+    parseErrors,
+    microdataOnly: blocks.length === 0 && micro.length > 0,
+
+    // Is the business itself described, and how specifically?
+    businessTypes,
+    isFinancialService: has('FinancialService'),
+    hasBusinessType: businessTypes.length > 0,
+    businessName: (nodes.find(n => businessTypes.some(b => typesOf(n).includes(b))) || {}).name || '',
+
+    // Location
+    hasAddress:   !!addrNode,
+    addressLocality: addr ? (addr.addressLocality || '') : '',
+    addressRegion:   addr ? (addr.addressRegion   || '') : '',
+    hasGeo:       nodes.some(n => n.geo),
+    hasPhone:     nodes.some(n => n.telephone),
+    hasHours:     nodes.some(n => n.openingHours || n.openingHoursSpecification),
+    hasAreaServed:nodes.some(n => n.areaServed),
+
+    // Other things worth knowing about
+    hasFAQ:    has('FAQPage'),
+    hasPerson: has('Person'),
+    hasRating: nodes.some(n => n.aggregateRating) || has('AggregateRating'),
+    sameAs
+  };
+}
+
+// How much of what this check is FOR a given read actually found. Used only to
+// pick between two reads of the same page -- the richer one wins, so a JS
+// render can add what the served HTML lacked but never take anything away.
+function schemaDepth(p) {
+  if (!p) return -1;
+  return (p.hasBusinessType ? 8 : 0) + (p.isFinancialService ? 4 : 0) +
+         (p.hasAddress ? 4 : 0) + (p.hasGeo ? 1 : 0) + (p.hasPhone ? 1 : 0) +
+         (p.hasHours ? 1 : 0) + (p.types ? p.types.length : 0);
+}
+
 app.get('/site/schema', async (req, res) => {
   const { url } = req.query;
   if (!url) return res.status(400).json({ error: 'url required' });
@@ -1686,69 +1815,43 @@ app.get('/site/schema', async (req, res) => {
       html = await r.text();
     }
 
-    // JSON-LD blocks
-    const blocks = [...html.matchAll(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)]
-      .map(m => m[1]);
+    let parsed = readSchemaFrom(html);
 
-    const nodes = [];
-    let parseErrors = 0;
-    for (const raw of blocks) {
-      // CDATA is usually comment-wrapped inside a script tag — //<![CDATA[ or
-      // /*<![CDATA[*/ — so the marker alone is not enough to strip.
-      const cleaned = raw
-        .replace(/^\s*(?:\/\/|\/\*)?\s*<!\[CDATA\[\s*(?:\*\/)?/, '')
-        .replace(/(?:\/\*)?\s*\]\]>\s*(?:\*\/|\/\/)?\s*$/, '')
-        .trim();
-      if (!cleaned) continue;
-      try { flattenLd(JSON.parse(cleaned), nodes); } catch (_) { parseErrors++; }
+    // The two checks this page is FOR are a business type and a location. If
+    // the served HTML did not yield both, read the page again with JavaScript
+    // run before concluding they are absent.
+    //
+    // This is where the audit was losing real schema. The fallback chain above
+    // only fires when the FETCH fails, so a site that returns a perfectly good
+    // 200 and injects its FinancialService + PostalAddress block from a plugin
+    // or tag manager was parsed bare and reported "No structured data found" --
+    // a hard failure on an 8-point check, for a firm that has the markup.
+    //
+    // Only on a short read, never on every audit: OnPage is billed per call,
+    // and a page that already declared both has nothing to gain from a second.
+    let rendered = null;
+    if (via === 'direct' && !(parsed.hasBusinessType && parsed.hasAddress)) {
+      const op = await onPageHtml(url);
+      if (!op.error) {
+        rendered = readSchemaFrom(op.html);
+        // Richer wins. A JS render can only ADD what the served HTML lacked --
+        // if it somehow reads thinner, the first reading stands.
+        if (schemaDepth(rendered) > schemaDepth(parsed)) {
+          parsed = rendered;
+          via = 'onpage-js';
+        }
+      }
     }
 
-    // Microdata / RDFa, still common on older builds
-    const micro = [...html.matchAll(/itemtype=["']https?:\/\/schema\.org\/([A-Za-z]+)["']/gi)]
-      .map(m => m[1]);
-
-    const ldTypes = nodes.flatMap(typesOf);
-    const types = [...new Set(ldTypes.concat(micro))].sort();
-
-    const has = t => types.includes(t);
-    const businessTypes = BUSINESS_TYPES.filter(has);
-
-    // Location signals, read off whichever node carries them.
-    const withAddr = nodes.filter(n => n.address);
-    const addrNode = withAddr[0];
-    const addr = addrNode && typeof addrNode.address === 'object' ? addrNode.address : null;
-
-    const sameAs = [...new Set(nodes.flatMap(n => [].concat(n.sameAs || [])).filter(Boolean).map(String))];
-
-    res.json({
+    res.json(Object.assign({
       readVia: via,
-      found: types.length > 0,
-      types,
-      jsonLdBlocks: blocks.length,
-      parseErrors,
-      microdataOnly: blocks.length === 0 && micro.length > 0,
-
-      // Is the business itself described, and how specifically?
-      businessTypes,
-      isFinancialService: has('FinancialService'),
-      hasBusinessType: businessTypes.length > 0,
-      businessName: (nodes.find(n => businessTypes.some(b => typesOf(n).includes(b))) || {}).name || '',
-
-      // Location
-      hasAddress:   !!addrNode,
-      addressLocality: addr ? (addr.addressLocality || '') : '',
-      addressRegion:   addr ? (addr.addressRegion   || '') : '',
-      hasGeo:       nodes.some(n => n.geo),
-      hasPhone:     nodes.some(n => n.telephone),
-      hasHours:     nodes.some(n => n.openingHours || n.openingHoursSpecification),
-      hasAreaServed:nodes.some(n => n.areaServed),
-
-      // Other things worth knowing about
-      hasFAQ:    has('FAQPage'),
-      hasPerson: has('Person'),
-      hasRating: nodes.some(n => n.aggregateRating) || has('AggregateRating'),
-      sameAs
-    });
+      // Says plainly that a second, JS-rendered read happened and what it
+      // changed, so "found after rendering" is never mistaken for the served
+      // HTML having carried it.
+      renderedRead: rendered ? (via === 'onpage-js' ? 'added markup the served HTML did not have'
+                                                    : 'no better than the served HTML')
+                             : null
+    }, parsed));
   } catch (e) {
     const msg = e.name === 'TimeoutError' ? 'timed out fetching the page' : e.message;
     console.error('schema error:', msg);
@@ -1895,6 +1998,72 @@ app.get('/directories', async (req, res) => {
 
 // ── 4. GBP — claimed, rating, review count, photos ───────────────────────────
 // Endpoint: /v3/business_data/google/my_business_info/live  (no polling!)
+// Two checks hang off image fields we have never actually seen the shape of,
+// and the code cannot currently tell "this firm uploaded no photos" from
+// "DataForSEO does not return that field". This prints what the listing really
+// carries so the difference can be settled from data.
+//
+// The specific question: Google itself categorises profile photos as by the
+// owner, by visitors, or Street View. A Street View capture of the building is
+// on almost every listing and says nothing about the firm -- crediting it as
+// "has photos" hides the exact gap this audit exists to find. If DataForSEO
+// passes that category (or a distinguishing image host) through, the
+// distinction is free and deterministic. If it does not, no amount of looking
+// at the picture makes it a measurement.
+app.get('/gbp/diag', async (req, res) => {
+  const { name, location, url } = req.query;
+  if (!name) return res.status(400).json({ error: 'name required' });
+  if (!DFS_LOGIN) return res.status(500).json({ error: 'DataForSEO not configured' });
+  try {
+    const d = await dfsPost('/business_data/google/my_business_info/live', [
+      { keyword: name, location_name: location || 'United States', language_name: 'English' }
+    ]);
+    if (d?.status_code && d.status_code !== 20000)
+      return res.json({ error: 'DataForSEO ' + d.status_code + ': ' + d.status_message });
+    const task = d?.tasks?.[0];
+    if (task && task.status_code !== 20000)
+      return res.json({ error: 'DataForSEO ' + task.status_code + ': ' + task.status_message });
+    const items = task?.result?.[0]?.items || [];
+    if (!items.length) return res.json({ error: 'no listing returned for that name/location' });
+
+    const want = rootDomain(url || '');
+    const biz  = (want && items.find(i => rootDomain(i.url || i.domain) === want)) || items[0];
+
+    // Anything that looks image-shaped, whatever it is called.
+    const imageKeys = Object.keys(biz).filter(k => /image|photo|logo|picture|thumb|media/i.test(k));
+    const detail = {};
+    for (const k of imageKeys) {
+      const v = biz[k];
+      detail[k] = Array.isArray(v)
+        ? { type: 'array', length: v.length,
+            // An array of objects may carry the attribution; an array of URL
+            // strings carries it only in the host.
+            firstItem: v[0] === undefined ? null
+                     : (typeof v[0] === 'object' ? { keys: Object.keys(v[0]), sample: v[0] }
+                                                 : String(v[0]).slice(0, 200)) }
+        : (v && typeof v === 'object') ? { type: 'object', keys: Object.keys(v), sample: v }
+        : { type: typeof v, value: v == null ? null : String(v).slice(0, 200) };
+    }
+
+    res.json({
+      matchedOn: want && rootDomain(biz.url || biz.domain) === want ? 'domain' : 'name-only',
+      title: biz.title || '',
+      // What the current checks would conclude, beside the raw data they read.
+      currentReading: {
+        hasPhotos: !!(biz.main_image || (biz.images && biz.images.length > 0)),
+        hasLogo:   !!biz.logo
+      },
+      imageKeys,
+      imageFields: detail,
+      // Anything naming a photo count or category would settle it outright.
+      countLikeKeys: Object.keys(biz).filter(k => /count|total/i.test(k)),
+      allKeys: Object.keys(biz).sort()
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/gbp/info', async (req, res) => {
   const { name, location, url } = req.query;
   if (!name) return res.status(400).json({ error: 'name required' });
