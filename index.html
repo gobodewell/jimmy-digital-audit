@@ -830,7 +830,7 @@ textarea{resize:vertical;min-height:60px}
 // different vintages. Both carry the same stamp and the app compares them,
 // because "did you upload both files?" is not something anyone should have
 // to remember -- and a half-upload looks exactly like a fix that did not work.
-const BUILD = '2026-09-30.4';
+const BUILD = '2026-09-30.6';
 const DEFAULT_PROXY = 'https://jimmy-digital-audit.onrender.com';
 let AD = {}; // audit data store
 
@@ -3399,6 +3399,11 @@ function summaryPayload() {
     failed: failedChecks().slice(0, 12).map(c => ({
       label: c.label, pts: c.pts, cat: CAT_NAME[c.cat]
     })),
+    // The exact Action Titles page 2 will print, so page 1 can name the same
+    // things in the same words. Passed verbatim and used verbatim: the summary
+    // is allowed to quote an approved headline, never to reword one.
+    actionTitles: failedChecks().filter(c => GTEXT[c.id])
+      .slice(0, TOP_N).map(c => GTEXT[c.id].title),
     metrics: {
       'Domain authority': AD.da,
       'Organic keywords': AD.keywords,
@@ -3681,13 +3686,17 @@ function cover(d, logoWhite) {
 const TOP_N = 5;
 const TOP_N_WORD = ['zero','one','two','three','four','five','six','seven','eight','nine','ten'][TOP_N] || String(TOP_N);
 
-// Approved recommendation copy, transcribed verbatim from the "New Digital
-// Audit Text" column of SA_Digital_Audit_Questions. This is the language the
-// client-facing page is allowed to use. It is not paraphrased, shortened or
-// regenerated -- a recommendation on page 2 is a commitment the firm may act
-// on, so the wording is theirs, not the tool's.
+// Approved recommendation copy, transcribed verbatim from the "Final Use" sheet
+// of SA_Digital_Audit_Questions -- its "Current - Action Items" column. That
+// sheet is the decided version: the "In Production" sheet carries the older
+// wording alongside the newer in a second column, and 20 of its 31 rows differ
+// between the two.
 //
-// 30 of the 40 checks have usable copy. The ten that do not are listed in
+// This is the language the client-facing page is allowed to use. It is not
+// paraphrased, shortened or regenerated -- a recommendation on page 2 is a
+// commitment the firm may act on, so the wording is theirs, not the tool's.
+//
+// 30 of the 40 checks have copy. The ten that do not are listed in
 // GTEXT_MISSING below; nothing invents copy to fill those gaps.
 const GTEXT = {
   "c-gbp-f":  { title: "Google Business Profile is Vital to Being Found on Google",
@@ -3758,9 +3767,9 @@ const GTEXT = {
 const GTEXT_MISSING = [
   'c-gbp-d', 'c-gbp-p', 'c-aicite', 'c-da5', 'c-sch',
   'c-hli', 'c-hfb', 'c-hig', 'c-hyt',
-  // Has a row in the sheet, but the Action Title and text cells are both
-  // empty. A blank entry is not approved copy, so it waits with the rest
-  // rather than printing two empty strings on a client page.
+  // Its question ("Is the total page load on the homepage under 3mb?") had a
+  // row with both copy cells blank, and that row is absent from the current
+  // sheet entirely. Either way there is no approved wording for it.
   'c-szp'
 ];
 

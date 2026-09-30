@@ -5,7 +5,7 @@ const app  = express();
 // Bumped whenever a build is handed over. /health reports it so the app can
 // tell the user their page and their proxy are different vintages -- the
 // failure mode is a fix that silently is not there.
-const BUILD = '2026-09-30.4';
+const BUILD = '2026-09-30.6';
 const PORT = process.env.PORT || 3001;
 
 // Every one of these is trimmed. A key pasted into a hosting panel's env
@@ -3062,6 +3062,7 @@ async function mapLimit(items, limit, fn) {
 // the reader would believe the paragraph.
 app.post('/ai/summary', async (req, res) => {
   const { firm, scores, failed, metrics, model } = req.body || {};
+  const b = req.body || {};
   if (!firm)   return res.status(400).json({ error: 'firm required' });
   if (!scores) return res.status(400).json({ error: 'scores required' });
   if (!ANTHROPIC_KEY) return res.status(500).json({ error: 'ANTHROPIC_KEY not set' });
@@ -3088,6 +3089,15 @@ app.post('/ai/summary', async (req, res) => {
       if (v !== null && v !== undefined && v !== '') lines.push(`  - ${k}: ${v}`);
     }
   }
+  // The headlines page 2 will print, word for word. They are approved copy, so
+  // the summary may quote one but never reword it -- a paraphrase of approved
+  // language is unapproved language, and it would also leave page 1 and page 2
+  // describing the same fix in two different vocabularies.
+  const titles = Array.isArray(b.actionTitles) ? b.actionTitles.filter(Boolean) : [];
+  if (titles.length) {
+    lines.push('Recommendation headlines, as page 2 prints them (exact wording):');
+    titles.forEach(t => lines.push(`  - ${t}`));
+  }
 
   const prompt =
 `Below are the results of a digital marketing audit of a financial advisory firm.
@@ -3100,7 +3110,12 @@ Write the summary paragraph for the cover of the report. Rules:
   sentence is a sentence the client never reads. Count as you write.
 - Addressed to the firm as "your".
 - Say what is working first, then name the single biggest thing holding the
-  score back, then say that fixing it is achievable.
+  score back, then say that fixing it is achievable.${titles.length ? `
+- When you refer to a recommendation, use a headline from the list above
+  EXACTLY as written — same words, same order, same capitalisation. Do not
+  reword, shorten, expand or paraphrase one. These are approved copy. If a
+  headline will not fit the sentence you are writing, write a different
+  sentence rather than altering the headline.` : ''}
 - Use ONLY the facts above. Do not invent measurements, competitors, numbers,
   or anything about the firm that is not listed. If something is not in the
   data, do not mention it.
