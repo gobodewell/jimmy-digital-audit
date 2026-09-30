@@ -606,6 +606,11 @@ textarea{resize:vertical;min-height:60px}
         <div class="sc"><div class="sc-ch">Social</div><div class="sc-g" id="sg-s">—</div><div class="sc-b" id="sb-s"></div><div class="sc-r" id="sr-s"></div></div>
       </div>
       <div id="unk-note" style="display:none;font-size:12px;color:#b45309;margin:-6px 0 14px"></div>
+      <!-- Page 2 only prints wording approved in SA_Digital_Audit_Questions. A
+           failed check with no row there is passed over rather than written up
+           in the tool's own words, and that has to be visible or the sheet
+           never gets finished. -->
+      <div id="gtext-note" style="display:none;font-size:12px;color:#b45309;margin:-6px 0 14px"></div>
       <div class="card">
         <div class="ct">Cover summary</div>
         <div id="cover-summary" style="font-size:13px;line-height:1.6;color:var(--text2);min-height:40px">Not written yet — click below once the audit is complete.</div>
@@ -817,7 +822,7 @@ textarea{resize:vertical;min-height:60px}
 // different vintages. Both carry the same stamp and the app compares them,
 // because "did you upload both files?" is not something anyone should have
 // to remember -- and a half-upload looks exactly like a fix that did not work.
-const BUILD = '2026-09-29.2';
+const BUILD = '2026-09-30.2';
 const DEFAULT_PROXY = 'https://jimmy-digital-audit.onrender.com';
 let AD = {}; // audit data store
 
@@ -2652,6 +2657,69 @@ async function runAIVisibilityScore(name, url, city) {
 // they drifted: only Facebook's logo/contactInfo/summary were ever read, so a
 // firm with a strong LinkedIn and no Facebook failed three checks the AI had
 // explicitly confirmed. One implementation now, used by both.
+// LinkedIn serves an AUTHWALL to anything not signed in -- a URL like
+// linkedin.com/authwall?trk=...&sessionRedirect=<the real profile> -- and the
+// model reporting what it landed on means that wrapper was being written into
+// the handle field verbatim. SocialFetch is then handed a login page instead of
+// a profile, so the follower count fails for a profile that exists.
+//
+// The real URL is usually sitting inside the wrapper, so unwrap it rather than
+// discarding it. Everything here is reversible string work on a URL: nothing is
+// inferred about the firm, and a URL that cannot be resolved to a profile is
+// reported as unusable rather than quietly stored.
+const SOCIAL_HOSTS = {
+  facebook:  /(^|\.)facebook\.com$|(^|\.)fb\.com$/i,
+  linkedin:  /(^|\.)linkedin\.com$|(^|\.)lnkd\.in$/i,
+  instagram: /(^|\.)instagram\.com$/i,
+  youtube:   /(^|\.)youtube\.com$|(^|\.)youtu\.be$/i
+};
+
+function normalizeSocialUrl(platform, raw) {
+  let v = String(raw || '').trim();
+  if (!v) return { error: 'empty' };
+  // A bare handle is fine and needs none of this.
+  if (!/^https?:\/\//i.test(v) && !/\//.test(v)) return { url: v.replace(/^@/, '') };
+  if (!/^https?:\/\//i.test(v)) v = 'https://' + v;
+
+  let u;
+  try { u = new URL(v); } catch { return { error: 'not a URL: ' + raw }; }
+
+  // Unwrap redirect shims, up to a couple of layers. LinkedIn's authwall keeps
+  // the destination in sessionRedirect; its outbound links use a `url` param.
+  for (let i = 0; i < 3; i++) {
+    const inner = u.searchParams.get('sessionRedirect') || u.searchParams.get('url') ||
+                  u.searchParams.get('redirect') || u.searchParams.get('u');
+    if (!inner) break;
+    let dec = inner;
+    try { dec = decodeURIComponent(inner); } catch (_) {}
+    try { u = new URL(/^https?:\/\//i.test(dec) ? dec : 'https://' + dec); } catch { break; }
+  }
+
+  // Tracking parameters are noise on a profile URL and make two records of the
+  // same profile look different.
+  ['trk', 'trkInfo', 'originalSubdomain', 'original_referer', 'fref', 'mibextid']
+    .forEach(k => u.searchParams.delete(k));
+  [...u.searchParams.keys()].filter(k => /^utm_/i.test(k)).forEach(k => u.searchParams.delete(k));
+
+  const host = u.hostname.replace(/^www\./i, '');
+  const want = SOCIAL_HOSTS[platform];
+  if (want && !want.test(host)) {
+    return { error: 'points at ' + host + ', not ' + platform };
+  }
+
+  // Still a login or interstitial page after unwrapping: there is no profile
+  // URL in here to keep, and storing it would fail the follower lookup with a
+  // confusing error rather than an honest one.
+  if (/^\/(authwall|uas\/login|login|checkpoint|signup)\b/i.test(u.pathname)) {
+    return { error: 'LinkedIn returned its sign-in wall, not a profile' };
+  }
+
+  u.hash = '';
+  const qs = u.searchParams.toString();
+  return { url: u.origin.replace(/^https:\/\/www\./, 'https://') + u.pathname.replace(/\/$/, '') +
+                (qs ? '?' + qs : '') };
+}
+
 const SOCIAL_PLATFORMS = [
   { key: 'facebook',  has: 'c-hfb', handle: 'h-fb', metric: 'm-fb',  count: 'followers'   },
   { key: 'linkedin',  has: 'c-hli', handle: 'h-li', metric: 'm-lif', count: 'followers'   },
@@ -2663,13 +2731,23 @@ function applySocialJSON(socJ) {
   if (!socJ) return 0;
   let filled = 0;
   const found = [];
+  const badUrls = [];
 
   for (const p of SOCIAL_PLATFORMS) {
     const d = socJ[p.key];
     if (!d || !d.found || !d.url) continue;
-    found.push(Object.assign({}, d, { key: p.key }));
+    // A sign-in wall is not a profile URL. Storing one ticks "has LinkedIn"
+    // and then fails the follower lookup, which reads as a broken integration
+    // rather than what it is.
+    const norm = normalizeSocialUrl(p.key, d.url);
+    if (norm.error) {
+      console.warn('Social URL for ' + p.key + ' unusable (' + norm.error + '):', d.url);
+      badUrls.push(p.key + ' — ' + norm.error);
+      continue;
+    }
+    found.push(Object.assign({}, d, { key: p.key, url: norm.url }));
     ck(p.has); filled++;
-    sv(p.handle, p.key === 'instagram' ? String(d.url).replace(/^@/, '') : d.url);
+    sv(p.handle, p.key === 'instagram' ? String(norm.url).replace(/^@/, '') : norm.url);
     const n = d[p.count];
     if (n != null) { sv(p.metric, Number(n)); filled++; }
   }
@@ -2693,7 +2771,18 @@ function applySocialJSON(socJ) {
   // Last post dates were requested for every platform and then discarded.
   const dates = found.filter(p => p.lastPost).map(p => p.key + ': ' + p.lastPost);
   const lp = document.getElementById('sf-lastpost');
-  if (lp) lp.textContent = dates.length ? 'Last post — ' + dates.join('   ·   ') : '';
+  if (lp) {
+    // A profile skipped for an unusable URL is not a profile that does not
+    // exist. Saying so on the page means the handle can be pasted in by hand
+    // instead of the firm silently losing the check.
+    lp.innerHTML = (dates.length ? 'Last post — ' + escHtml(dates.join('   ·   ')) : '') +
+      (badUrls.length
+        ? (dates.length ? '<br>' : '') +
+          '<span style="color:#b45309">Could not use the URL found for ' +
+          escHtml(badUrls.join(' · ')) +
+          ' — paste the profile URL in by hand and click Pull.</span>'
+        : '');
+  }
   AD.socialLastPost = dates.join('; ');
 
   // Nothing used to write the Social notes box at all — the prompt had no
@@ -3172,6 +3261,23 @@ function recalc() {
   // Unmeasured checks still count as not passed -- excluding them would
   // quietly inflate the score. But the audit says which they are, so a low
   // score built on missing data can be told apart from one built on findings.
+  // Which failed checks page 2 cannot speak to, because the approved sheet has
+  // no wording for them. Shown beside the unmeasured note: both are gaps in
+  // what the report can say, and both are only fixable off-screen.
+  const gnote = document.getElementById('gtext-note');
+  if (gnote) {
+    const noCopy = CHECKS.filter(c => !GTEXT[c.id] &&
+      !document.getElementById(c.id)?.checked && !UNK.has(c.id));
+    gnote.style.display = noCopy.length ? '' : 'none';
+    gnote.innerHTML = noCopy.length
+      ? noCopy.length + ' failed check' + (noCopy.length > 1 ? 's are' : ' is') +
+        ' left off "Do these ' + TOP_N_WORD + ' things first" — there is no approved wording for ' +
+        (noCopy.length > 1 ? 'them' : 'it') + ' in SA_Digital_Audit_Questions: ' +
+        noCopy.map(c => escHtml(c.label)).join(', ') +
+        '. They still count against the score; only the recommendation is withheld.'
+      : '';
+  }
+
   const note = document.getElementById('unk-note');
   if (note) {
     const all = CHECKS.map(c => c.id)
@@ -3332,10 +3438,17 @@ async function runCoverSummary() {
 }
 
 // Failed checks, worst-impact first -- the basis of the recommendations.
+// What a single fix is actually worth to the overall score. Each category
+// totals 100 raw points but they are weighted 40/35/25, so raw points are not
+// comparable between them: a 20-point Social check is worth 5.0 and a 15-point
+// Website check 5.25. Sorting by raw points therefore ranked the smaller fix
+// first, under a page that says "ranked by the score each fix unlocks".
+const scoreImpact = c => c.pts * CAT_WEIGHT[c.cat] * (100 - SCORE_FLOOR) / 100;
+
 function failedChecks() {
   return CHECKS
     .filter(c => !document.getElementById(c.id)?.checked)
-    .sort((a, b) => b.pts - a.pts);
+    .sort((a, b) => scoreImpact(b) - scoreImpact(a) || b.pts - a.pts);
 }
 
 // ── The GrowthLine by Cetera audit report ────────────────────────────────────
@@ -3354,21 +3467,35 @@ const ROADMAP_LINK = 'https://growth360.actifi.com/auth/wall?relayState=GrowthLi
 // gold button. Heading is optional — the roadmap banner on the scorecard pages
 // is one line and does not need one. Every piece carries the link, so a reader
 // who clicks the words rather than the button still gets there.
+// The banner both calls to action are built from: a gold rule, the copy, and a
+// gold button.
+//
+// The headingless variant -- the roadmap bar on the three scorecard pages --
+// set its copy at 8.8pt, which left one thin grey line of type beside a bold
+// button twice its size, with the rule running past both. It read as a button
+// with a caption rather than a call to action. The copy now matches the
+// button's weight, and the rule is sized to the block instead of a fixed 38pt.
 function ctaBar(link, heading, body, button, gap) {
+  const bodySize = heading ? 8.8 : 10.5;
+  // Two lines of copy at 10.5pt, or the heading stack, decide the height.
+  const ruleH    = heading ? 52 : 44;
   return { columns: [
-      { width: 3, canvas: [{ type: 'rect', x: 0, y: 0, w: 3, h: heading ? 52 : 38, color: RC.gold }] },
+      { width: 4, canvas: [{ type: 'rect', x: 0, y: 0, w: 4, h: ruleH, color: RC.gold }] },
       { width: '*', stack: [
           ...(heading ? [{ text: heading, font: 'Display', bold: true, fontSize: 13,
                            color: '#1F2A33', margin: [12, 2, 0, 4], link }] : []),
-          { text: body, font: 'Body', fontSize: 8.8, color: RC.gray, lineHeight: 1.4,
-            margin: [12, heading ? 0 : 6, 12, 0], link }
+          { text: body, font: 'Body', fontSize: bodySize,
+            color: heading ? RC.gray : '#1F2A33', lineHeight: 1.4,
+            // Nudged down so a two-line block sits level with the button
+            // rather than riding above it.
+            margin: [14, heading ? 0 : 7, 14, 0], link }
         ] },
       { width: 132, table: { widths: [132], body: [[{
             text: button, font: 'Body', bold: true, fontSize: 10.5,
             color: '#1F2A33', alignment: 'center', margin: [0, 9, 0, 9], link
           }]] },
         layout: { hLineWidth: () => 0, vLineWidth: () => 0, fillColor: () => RC.gold },
-        margin: [0, heading ? 6 : 2, 0, 0] }
+        margin: [0, heading ? 6 : 4, 0, 0] }
     ], columnGap: 0, margin: [0, gap == null ? 20 : gap, 0, 0] };
 }
 
@@ -3431,7 +3558,7 @@ const rule = (w, color) => ({ canvas: [{ type: 'line', x1: 0, y1: 0, x2: w, y2: 
 // pushed onto a second page -- measured by rendering at increasing lengths and
 // watching the page count, not estimated. SUMMARY_MAX leaves headroom for text
 // that wraps worse than the sample did.
-const SUMMARY_MAX = 460;
+const SUMMARY_MAX = 420;
 function fitSummary(text) {
   const t = (text || '').trim();
   if (t.length <= SUMMARY_MAX) return t;
@@ -3448,13 +3575,32 @@ function fitSummary(text) {
   return out;
 }
 
+// Cover art geometry. The source is 1920x1080; scaled to fill the page height
+// it is 1408pt wide, so 796pt of it sits outside a 612pt page. COVER_X decides
+// which part shows.
+//
+//   0      the dark top-left of the gradient, no mark
+//  -398    centred
+//  -796    the right edge, where the mark's arcs live, at true proportions
+//
+// Centred: the gradient reads as intended and the distorted arcs are gone,
+// which is what was asked for. Change the one number to bring them back --
+// they will be circular now rather than squeezed.
+const COVER_ASPECT = 1920 / 1080;
+const COVER_W = Math.round(792 * COVER_ASPECT);      // 1408
+const COVER_X = Math.round((612 - COVER_W) / 2);     // -398, centred
+
 // ── cover ────────────────────────────────────────────────────────────────────
 function cover(d, logoWhite) {
   const s = d.scores;
-  const stat = (big, small) => ({
+  // `flag` lifts a figure out of the row: on a purple cover magenta is too
+  // close to the background to read, so the accent is the gold used for every
+  // other call to action in the report.
+  const stat = (big, small, flag) => ({
     stack: [
-      { text: big, font: 'Display', bold: true, fontSize: 17, color: RC.white, margin: [0, 0, 0, 1] },
-      { text: small, font: 'Body', fontSize: 8, color: '#D9CBE6' }
+      { text: big, font: 'Display', bold: true, fontSize: 17,
+        color: flag ? RC.gold : RC.white, margin: [0, 0, 0, 1] },
+      { text: small, font: 'Body', fontSize: 8, color: flag ? '#F2DFA8' : '#D9CBE6' }
     ]
   });
   const chan = (name, score) => ({
@@ -3466,24 +3612,30 @@ function cover(d, logoWhite) {
     ]
   });
 
+  // The cover was filling about five sixths of the page and leaving a dead band
+  // along the bottom. The gaps below are what spread it over the full sheet --
+  // they are the design, not padding, so they are set deliberately rather than
+  // left to fall out of the defaults.
   return [
-    { svg: logoWhite, width: 168, alignment: 'right', margin: [0, 10, 0, 34] },
-    { text: 'Digital Audit', font: 'Display', fontSize: 34, color: RC.white, margin: [0, 0, 0, 8] },
+    { svg: logoWhite, width: 168, alignment: 'right', margin: [0, 14, 0, 40] },
+    { text: 'Digital Audit', font: 'Display', fontSize: 38, color: RC.white, margin: [0, 0, 0, 10] },
     { text: [d.firm, '  ·  ', d.url, '  ·  Reviewed ', d.reviewed].join(''),
-      font: 'Body', fontSize: 9.5, color: '#CBB8DC', margin: [0, 0, 0, 24] },
+      font: 'Body', fontSize: 9.5, color: '#CBB8DC', margin: [0, 0, 0, 34] },
 
     { table: { body: [[{ text: 'SUMMARY', font: 'Body', bold: true, fontSize: 7, color: RC.white,
         characterSpacing: 1.1, margin: [5, 3, 5, 3] }]] },
       layout: { hLineWidth: () => 0.7, vLineWidth: () => 0.7,
                 hLineColor: () => '#A88FC0', vLineColor: () => '#A88FC0' },
-      margin: [0, 0, 0, 10] },
-    { text: fitSummary(d.summary), font: 'Display', fontSize: 12.5, lineHeight: 1.42,
+      margin: [0, 0, 0, 14] },
+    { text: fitSummary(d.summary), font: 'Display', fontSize: 12.5, lineHeight: 1.5,
       color: '#F2EAF7', margin: [0, 0, 120, 30] },
 
+    // Left-aligned with everything above it. The old 120pt indent floated this
+    // block into the middle of the page with nothing to line up against.
     { text: `OVERALL DIGITAL SCORE — ${s.overall} OF 100`, font: 'Body', bold: true, fontSize: 7.5,
-      color: '#CBB8DC', characterSpacing: 1.1, margin: [120, 0, 0, 5] },
-    { text: s.band, font: 'Display', fontSize: 21, color: RC.white, margin: [120, 0, 0, 5] },
-    { text: d.deltaLine || '', font: 'Body', fontSize: 9, color: '#CBB8DC', margin: [120, 0, 0, 13] },
+      color: '#CBB8DC', characterSpacing: 1.1, margin: [0, 0, 0, 6] },
+    { text: s.band, font: 'Display', fontSize: 23, color: RC.white, margin: [0, 0, 0, 6] },
+    { text: d.deltaLine || '', font: 'Body', fontSize: 9, color: '#CBB8DC', margin: [0, 0, 0, 16] },
 
     // One unbreakable block. Left to itself pdfmake will split this at a page
     // boundary, which orphans the category numbers and their bars onto a blank
@@ -3499,18 +3651,108 @@ function cover(d, logoWhite) {
             ] },
           { width: '*', columns: [
               { width: '*', stack: [ stat(d.kpiPassed, 'KPIs passed'), { text: '', margin: [0, 9, 0, 0] }, stat(d.aeoPassed, 'AEO KPIs passed') ] },
-              { width: '*', stack: [ stat(d.needWork, 'need work'), { text: '', margin: [0, 9, 0, 0] }, stat(d.ptsAvailable, 'available in six fixes') ] }
+              { width: '*', stack: [ stat(d.needWork, 'need work', true), { text: '', margin: [0, 9, 0, 0] }, stat(d.ptsAvailable, `available in ${TOP_N_WORD} fixes`, true) ] }
             ] }
-        ], margin: [0, 0, 0, 30] },
+        ], margin: [0, 0, 0, 36] },
 
       { columns: [chan('Company Visibility', s.v), chan('Website Performance', s.w), chan('Social Media', s.s)],
-        columnGap: 16, margin: [0, 0, 0, 26] },
+        columnGap: 16, margin: [0, 0, 0, 32] },
 
       { text: `${DISCLOSURE}  ·  Prepared by Cetera GrowthLine`,
         font: 'Body', fontSize: 7, color: '#B9A6CC' }
     ] }
   ];
 }
+
+// How many recommendations page 2 carries. The number drove a slice in one
+// place and the word "six" in four separate strings, so changing it meant
+// finding all five -- and a heading that promises six things over a list of
+// five is the kind of error nobody notices until a client does.
+const TOP_N = 5;
+const TOP_N_WORD = ['zero','one','two','three','four','five','six','seven','eight','nine','ten'][TOP_N] || String(TOP_N);
+
+// Approved recommendation copy, transcribed verbatim from the "New Digital
+// Audit Text" column of SA_Digital_Audit_Questions. This is the language the
+// client-facing page is allowed to use. It is not paraphrased, shortened or
+// regenerated -- a recommendation on page 2 is a commitment the firm may act
+// on, so the wording is theirs, not the tool's.
+//
+// 30 of the 40 checks have usable copy. The ten that do not are listed in
+// GTEXT_MISSING below; nothing invents copy to fill those gaps.
+const GTEXT = {
+  "c-gbp-f":  { title: "Google Business Profile is Vital to Being Found on Google",
+               text: "Create and verify your Google Business Profile at no cost. A verified, regularly updated profile boosts credibility, improves search rankings, and strengthens AEO by helping AI tools reference your firm accurately. Add or claim your profile listing by following these steps and tips to optimize your profile." },
+  "c-gbp-r":  { title: "Reviews on Google Business Profile",
+               text: "More reviews and higher ratings help your business rank higher in search and improve AEO, making it more likely your firm appears in AI-generated answers. To request reviews in a compliant way, use one of the two pre-approved email templates titled “Request a Google Review” in MarketingCentral’s Content Library." },
+  "c-gbp-v":  { title: "Verify Your Google Business Profile",
+               text: "Once your Google Business Profile is created, verify it by requesting a postcard or using Google’s video verification option. A verified profile strengthens your visibility in both local search and AI-driven results." },
+  "c-gbp-l":  { title: "Match Your Profile to Your Brand",
+               text: "Upload a clear logo to your Google Business Profile to build brand recognition. A consistent logo across your site, social media, and listings boosts credibility and increases the chances your business is referenced in search and AI results." },
+  "c-idx":    { title: "Make Sure Your Website is Properly indexed by Google",
+               text: "Permission to Index allows search engines to scan your site and rank it for prospects. All public-facing pages should be indexable so both search engines and AI tools can reference your content, strengthening AEO." },
+  "c-cgpt":   { title: "Does AI know your firm?",
+               text: "Add your firm name to ChatGPT by entering it as a search prompt (e.g., “Who is [Firm Name]?”). ChatGPT pulls from public sources like your website, news, and awards to shape its answers. Testing this helps you see how your brand appears in AI conversations, especially after a rebrand or new launch." },
+  "c-sm":     { title: "Sitemap Indexed by Google",
+               text: "A sitemap is a file that lists all of your website’s pages and tells search engines which ones are most important to show. It also helps AI tools better understand and reference your site, strengthening AEO. Building a sitemap is simple—there are many tools available, or you can speak with our team for support." },
+  "c-meta":   { title: "Write Meta Descriptions to Tell What a Page is About",
+               text: "Every page should have a unique meta description, managed through the SEO tool in your website platform. Meta descriptions appear in search results, help drive organic traffic, and support AEO by giving AI tools clear summaries of your content to reference." },
+  "c-ga":     { title: "Use Google Analytics to Monitor Traffic",
+               text: "Google Analytics tracks your website traffic and performance, helping you see which pages and content drive engagement. While it doesn’t directly impact rankings, these insights let you improve content and user experience—factors that support stronger SEO and AEO visibility." },
+  "c-rcta":   { title: "Add a Google Review Call-to-Action",
+               text: "Add a call-to-action on your website that directs clients to your Google Business Profile and guides them on how to leave a review. Be sure to follow Cetera’s compliance rules when including this information. Client reviews not only improve visibility in search but also strengthen AEO by signaling credibility and trust to AI tools." },
+  "c-awd":    { title: "Highlight Awards and Recognition",
+               text: "Showcase industry awards, community recognition, or firm accolades on your website. Highlighting awards builds credibility with prospects and reinforces authority signals that help your firm surface in both search results and AI-generated answers." },
+  "c-spd":    { title: "A New Website Update May help",
+               text: "Upgrading your website technology may reduce technical issues that cause your site to load slowly. Things like large images may also cause a site to load slowly." },
+  "c-mob":    { title: "Mobile Optimize Your Website",
+               text: "More and more each year people are accessing website on their mobile phones.  A mobile ready website ensures that people can interact with your brand on smaller mobile devices." },
+  "c-https":  { title: "Ensure Your Site is Secure",
+               text: "Your website must have an SSL or TLS certification to ensure it is secure or it will be flagged by web browsers. A\nsimple way to check is by visiting your website address/URL and ensure it starts with HTTPS:// once loaded, which means you are secure. Speak with your domain provider about an SSL Certificate if your site is not secure." },
+  "c-img":    { title: "Resize Images to Increase Website Speed",
+               text: "You may have a beautiful image from your region on your homepage but if that image is more than 500 KB it is\nloading slow and testing the patience of your visitors. Use Adobe Spark to resize images that are over 500 KB." },
+  "c-faq":    { title: "Add a Frequently Asked Questions (FAQ) Section",
+               text: "Add FAQ sections to your website addressing common client questions. FAQs not only provide quick answers for prospects but also improve search visibility and support AEO by giving AI tools clear, structured information to reference. FMG includes an FAQ module you can use to easily build and manage this section on your site." },
+  "c-nav":    { title: "Keep the Navigation Simple and Under 6 Options",
+               text: "Ensure your website has a simple layout and top navigation so visitors can easily find information about your\nbusiness, your team and the services you provide. Use OnceHub to schedule meetings online." },
+  "c-cta":    { title: "Use Descriptive CTA's",
+               text: "Your homepage should include prominent call to actions (CTAs), with links to your account tools for clients and contact information for prospects. using benefit-based headlines that convey what a person can gain, learn or benefit from working with you." },
+  "c-res":    { title: "Write a Blog For Your Website",
+               text: "Writing a blog boosts local search, builds thought leadership, and supports AEO so your expertise appears in AI-driven answers. MarketingCentral makes it simple to post articles to your blog, helping you stay visible in both search engines and AI tools." },
+  "c-pho":    { title: "Use High Quality Photos to Improve your Site",
+               text: "Stock photography is a very helpful tool to filling out a web page's content but it is also a key reason visitors will leave your website.  Photos should be professional and not look too staged, should look similiar and should never repeat across pages unless they are for the same content." },
+  "c-lnk":    { title: "Encourage Prospects to Browse More Pages",
+               text: "Your unique value proposition should be prominent to capture a prospect's attention immediately. Furthermore,\nsocial media has changed how people scroll through web pages. Now, longer pages are considered better.\nConsider adding a section on the homepage for every page of your site." },
+  "c-hdl":    { title: "Write Benefit Based Headlines",
+               text: "Writing good headlines is also an important part of helping your prosepcts engage with your brand.  Prospects are looking to solve a problem or find a solution and using benefit-based headlines convey what a person can gain, learn or benefit from by working with you." },
+  "c-pst":    { title: "Post Frequently to Establish Yourself as a Thought Leader",
+               text: "Post on social media 2–3 times per week to stay visible and relevant. Frequent, consistent posting not only helps you compete for space in client feeds but also signals credibility to search engines and AI tools. MarketingCentral offers automated campaigns and pre-scheduled content to make hitting this frequency easier." },
+  "c-bhd":    { title: "Use Consistent Branding Across Your Digital Properties",
+               text: "Building branded headers that match your website helps your social media visitors know they are at the trusted source for your business and reinforces your brand." },
+  "c-sum":    { title: "Update the Contact and Summary Content on Your Pages",
+               text: "Write a keyword-rich summary for your social profiles that includes your company name, services, and unique value proposition. Tailor it to character limits and use headlines to showcase your strengths. Consistent, optimized profiles improve visibility and support AEO by helping AI tools recognize and reference your firm." },
+  "c-cni":    { title: "Update Your Contact Information to Be Found",
+               text: "One of the ways a referral to your company will explore your offering is via their preferred social media platform. Keeping your contact information up to date can ensure a client or prospect can connect with your office." },
+  "c-url":    { title: "Change Your Social Media URL",
+               text: "Customize your social media profile URLs to include your company name (e.g., facebook.com/Name). Branded URLs make your profiles easier to find, strengthen credibility, and create consistency across platforms. This consistency helps AI tools and search engines clearly identify and reference your firm, supporting stronger AEO." },
+  "c-lgp":    { title: "Match Your Profile to Your Brand",
+               text: "Keep your social media profile pages updated with your logo or a headhsot if you are a single-advisor office." },
+  "c-sln":    { title: "Link Your Social Channels from Your Website",
+               text: "Ensure your website includes links to your social media accounts and vice-versa to make it easy to connect with you across multiple channels." },
+  "c-tag":    { title: "Create Posts that Drive Traffic and Engagement",
+               text: "Tag centers of influence, community organizations, and relevant individuals in your social media posts to expand reach and spark engagement. Combine tags with relevant hashtags to boost discoverability, appear in more feeds, and strengthen both visibility and credibility." }
+};
+
+// Checks with no approved copy yet. Page 2 will not print invented language
+// for these, so they are passed over when the six are chosen and named in the
+// app so the sheet can be completed.
+const GTEXT_MISSING = [
+  'c-gbp-d', 'c-gbp-p', 'c-aicite', 'c-da5', 'c-sch',
+  'c-hli', 'c-hfb', 'c-hig', 'c-hyt',
+  // Has a row in the sheet, but the Action Title and text cells are both
+  // empty. A blank entry is not approved copy, so it waits with the rest
+  // rather than printing two empty strings on a client page.
+  'c-szp'
+];
 
 // ── page 2 · priorities ──────────────────────────────────────────────────────
 function priorities(d, logoPurple) {
@@ -3528,7 +3770,7 @@ function priorities(d, logoPurple) {
           // pushed the report to six pages; the box it came from is named in the
           // title, and the question is on its own scorecard page.
           { text: a.title, font: 'Body', bold: true, fontSize: 10.5, color: RC.purple, margin: [0, 2, 0, 4] },
-          { text: a.why, font: 'Body', fontSize: 9, color: RC.gray, lineHeight: 1.38, margin: [0, 0, 0, 5] },
+          { text: a.why, font: 'Body', fontSize: 8.9, color: RC.gray, lineHeight: 1.38, margin: [0, 0, 0, 5] },
           { text: [a.cat, ' · ', a.effort, a.aeo ? ' · Impacts AEO' : ''].join(''),
             font: 'Body', fontSize: 7.8, color: RC.grayMid }
         ].filter(Boolean) }
@@ -3537,7 +3779,7 @@ function priorities(d, logoPurple) {
 
   return [
     { columns: [
-        { text: 'Do these six things first', font: 'Display', fontSize: 21, color: RC.purple, width: '*' },
+        { text: `Do these ${TOP_N_WORD} things first`, font: 'Display', fontSize: 21, color: RC.purple, width: '*' },
         { svg: logoPurple, width: 95, alignment: 'right' }
       ], margin: [0, 0, 0, 16] },
     rule(CONTENT),
@@ -3545,8 +3787,8 @@ function priorities(d, logoPurple) {
       layout: {
         hLineWidth: (i, node) => (i === 0 || i === node.table.body.length) ? 0 : 0.6,
         vLineWidth: () => 0, hLineColor: () => RC.g200,
-        paddingTop: () => 11, paddingBottom: () => 11, paddingLeft: () => 0, paddingRight: () => 0
-      }, margin: [0, 4, 0, 18] },
+        paddingTop: () => 10, paddingBottom: () => 10, paddingLeft: () => 0, paddingRight: () => 0
+      }, margin: [0, 4, 0, 16] },
 
     { table: { widths: ['*'], body: [[{
         columns: [
@@ -3556,7 +3798,7 @@ function priorities(d, logoPurple) {
               { width: 26, text: String(d.projected), font: 'Display', bold: true, fontSize: 19, color: RC.purple }
             ], columnGap: 9 },
           { width: '*', text: [
-              'Completing all six moves this firm from ',
+              `Completing all ${TOP_N_WORD} moves this firm from `,
               { text: d.scores.band, bold: true }, ' into the ',
               { text: d.projectedBand, bold: true }, ' band.'
             ], font: 'Body', fontSize: 9.5, color: '#1F2A33', lineHeight: 1.4, margin: [0, 3, 0, 0] }
@@ -3612,17 +3854,33 @@ function scorecard(sec, logoPurple) {
     ];
   };
 
+  // A failing row is the reason the page exists, and in a column of fifteen it
+  // was one bold line among fourteen others -- the reader had to hunt for the
+  // magenta mark. It now gets a tint and a magenta edge, so the things needing
+  // work can be counted from across a desk.
+  //
+  // Unmeasured gets its own amber tint rather than sharing the failure one: the
+  // whole point of that state is that it is NOT a failure, and washing both in
+  // the same colour would undo the distinction the audit is built on.
+  const ROW_FILL = { fail: '#FBEEF5', unknown: '#FFFBEB' };
+  const ROW_EDGE = { fail: RC.magenta, unknown: RC.gold };
+
   const group = g => [
     { text: g.name.toUpperCase(), font: 'Body', bold: true, fontSize: 7, color: RC.grayMid,
       characterSpacing: .9, margin: [0, 0, 0, 5] },
     { canvas: [{ type: 'rect', x: 0, y: 0, w: 232, h: 1.6, color: RC.purple }], margin: [0, 0, 0, 4] },
     { table: { widths: [12, '*', 18], body: g.items.map(item) },
-      layout: { hLineWidth: (i, node) => i === 0 ? 0 : 0.5, vLineWidth: () => 0,
+      layout: { hLineWidth: (i, node) => i === 0 ? 0 : 0.5,
+                // A 2pt edge down the left of a flagged row, drawn as the
+                // table's own left border so it lines up with the fill.
+                vLineWidth: (i, node) => i === 0 ? 2 : 0,
+                vLineColor: (i, node, r) => ROW_EDGE[g.items[r] && g.items[r].state] || '#FFFFFF',
                 hLineColor: () => RC.g100, paddingTop: () => 5, paddingBottom: () => 5,
+                fillColor: (i) => (g.items[i] && ROW_FILL[g.items[i].state]) || null,
                 // Column 1 is the question: it needs a real gutter or it prints
-                // over the mark beside it.
-                paddingLeft: i => i === 1 ? 7 : 0,
-                paddingRight: i => i === 1 ? 5 : 0 } }
+                // over the mark beside it. Columns shift right to clear the edge.
+                paddingLeft: i => i === 0 ? 5 : i === 1 ? 7 : 0,
+                paddingRight: i => i === 1 ? 5 : 3 } }
   ];
 
   const cols = sec.groups.map(g => ({ width: '*', stack: group(g) }));
@@ -3632,7 +3890,13 @@ function scorecard(sec, logoPurple) {
         { width: '*', text: sec.name, font: 'Display', fontSize: 21, color: RC.purple },
         { width: 128, stack: [
             { text: `${sec.weight}% of overall score`, font: 'Body', fontSize: 8, color: RC.grayMid, alignment: 'right' },
-            { text: `${sec.passed} of ${sec.total} KPIs passed`, font: 'Body', fontSize: 8, color: RC.grayMid, alignment: 'right' }
+            { text: [
+                { text: `${sec.passed} of ${sec.total} KPIs passed` },
+                ...(sec.total - sec.passed > 0
+                  ? [{ text: `  ·  ${sec.total - sec.passed} need work`,
+                       color: RC.magenta, bold: true }]
+                  : [])
+              ], font: 'Body', fontSize: 8, color: RC.grayMid, alignment: 'right' }
           ], margin: [0, 3, 8, 0] },
         { width: 88, svg: logoPurple, alignment: 'right' }
       ], columnGap: 0, margin: [0, 0, 0, 14] },
@@ -3655,13 +3919,20 @@ function scorecard(sec, logoPurple) {
     { columns: sec.tiles.map(tile), columnGap: 12, margin: [0, 0, 0, 18] },
     { columns: cols, columnGap: 24 },
 
+    // "Not measured" is dropped from the legend on a page that has none -- it
+    // was explaining a mark the reader never sees. It stays on a page that DOES
+    // have one, because an unexplained "?" beside a question is worse than a
+    // legend entry: the whole point of that mark is that the check was not
+    // failed, and without the key it reads as one.
     { columns: [
         { width: 11, ...chip('pass', 11) },
         { width: 40, text: 'Passed', font: 'Body', fontSize: 7.4, color: RC.gray, margin: [4, 1.5, 0, 0] },
         { width: 11, ...chip('fail', 11) },
         { width: 58, text: 'Needs work', font: 'Body', fontSize: 7.4, color: RC.gray, margin: [4, 1.5, 0, 0] },
-        { width: 11, ...chip('unknown', 11) },
-        { width: 68, text: 'Not measured', font: 'Body', fontSize: 7.4, color: RC.gray, margin: [4, 1.5, 0, 0] },
+        ...(sec.groups.some(g => g.items.some(k => k.state === 'unknown')) ? [
+          { width: 11, ...chip('unknown', 11) },
+          { width: 68, text: 'Not measured', font: 'Body', fontSize: 7.4, color: RC.gray, margin: [4, 1.5, 0, 0] }
+        ] : []),
         { width: '*', text: sec.legend || '', font: 'Body', fontSize: 7.4, color: RC.grayMid, margin: [0, 1.5, 0, 0] }
       ], columnGap: 0, margin: [0, 14, 0, 0] },
 
@@ -3688,8 +3959,19 @@ function buildReportDoc(d, assets) {
     pageOrientation: 'portrait',
     pageMargins: [M, M, M, 58],
     info: { title: `Digital Audit — ${d.firm}`, author: 'Cetera GrowthLine' },
+    // The cover art is 1920x1080 -- 16:9 landscape. Forcing it into a 612x792
+    // portrait page squeezed it horizontally by 2.3x, which is why the Cetera
+    // mark's circles came out as tall ellipses. Giving both width and height
+    // is what does that: pdfmake stretches to fit rather than preserving the
+    // aspect ratio.
+    //
+    // So scale it by HEIGHT only and let the width fall where it must, then
+    // slide it left so the page shows a crop of a correctly-proportioned
+    // image. Nothing is distorted because nothing is being squeezed; the part
+    // that does not fit is simply off the page, which is what the mark's
+    // stretched arcs were doing to the design anyway.
     background: page => page === 1
-      ? { image: 'cover', width: PAGE_W, height: 792 }
+      ? { image: 'cover', width: COVER_W, absolutePosition: { x: COVER_X, y: 0 } }
       : { canvas: [{ type: 'rect', x: 0, y: 786, w: PAGE_W, h: 6, color: RC.purple }] },
     footer: page => page === 1 ? null : ({
       columns: [
@@ -3721,8 +4003,20 @@ function assembleReport() {
   const dirs = AD.directories || null;
 
   const failed = failedChecks();
-  const top6   = failed.slice(0, 6);
-  const gain   = top6.reduce((a, c) => a + c.pts * CAT_WEIGHT[c.cat] * (100 - SCORE_FLOOR) / 100, 0);
+  // Only checks with approved copy can reach page 2. A recommendation there is
+  // a commitment the firm may act on, so a gap in the sheet is passed over
+  // rather than filled with language the tool wrote for itself. The skipped
+  // ones are reported, so the sheet gets completed instead of the gap being
+  // quietly absorbed.
+  const eligible = failed.filter(c => GTEXT[c.id]);
+  const skipped  = failed.filter(c => !GTEXT[c.id]).slice(0, TOP_N);
+  if (skipped.length) {
+    console.warn('Page 2 passed over these failed checks — no approved copy in the sheet: ' +
+      skipped.map(c => c.id + ' (' + c.label + ')').join(', '));
+  }
+  AD.gtextSkipped = skipped.map(c => c.label);
+  const top6   = eligible.slice(0, TOP_N);
+  const gain   = top6.reduce((a, c) => a + scoreImpact(c), 0);
   const projected = Math.min(100, Math.round(s.overall + gain));
 
   const section = (cat, tiles) => {
@@ -3769,10 +4063,12 @@ function assembleReport() {
       // from. It used to be the first sentence of the action, which for a
       // one-sentence action is the action — so the row printed the same text
       // twice and read as though it had been invented.
-      title: c.label,
+      // Both come from the approved sheet, verbatim. top6 only ever contains
+      // checks that have a row, so there is no fallback here to write copy.
+      title: GTEXT[c.id].title,
       q:     c.q,
-      why:   c.action,
-      pts:   Math.max(1, Math.round(c.pts * CAT_WEIGHT[c.cat] * (100 - SCORE_FLOOR) / 100)),
+      why:   GTEXT[c.id].text,
+      pts:   Math.max(1, Math.round(scoreImpact(c))),
       cat:   CAT_NAME[c.cat], effort: EFFORT_LABEL[c.effort], aeo: !!c.aeo
     })),
     sections: [

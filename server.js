@@ -5,7 +5,7 @@ const app  = express();
 // Bumped whenever a build is handed over. /health reports it so the app can
 // tell the user their page and their proxy are different vintages -- the
 // failure mode is a fix that silently is not there.
-const BUILD = '2026-09-29.2';
+const BUILD = '2026-09-30.2';
 const PORT = process.env.PORT || 3001;
 
 // Every one of these is trimmed. A key pasted into a hosting panel's env
@@ -112,9 +112,29 @@ function dfsAuth() {
   return 'Basic ' + Buffer.from(DFS_LOGIN + ':' + DFS_PASSWORD).toString('base64');
 }
 
-async function dfsPost(path, body) {
+// DataForSEO's "live" endpoints are not lookups against a prepared index --
+// they go and scrape on demand while the request is open. my_business_info in
+// particular routinely runs past half a minute, so a flat 25s cut it off every
+// time and a retry hit exactly the same wall: the call was never failing, it
+// was being abandoned.
+//
+// The timeout is therefore per-call, and a slow endpoint gets a window that
+// matches how it actually behaves rather than one number for everything.
+const DFS_TIMEOUT_DEFAULT = 25000;
+// A host with its own hard request cap needs these shorter than the endpoint
+// would like, and the suite needs them short enough to run. One knob, applied
+// to every DataForSEO call, rather than each site guessing.
+const DFS_TIMEOUT_SCALE = parseFloat(process.env.DFS_TIMEOUT_SCALE || '1') || 1;
+
+async function dfsPost(path, body, opts) {
+  const ms = Math.round(((opts && opts.timeout) || DFS_TIMEOUT_DEFAULT) * DFS_TIMEOUT_SCALE);
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 25000);
+  // abort() with no reason produces a DOMException reading "This operation was
+  // aborted", which tells the user nothing about what happened or what to do.
+  // The reason is carried through so the catch can say what actually went on.
+  const timeout = setTimeout(
+    () => controller.abort(new Error('DataForSEO did not answer within ' +
+      Math.round(ms / 1000) + 's (' + path + ')')), ms);
   try {
     const r = await fetch(DFS_BASE + path, {
       method:  'POST',
@@ -126,6 +146,15 @@ async function dfsPost(path, body) {
     return r.json();
   } catch(e) {
     clearTimeout(timeout);
+    if (controller.signal.aborted) {
+      const why = controller.signal.reason;
+      const err = new Error(
+        (why && why.message ? why.message : 'DataForSEO timed out after ' + Math.round(ms / 1000) + 's') +
+        ' — this endpoint scrapes on demand and is slow, so running it again ' +
+        'usually hits the same limit rather than fixing it');
+      err.timedOut = true;
+      throw err;
+    }
     throw e;
   }
 }
@@ -1089,7 +1118,8 @@ async function onPageHtml(url) {
   const tried = [];
   for (const a of attempts) {
     let d;
-    try { d = await dfsPost(a.path, [a.body]); }
+    // Also a live crawl, and with JavaScript rendering on it is not quick.
+    try { d = await dfsPost(a.path, [a.body], { timeout: 60000 }); }
     catch (e) { tried.push(a.path + ' → ' + e.message); continue; }
     const task = d?.tasks?.[0];
     if (d?.status_code && d.status_code !== 20000) {
@@ -1147,7 +1177,7 @@ async function onPageFetch(url, opts) {
     url,
     enable_javascript: (opts && opts.js) !== false,
     load_resources: false
-  }]);
+  }], { timeout: 60000 });
   if (d && d.status_code && d.status_code !== 20000)
     return { error: 'DataForSEO ' + d.status_code + ': ' + d.status_message };
   const task = d?.tasks?.[0];
@@ -1261,7 +1291,7 @@ async function indexedPages(domain, opts) {
     location_code: 2840,
     language_code: 'en',
     depth: 20
-  }]);
+  }], { timeout: 45000 });
   if (d?.status_code && d.status_code !== 20000)
     return { error: 'DataForSEO ' + d.status_code + ': ' + d.status_message };
   const task = d?.tasks?.[0];
@@ -2128,13 +2158,14 @@ app.get('/gbp/info', async (req, res) => {
   if (!name) return res.status(400).json({ error: 'name required' });
   if (!DFS_LOGIN) return res.status(500).json({ error: 'DataForSEO not configured' });
   try {
+    // The slowest call in the audit: Google Business data is fetched live.
     const d = await dfsPost('/business_data/google/my_business_info/live', [
       {
         keyword:       name,
         location_name: location || 'United States',
         language_name: 'English'
       }
-    ]);
+    ], { timeout: 90000 });
     console.log('DFS GBP full response:', JSON.stringify(d)?.slice(0, 400));
     // Top-level DataForSEO error (auth, credits, access) — catches what the
     // task-level check below misses when there are no tasks at all.
