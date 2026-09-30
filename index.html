@@ -659,8 +659,16 @@ textarea{resize:vertical;min-height:60px}
 
 <!-- ═══ HISTORY PAGE ═════════════════════════════════════════════════════════ -->
 <div class="page" id="page-history">
-  <div class="ph" style="padding-bottom:18px"><div class="ph-t">History</div><div class="ph-s">Saved in this browser</div></div>
-  <div class="pb"><div id="histList"></div></div>
+  <div class="ph" style="padding-bottom:18px"><div class="ph-t">History</div><div class="ph-s">Every audit, searchable by client</div></div>
+  <div class="pb">
+    <div class="fg" style="max-width:420px">
+      <label>Find a client</label>
+      <input type="text" id="hist-q" placeholder="firm name or domain — leave empty for the most recent"
+             oninput="histSearch()"/>
+    </div>
+    <div id="hist-msg" style="font-size:12px;color:var(--text3);margin:-4px 0 12px"></div>
+    <div id="histList"></div>
+  </div>
 </div>
 
 <!-- ═══ SETTINGS PAGE ════════════════════════════════════════════════════════ -->
@@ -822,7 +830,7 @@ textarea{resize:vertical;min-height:60px}
 // different vintages. Both carry the same stamp and the app compares them,
 // because "did you upload both files?" is not something anyone should have
 // to remember -- and a half-upload looks exactly like a fix that did not work.
-const BUILD = '2026-09-30.2';
+const BUILD = '2026-09-30.4';
 const DEFAULT_PROXY = 'https://jimmy-digital-audit.onrender.com';
 let AD = {}; // audit data store
 
@@ -841,7 +849,9 @@ const STEP_DEFS = [
 ];
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
-window.onload = () => { loadSettings(); renderHist(); recalc(); renderApproval(); };
+// renderHist now talks to the proxy, so it runs when the History tab is
+// opened rather than on every page load.
+window.onload = () => { loadSettings(); recalc(); renderApproval(); };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const ls  = (k,v) => localStorage.setItem(k,v);
@@ -4202,8 +4212,28 @@ async function downloadReportPDF() {
     const doc = buildReportDoc(d, { logoWhite: A.logoWhite, logoPurple: A.logoPurple, coverBg: A.cover });
     const name = 'Digital Audit - ' + (d.firm || 'Client') + ' - ' +
                  new Date().toLocaleDateString('en-US', { month:'long', year:'numeric' }) + '.pdf';
-    await new Promise(res => pdfMake.createPdf(doc).download(name, res));
+    const pdf = pdfMake.createPdf(doc);
+    await new Promise(res => pdf.download(name, res));
     if (msg) { msg.style.color = 'var(--green)'; msg.textContent = 'Downloaded ' + name; }
+
+    // File it centrally, with the exact bytes the client just received. The
+    // download has already happened, so a filing failure is reported but never
+    // costs the report -- and the local copy is written either way.
+    saveHist();
+    try {
+      const b64 = await new Promise(r => pdf.getBase64(x => r(x)));
+      const f = await fileAudit(b64);
+      if (msg) msg.textContent = 'Downloaded ' + name + ' · filed to history';
+      console.log('Filed audit', f.id, 'under', f.domain);
+    } catch (e) {
+      console.error('History save failed:', e.message);
+      if (msg) {
+        msg.style.color = '#b45309';
+        msg.textContent = 'Downloaded ' + name +
+          ' — but it could not be filed to history: ' + e.message +
+          '. It is saved in this browser only.';
+      }
+    }
   } catch (e) {
     console.error('PDF error:', e);
     if (msg) { msg.style.color = 'var(--red)'; msg.textContent = 'Could not build the PDF: ' + e.message; }
@@ -4321,6 +4351,56 @@ async function pushAirtable() {
 }
 
 // ── History ───────────────────────────────────────────────────────────────────
+//
+// Two things are kept per audit, because they answer different questions:
+//
+//   state   everything needed to REBUILD this audit -- AD, the 40 check
+//           states, the unmeasured reasons, the notes and handles. About 14KB.
+//           This is what lets a consultant reopen a run six months later, fix
+//           a box and regenerate.
+//   pdf     the file the client actually received. A regenerated report is
+//           built by whatever the code does today, which is not necessarily
+//           what was sent in March -- and "what did we tell them" has one
+//           right answer.
+//
+// The local copy stays as a fallback: a failed save must never be the only
+// thing standing between a finished audit and losing it.
+
+// Everything that has to survive to rebuild this audit. Kept explicit rather
+// than scraping the DOM at load time, so a field added later is a deliberate
+// addition here rather than something silently missing from old records.
+const STATE_FIELDS = ['clientName','clientURL','clientCity','atRecordId',
+                      'h-fb','h-li','h-ig','h-yt','n-vis','n-web','n-soc',
+                      'adj-v','adj-w','adj-s','adjr-v','adjr-w','adjr-s',
+                      'man-spd','man-sz','man-ps','preparer'];
+
+function auditState() {
+  return {
+    v: 1,                                   // so an old record can be read later
+    AD,
+    // Keyed off CHECKS, not a '.ci input' selector: the approval tab has its own
+    // .ci checkbox for acknowledging unmeasured items, and a selector would
+    // sweep that up as though it were a 41st audit answer.
+    checks: CHECKS.map(c => [c.id, !!(document.getElementById(c.id) || {}).checked]),
+    unk:    [...UNK.entries()],
+    direct: [...DIRECT],
+    fields: STATE_FIELDS.map(id => [id, (document.getElementById(id) || {}).value || ''])
+  };
+}
+
+function applyState(st) {
+  if (!st) return;
+  AD = st.AD || {};
+  UNK.clear();   (st.unk    || []).forEach(([k, v]) => UNK.set(k, v));
+  DIRECT.clear();(st.direct || []).forEach(id => DIRECT.add(id));
+  (st.fields || []).forEach(([id, v]) => { const e = document.getElementById(id); if (e) e.value = v; });
+  CHECKS.forEach(c => { const e = document.getElementById(c.id); if (e) e.checked = false; });
+  (st.checks || []).forEach(([id, on]) => { const e = document.getElementById(id); if (e) e.checked = !!on; });
+  recalc();
+}
+
+// The local copy. Unchanged in spirit -- last 50, this browser only -- but it
+// is now the fallback rather than the record.
 function saveHist() {
   const h = JSON.parse(lg('audit_history')||'[]');
   h.unshift({...AD, savedAt: new Date().toISOString()});
@@ -4328,24 +4408,144 @@ function saveHist() {
   ls('audit_history', JSON.stringify(h));
 }
 
-function renderHist() {
-  const el = document.getElementById('histList');
+// Files the audit centrally. `pdfBase64` is optional: an audit worth keeping is
+// worth keeping even if the report was never generated.
+async function fileAudit(pdfBase64, note) {
+  const s = (AD.scores || {});
+  const body = {
+    clientName: getVal('clientName'), clientUrl: getVal('clientURL'),
+    clientCity: getVal('clientCity'), preparedBy: getVal('preparer'),
+    scores: { overall: s.overall, v: s.v, w: s.w, s: s.s },
+    kpisPassed: s.passed, kpisTotal: s.total,
+    build: BUILD, note: note || '',
+    state: auditState(), pdfBase64: pdfBase64 || null
+  };
+  const r = await pf('/history/save', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  const d = await r.json();
+  if (d.error) throw new Error(d.error);
+  return d;
+}
+
+// Reads from the central store, falling back to this browser's copy when the
+// proxy cannot be reached -- an offline consultant should still see their own
+// recent runs rather than an empty page that implies nothing was ever saved.
+let HIST_T = null;
+function histSearch() { clearTimeout(HIST_T); HIST_T = setTimeout(renderHist, 250); }
+
+async function renderHist() {
+  const el  = document.getElementById('histList');
+  const msg = document.getElementById('hist-msg');
   if (!el) return;
-  const h = JSON.parse(lg('audit_history')||'[]');
-  if (!h.length) { el.innerHTML='<div style="color:var(--text3);font-size:13px">No audits saved yet.</div>'; return; }
-  el.innerHTML = h.map(a => `
-    <div class="hi">
-      <div>
-        <div style="font-weight:600;font-size:14px">${a.clientName||'-'}</div>
-        <div style="font-size:12px;color:var(--text3);margin-top:2px">${a.clientURL||''} · ${new Date(a.savedAt).toLocaleDateString()}</div>
-      </div>
-      <div style="display:flex;gap:6px">
-        <span class="badge bgr">${a.scores?.overall??'-'}</span>
-        <span class="badge bg">V:${a.scores?.v??'-'}</span>
-        <span class="badge bp">W:${a.scores?.w??'-'}</span>
-        <span class="badge ba">S:${a.scores?.s??'-'}</span>
-      </div>
-    </div>`).join('');
+  const q = (getVal('hist-q') || '').trim();
+  msg.textContent = 'Looking…';
+
+  let audits = null;
+  try {
+    const r = await pf('/history/list' + (q ? '?q=' + encodeURIComponent(q) : ''));
+    const d = await r.json();
+    if (d.error) throw new Error(d.error);
+    audits = d.audits || [];
+  } catch (e) {
+    console.error('History unavailable:', e.message);
+    const local = JSON.parse(lg('audit_history') || '[]');
+    msg.innerHTML = '<span style="color:#b45309">Central history is unavailable (' +
+      escHtml(e.message) + '). Showing the ' + local.length +
+      ' audit' + (local.length === 1 ? '' : 's') + ' saved in this browser — ' +
+      'these cannot be reopened or re-downloaded.</span>';
+    el.innerHTML = local.length ? local.map(a => `
+      <div class="hi">
+        <div><div style="font-weight:600;font-size:14px">${escHtml(a.clientName || a.name || '-')}</div>
+        <div style="font-size:12px;color:var(--text3);margin-top:2px">${escHtml(a.clientURL || a.url || '')} · ${new Date(a.savedAt).toLocaleDateString()}</div></div>
+        <div style="display:flex;gap:6px"><span class="badge bgr">${a.scores?.overall ?? '-'}</span></div>
+      </div>`).join('') : '<div style="color:var(--text3);font-size:13px">Nothing saved in this browser either.</div>';
+    return;
+  }
+
+  if (!audits.length) {
+    msg.textContent = q ? 'No audits match "' + q + '".' : 'No audits filed yet.';
+    el.innerHTML = '';
+    return;
+  }
+
+  // Grouped by domain, because one firm audited three times is one client with
+  // a history, not three unrelated rows.
+  const byDomain = {};
+  audits.forEach(a => { (byDomain[a.client_domain] = byDomain[a.client_domain] || []).push(a); });
+  const domains = Object.keys(byDomain);
+  msg.textContent = audits.length + ' audit' + (audits.length === 1 ? '' : 's') +
+                    ' across ' + domains.length + ' client' + (domains.length === 1 ? '' : 's') + '.';
+
+  el.innerHTML = domains.map(dom => {
+    const runs = byDomain[dom];
+    // The most recently typed name wins: it is the one the consultant last
+    // thought was right.
+    const label = (runs.find(r => r.client_name) || {}).client_name || dom;
+    return '<div style="margin-bottom:18px">' +
+      '<div style="font-weight:600;font-size:14px">' + escHtml(label) + '</div>' +
+      '<div style="font-size:11px;color:var(--text3);margin:1px 0 6px">' + escHtml(dom) +
+      '  ·  ' + runs.length + ' audit' + (runs.length === 1 ? '' : 's') + '</div>' +
+      runs.map(a => `
+        <div class="hi">
+          <div>
+            <div style="font-size:13px">${new Date(a.created_at).toLocaleString()}</div>
+            <div style="font-size:11px;color:var(--text3);margin-top:2px">
+              ${a.kpis_passed != null ? a.kpis_passed + ' of ' + a.kpis_total + ' KPIs' : ''}
+              ${a.prepared_by ? ' · ' + escHtml(a.prepared_by) : ''}
+              ${a.build ? ' · build ' + escHtml(a.build) : ''}
+              ${a.pdf_path ? '' : ' · no report was generated'}
+            </div>
+          </div>
+          <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+            <span class="badge bgr">${a.score_overall ?? '-'}</span>
+            <span class="badge bg">V:${a.score_v ?? '-'}</span>
+            <span class="badge bp">W:${a.score_w ?? '-'}</span>
+            <span class="badge ba">S:${a.score_s ?? '-'}</span>
+            ${a.pdf_path ? `<button class="btn btn-ghost" style="padding:3px 9px;font-size:11px"
+                onclick="histPdf('${escHtml(a.pdf_path)}')">PDF</button>` : ''}
+            <button class="btn btn-ghost" style="padding:3px 9px;font-size:11px"
+                onclick="histOpen('${a.id}')">Open</button>
+          </div>
+        </div>`).join('') +
+      '</div>';
+  }).join('');
+}
+
+// The delivered file, on a link that expires. These identify a client, so the
+// bucket stays private and the URL is short-lived rather than guessable.
+async function histPdf(path) {
+  const msg = document.getElementById('hist-msg');
+  try {
+    const r = await pf('/history/pdf?path=' + encodeURIComponent(path));
+    const d = await r.json();
+    if (d.error) throw new Error(d.error);
+    window.open(d.url, '_blank');
+  } catch (e) { msg.innerHTML = '<span style="color:var(--red)">Could not fetch that report: ' +
+                                escHtml(e.message) + '</span>'; }
+}
+
+// Loads a past audit back into the tabs, so it can be corrected and re-run.
+// Confirms first: this replaces whatever is on screen.
+async function histOpen(id) {
+  const msg = document.getElementById('hist-msg');
+  // Same reason as auditState: the approval acknowledgement is a .ci input too,
+  // and ticking it should not count as unsaved audit work.
+  const dirty = getVal('clientURL') ||
+    CHECKS.some(c => (document.getElementById(c.id) || {}).checked);
+  if (dirty && !confirm('Open this audit? It replaces what is currently on the audit tabs.')) return;
+  msg.textContent = 'Loading…';
+  try {
+    const r = await pf('/history/get?id=' + encodeURIComponent(id));
+    const d = await r.json();
+    if (d.error) throw new Error(d.error);
+    applyState(d.state);
+    showPage('audit'); st('setup');
+    toast('Loaded audit from ' + new Date(d.created_at).toLocaleDateString());
+    msg.textContent = '';
+  } catch (e) { msg.innerHTML = '<span style="color:var(--red)">Could not open it: ' +
+                                escHtml(e.message) + '</span>'; }
 }
 
 // ── Clear ─────────────────────────────────────────────────────────────────────

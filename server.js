@@ -5,7 +5,7 @@ const app  = express();
 // Bumped whenever a build is handed over. /health reports it so the app can
 // tell the user their page and their proxy are different vintages -- the
 // failure mode is a fix that silently is not there.
-const BUILD = '2026-09-30.2';
+const BUILD = '2026-09-30.4';
 const PORT = process.env.PORT || 3001;
 
 // Every one of these is trimmed. A key pasted into a hosting panel's env
@@ -88,6 +88,15 @@ function pickModel(requested) {
 const AUDIT_KEY     = (process.env.AUDIT_KEY   || '').trim();   // shared secret the app must send
 const ANTHROPIC_KEY = env('ANTHROPIC_KEY');    // AI reviews, server-side
 const AIRTABLE_TOKEN= env('AIRTABLE_TOKEN');   // Airtable push, server-side
+
+// Audit history. The SERVICE key lives here and never reaches the browser: the
+// app talks to this proxy, which is already gated by AUDIT_KEY, and the proxy
+// talks to Supabase. Row level security is on with no policies, so even if a
+// publishable key leaked into the front end it could read nothing -- the
+// service key is the only way in, and it is only ever on this side.
+const SUPABASE_URL = env('SUPABASE_URL').replace(/\/+$/, '');
+const SUPABASE_KEY = env('SUPABASE_SERVICE_KEY');
+const HIST_BUCKET  = 'audit-reports';
 
 app.use(cors({ origin: '*', methods: ['GET','POST','OPTIONS'], allowedHeaders: ['Content-Type','Authorization','X-Audit-Key'] }));
 app.options('*', cors());
@@ -554,7 +563,8 @@ function rootDomain(u) {
 app.get('/health', (req, res) => res.json({ ok: true, dfs: !!DFS_LOGIN,
   sem: !!(SEM_KEY_V3 || SEM_KEY_V4), semV3: !!SEM_KEY_V3, semV4: !!SEM_KEY_V4,
   sf: !!SF_KEY, ai: !!ANTHROPIC_KEY, at: !!AIRTABLE_TOKEN, google: !!GOOGLE_KEY,
-  locked: !!AUDIT_KEY, model: AI_MODEL, build: BUILD }));
+  locked: !!AUDIT_KEY, model: AI_MODEL, build: BUILD,
+  history: !!(SUPABASE_URL && SUPABASE_KEY) }));
 
 // ── SEMrush diagnostics ───────────────────────────────────────────────────────
 // Probes every candidate v4 route and reports what each one answered. v4 is
@@ -1945,6 +1955,174 @@ app.get('/site/schema', async (req, res) => {
     const msg = e.name === 'TimeoutError' ? 'timed out fetching the page' : e.message;
     console.error('schema error:', msg);
     res.status(500).json({ error: msg });
+  }
+});
+
+// ── Audit history ─────────────────────────────────────────────────────────────
+//
+// Two things are kept per audit, because they answer different questions:
+//
+//   state   the ~14KB needed to REBUILD the audit -- reopen it, fix a box,
+//           re-run a step, regenerate the report.
+//   pdf     the ~300KB file the client actually received. A regenerated report
+//           is built by whatever the code does today, which is not necessarily
+//           what was sent in March. In a compliance-adjacent context "what did
+//           we tell them" has one right answer, and only the stored file is it.
+//
+// Everything here goes through this proxy. The browser never holds a Supabase
+// key of any kind.
+
+// A client is identified by DOMAIN, never by the name typed into the form --
+// "Totus wealth Managment" and "Totus Wealth Management" are the same firm and
+// must not become two histories.
+function auditDomain(url, fallback) {
+  let v = String(url || fallback || '').trim().toLowerCase();
+  if (!v) return '';
+  v = v.replace(/^https?:\/\//, '').replace(/^www\./, '');
+  return v.split(/[\/?#]/)[0];
+}
+
+async function sbFetch(path, opts) {
+  if (!SUPABASE_URL || !SUPABASE_KEY) {
+    const e = new Error('History is not configured on the proxy — set SUPABASE_URL and SUPABASE_SERVICE_KEY');
+    e.unconfigured = true; throw e;
+  }
+  const o = opts || {};
+  // Supabase now issues two kinds of key and they are NOT sent the same way.
+  //
+  //   legacy  service_role, a JWT starting "eyJ". Goes on both headers, which
+  //           is what every older example shows.
+  //   new     sb_secret_..., which is NOT a JWT. Supabase's own docs are
+  //           explicit: "You cannot send a publishable or secret key in the
+  //           Authorization: Bearer header. Send it on the apikey header
+  //           instead." Sent on both, the platform tries to parse it as a JWT
+  //           and rejects the request.
+  //
+  // The apikey header is correct for both, so it is always set, and the
+  // Authorization header is added only for a key that really is a JWT.
+  const isJwt = /^eyJ/.test(SUPABASE_KEY);
+  const auth  = { apikey: SUPABASE_KEY };
+  if (isJwt) auth.Authorization = 'Bearer ' + SUPABASE_KEY;
+
+  const r = await fetch(SUPABASE_URL + path, {
+    method: o.method || 'GET',
+    headers: Object.assign(auth, o.headers || {}),
+    body: o.body,
+    signal: AbortSignal.timeout(o.timeout || 20000)
+  });
+  if (!r.ok) {
+    const t = await r.text().catch(() => '');
+    throw new Error('Supabase ' + r.status + ': ' + t.slice(0, 300));
+  }
+  return r;
+}
+
+const sbJson = async (path, opts) => (await sbFetch(path, Object.assign({
+  headers: Object.assign({ 'Content-Type': 'application/json' }, (opts || {}).headers || {})
+}, opts))).json();
+
+// Save one audit. The PDF arrives base64 in the same request so a save is
+// atomic from the app's point of view: it cannot end up with a row whose file
+// never uploaded, because the row is written last.
+app.post('/history/save', express.json({ limit: '25mb' }), async (req, res) => {
+  const b = req.body || {};
+  const domain = auditDomain(b.clientUrl, b.clientDomain);
+  if (!domain) return res.status(400).json({ error: 'a client URL is required to file an audit' });
+  if (!b.state)  return res.status(400).json({ error: 'no audit state supplied' });
+
+  try {
+    let pdfPath = null, pdfBytes = null;
+    if (b.pdfBase64) {
+      const buf = Buffer.from(b.pdfBase64, 'base64');
+      // Foldered by domain so a firm's reports sit together in the bucket, and
+      // stamped so two runs on the same day do not overwrite each other.
+      pdfPath = domain + '/' + new Date().toISOString().replace(/[:.]/g, '-') + '.pdf';
+      await sbFetch('/storage/v1/object/' + HIST_BUCKET + '/' + encodeURI(pdfPath), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/pdf', 'x-upsert': 'true' },
+        body: buf, timeout: 60000
+      });
+      pdfBytes = buf.length;
+    }
+
+    const row = {
+      client_domain: domain,
+      client_name:   String(b.clientName || '').slice(0, 300),
+      client_url:    String(b.clientUrl  || '').slice(0, 600),
+      client_city:   String(b.clientCity || '').slice(0, 300),
+      score_overall: b.scores ? b.scores.overall : null,
+      score_v:       b.scores ? b.scores.v : null,
+      score_w:       b.scores ? b.scores.w : null,
+      score_s:       b.scores ? b.scores.s : null,
+      kpis_passed:   b.kpisPassed ?? null,
+      kpis_total:    b.kpisTotal ?? null,
+      state:         b.state,
+      pdf_path:      pdfPath,
+      pdf_bytes:     pdfBytes,
+      prepared_by:   String(b.preparedBy || '').slice(0, 200),
+      build:         String(b.build || '').slice(0, 40),
+      note:          String(b.note || '').slice(0, 1000)
+    };
+    const saved = await sbJson('/rest/v1/audits', {
+      method: 'POST',
+      headers: { Prefer: 'return=representation' },
+      body: JSON.stringify(row)
+    });
+    res.json({ ok: true, id: saved[0] && saved[0].id, domain, pdfPath, pdfBytes });
+  } catch (e) {
+    console.error('history save error:', e.message);
+    res.status(e.unconfigured ? 501 : 502).json({ error: e.message });
+  }
+});
+
+// The history list. Deliberately does NOT select `state`: 200 audits of 14KB
+// each is 3MB to render a list of names.
+app.get('/history/list', async (req, res) => {
+  const q = String(req.query.q || '').trim();
+  const cols = 'id,created_at,client_domain,client_name,client_url,score_overall,' +
+               'score_v,score_w,score_s,kpis_passed,kpis_total,pdf_path,pdf_bytes,prepared_by,build';
+  let path = '/rest/v1/audits?select=' + cols + '&order=created_at.desc&limit=' +
+             Math.min(parseInt(req.query.limit, 10) || 100, 500);
+  if (q) {
+    // Search the domain OR the typed name, so both "totuswm" and "Totus" find it.
+    const like = '*' + q.replace(/[*,()]/g, '') + '*';
+    path += '&or=(client_domain.ilike.' + encodeURIComponent(like) +
+            ',client_name.ilike.' + encodeURIComponent(like) + ')';
+  }
+  try { res.json({ audits: await sbJson(path) }); }
+  catch (e) {
+    console.error('history list error:', e.message);
+    res.status(e.unconfigured ? 501 : 502).json({ error: e.message });
+  }
+});
+
+// One audit, with its state, for reopening.
+app.get('/history/get', async (req, res) => {
+  const id = String(req.query.id || '');
+  if (!/^[0-9a-f-]{36}$/i.test(id)) return res.status(400).json({ error: 'a valid audit id is required' });
+  try {
+    const rows = await sbJson('/rest/v1/audits?id=eq.' + id + '&select=*&limit=1');
+    if (!rows.length) return res.status(404).json({ error: 'no audit with that id' });
+    res.json(rows[0]);
+  } catch (e) {
+    console.error('history get error:', e.message);
+    res.status(e.unconfigured ? 501 : 502).json({ error: e.message });
+  }
+});
+
+// The stored PDF. Signed for ten minutes rather than made public: these are
+// client-identifying documents and the bucket stays private.
+app.get('/history/pdf', async (req, res) => {
+  const p = String(req.query.path || '');
+  if (!p || p.includes('..')) return res.status(400).json({ error: 'a valid report path is required' });
+  try {
+    const d = await sbJson('/storage/v1/object/sign/' + HIST_BUCKET + '/' + encodeURI(p), {
+      method: 'POST', body: JSON.stringify({ expiresIn: 600 })
+    });
+    res.json({ url: SUPABASE_URL + '/storage/v1' + d.signedURL });
+  } catch (e) {
+    console.error('history pdf error:', e.message);
+    res.status(e.unconfigured ? 501 : 502).json({ error: e.message });
   }
 });
 
