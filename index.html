@@ -830,7 +830,7 @@ textarea{resize:vertical;min-height:60px}
 // different vintages. Both carry the same stamp and the app compares them,
 // because "did you upload both files?" is not something anyone should have
 // to remember -- and a half-upload looks exactly like a fix that did not work.
-const BUILD = '2026-09-30.6';
+const BUILD = '2026-09-30.7';
 const DEFAULT_PROXY = 'https://jimmy-digital-audit.onrender.com';
 let AD = {}; // audit data store
 
@@ -3276,7 +3276,7 @@ function recalc() {
   // what the report can say, and both are only fixable off-screen.
   const gnote = document.getElementById('gtext-note');
   if (gnote) {
-    const noCopy = CHECKS.filter(c => !GTEXT[c.id] &&
+    const noCopy = CHECKS.filter(c => !gtextFor(c.id) &&
       !document.getElementById(c.id)?.checked && !UNK.has(c.id));
     gnote.style.display = noCopy.length ? '' : 'none';
     gnote.innerHTML = noCopy.length
@@ -3402,8 +3402,8 @@ function summaryPayload() {
     // The exact Action Titles page 2 will print, so page 1 can name the same
     // things in the same words. Passed verbatim and used verbatim: the summary
     // is allowed to quote an approved headline, never to reword one.
-    actionTitles: failedChecks().filter(c => GTEXT[c.id])
-      .slice(0, TOP_N).map(c => GTEXT[c.id].title),
+    actionTitles: failedChecks().filter(c => gtextFor(c.id))
+      .slice(0, TOP_N).map(c => gtextFor(c.id).title),
     metrics: {
       'Domain authority': AD.da,
       'Organic keywords': AD.keywords,
@@ -3761,16 +3761,54 @@ const GTEXT = {
                text: "Tag centers of influence, community organizations, and relevant individuals in your social media posts to expand reach and spark engagement. Combine tags with relevant hashtags to boost discoverability, appear in more feeds, and strengthen both visibility and credibility." }
 };
 
-// Checks with no approved copy yet. Page 2 will not print invented language
-// for these, so they are passed over when the six are chosen and named in the
-// app so the sheet can be completed.
+// Copy written for this tool, NOT taken from SA_Digital_Audit_Questions.
+//
+// These ten checks had no row in the sheet, so page 2 withheld their
+// recommendation entirely and a lower-value fix was promoted in its place --
+// including LinkedIn, the second most valuable fix in the whole audit. That was
+// costing real audits, so this fills the gap in the meantime.
+//
+// It is kept in its own object rather than merged into GTEXT so the boundary
+// stays visible: everything in GTEXT is the firm's approved language, and
+// everything here is awaiting their sign-off. When a row lands in the sheet,
+// delete the entry here -- the sheet always wins.
+//
+// Written to the same constraints as the approved copy: second person, roughly
+// the same length, what to do stated lightly and why it matters stated
+// plainly, and no service, vendor, agency or tool recommended anywhere.
+const GTEXT_DRAFT = {
+  "c-hli":    { title: "Claim a LinkedIn Page for the Firm Itself",
+               text: "A firm page is separate from the personal profiles of your advisors, and it is where prospects and referral sources look to confirm a business is real and active. It also gives search engines and AI tools a single authoritative entity to associate with your firm rather than a scattering of individuals." },
+  "c-szp":    { title: "Reduce the Weight of Your Homepage",
+               text: "A heavy homepage is slow to appear, and the delay is worst on phones and weaker connections, which is where a good share of first visits happen. Visitors leave pages that make them wait, and load time is one of the factors search engines weigh when deciding how to rank you." },
+  "c-gbp-d":  { title: "Describe Your Business in Your Own Words",
+               text: "The description on your profile is often the first thing a prospect reads about your firm, before they ever reach your website. It is also text that AI tools quote directly when asked what your firm does, so leaving it blank hands that answer to whatever else has been written about you." },
+  "c-hfb":    { title: "Claim Your Firm's Page on Facebook",
+               text: "Even where it is not your main channel, a claimed page is a public record that your firm exists and is current. Prospects and referral sources check, and an absent or unclaimed page reads as a gap. A claimed page also gives you control of the information shown about your business." },
+  "c-sch":    { title: "Tell Search Engines Plainly What Your Firm Is",
+               text: "Structured data states in a form machines read directly what your business is, where it operates and who works there, rather than leaving search engines and AI tools to infer it from your page copy. It is one of the clearest ways to be described accurately in AI-generated answers." },
+  "c-aicite": { title: "Become the Source AI Quotes About You",
+               text: "When an AI tool answers a question about your firm it draws on sources and often names them. If your own site is not among those sources, the answer is assembled from third-party pages you do not control. Being the cited source is how you keep that answer accurate and current." },
+  "c-da5":    { title: "Build the Authority of Your Domain",
+               text: "Domain authority reflects how many credible sites reference yours, and it influences both how you rank in search and whether AI tools treat your site as dependable enough to cite. It builds slowly through being referenced in places that matter, so it is worth starting early." },
+  "c-hig":    { title: "Consider an Instagram Presence",
+               text: "Instagram reaches a different audience than your other channels and favours the visual: the people behind the firm, the community you work in, the moments that show character. For firms building recognition with younger prospects and referral sources, it is a reasonable place to be findable." },
+  "c-gbp-p":  { title: "Show the People and the Place",
+               text: "Photos of your team and office give a prospect something to picture before a first conversation, and listings with images hold attention longer than those without. They also signal an actively maintained profile, which helps how your listing performs in local results." },
+  "c-hyt":    { title: "Give Your Video Content a Home",
+               text: "A channel gives video a permanent address that can be found, linked and referenced, rather than living only inside a social feed that scrolls past. Video is surfaced in search results and drawn on by AI tools, so it works hardest when it sits somewhere durable." },
+};
+
+// One lookup for the report. GTEXT first, always: an approved row supersedes a
+// draft the moment it exists, without anything else having to change.
+const gtextFor = id => GTEXT[id] || GTEXT_DRAFT[id] || null;
+
+// Checks with no copy from EITHER source. Page 2 still withholds these rather
+// than inventing anything; the list is empty today and the machinery stays so
+// that a check added later cannot quietly print nothing.
 const GTEXT_MISSING = [
-  'c-gbp-d', 'c-gbp-p', 'c-aicite', 'c-da5', 'c-sch',
-  'c-hli', 'c-hfb', 'c-hig', 'c-hyt',
-  // Its question ("Is the total page load on the homepage under 3mb?") had a
-  // row with both copy cells blank, and that row is absent from the current
-  // sheet entirely. Either way there is no approved wording for it.
-  'c-szp'
+  // Empty: the ten that had no approved row are covered by GTEXT_DRAFT until
+  // their wording lands in the sheet.
 ];
 
 // ── page 2 · priorities ──────────────────────────────────────────────────────
@@ -4027,8 +4065,8 @@ function assembleReport() {
   // rather than filled with language the tool wrote for itself. The skipped
   // ones are reported, so the sheet gets completed instead of the gap being
   // quietly absorbed.
-  const eligible = failed.filter(c => GTEXT[c.id]);
-  const skipped  = failed.filter(c => !GTEXT[c.id]).slice(0, TOP_N);
+  const eligible = failed.filter(c => gtextFor(c.id));
+  const skipped  = failed.filter(c => !gtextFor(c.id)).slice(0, TOP_N);
   if (skipped.length) {
     console.warn('Page 2 passed over these failed checks — no approved copy in the sheet: ' +
       skipped.map(c => c.id + ' (' + c.label + ')').join(', '));
@@ -4084,9 +4122,9 @@ function assembleReport() {
       // twice and read as though it had been invented.
       // Both come from the approved sheet, verbatim. top6 only ever contains
       // checks that have a row, so there is no fallback here to write copy.
-      title: GTEXT[c.id].title,
+      title: gtextFor(c.id).title,
       q:     c.q,
-      why:   GTEXT[c.id].text,
+      why:   gtextFor(c.id).text,
       pts:   Math.max(1, Math.round(scoreImpact(c))),
       cat:   CAT_NAME[c.cat], effort: EFFORT_LABEL[c.effort], aeo: !!c.aeo
     })),
