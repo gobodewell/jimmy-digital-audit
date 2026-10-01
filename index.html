@@ -830,7 +830,7 @@ textarea{resize:vertical;min-height:60px}
 // different vintages. Both carry the same stamp and the app compares them,
 // because "did you upload both files?" is not something anyone should have
 // to remember -- and a half-upload looks exactly like a fix that did not work.
-const BUILD = '2026-09-30.7';
+const BUILD = '2026-10-01.1';
 const DEFAULT_PROXY = 'https://jimmy-digital-audit.onrender.com';
 let AD = {}; // audit data store
 
@@ -3849,17 +3849,20 @@ function priorities(d, logoPurple) {
 
     { table: { widths: ['*'], body: [[{
         columns: [
-          { width: 126, columns: [
-              { width: 26, text: String(d.scores.overall), font: 'Display', bold: true, fontSize: 19, color: RC.purple },
+          // 26pt held two digits at 19pt Display bold and wrapped a third, so a
+          // firm reaching 100 saw "10" above a lone "0". Both score columns are
+          // sized for three digits, and the band widened to match.
+          { width: 150, columns: [
+              { width: 36, text: String(d.scores.overall), font: 'Display', bold: true, fontSize: 19, color: RC.purple, noWrap: true },
               { width: 24, svg: MARK.arrow, margin: [0, 8, 0, 0] },
-              { width: 26, text: String(d.projected), font: 'Display', bold: true, fontSize: 19, color: RC.purple }
+              { width: 36, text: String(d.projected), font: 'Display', bold: true, fontSize: 19, color: RC.purple, noWrap: true }
             ], columnGap: 9 },
           { width: '*', text: [
               `Completing all ${TOP_N_WORD} moves this firm from `,
               { text: d.scores.band, bold: true }, ' into the ',
               { text: d.projectedBand, bold: true }, ' band.'
             ], font: 'Body', fontSize: 9.5, color: '#1F2A33', lineHeight: 1.4, margin: [0, 3, 0, 0] }
-        ], margin: [14, 12, 14, 12]
+        ], margin: [18, 12, 14, 12]
       }]] },
       layout: { hLineWidth: () => 0, vLineWidth: () => 0, fillColor: () => RC.blueLt },
       margin: [0, 0, 0, 12] },
@@ -3945,16 +3948,9 @@ function scorecard(sec, logoPurple) {
   return [
     { columns: [
         { width: '*', text: sec.name, font: 'Display', fontSize: 21, color: RC.purple },
-        { width: 128, stack: [
-            { text: `${sec.weight}% of overall score`, font: 'Body', fontSize: 8, color: RC.grayMid, alignment: 'right' },
-            { text: [
-                { text: `${sec.passed} of ${sec.total} KPIs passed` },
-                ...(sec.total - sec.passed > 0
-                  ? [{ text: `  ·  ${sec.total - sec.passed} need work`,
-                       color: RC.magenta, bold: true }]
-                  : [])
-              ], font: 'Body', fontSize: 8, color: RC.grayMid, alignment: 'right' }
-          ], margin: [0, 3, 8, 0] },
+        // The weight / KPIs-passed / need-work line used to sit between the
+        // title and the logo. The same figures are on the cover and in the
+        // score and the tinted rows just below, so it was a third telling.
         { width: 88, svg: logoPurple, alignment: 'right' }
       ], columnGap: 0, margin: [0, 0, 0, 14] },
 
