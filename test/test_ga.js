@@ -6,7 +6,20 @@
 // firm's own domain, because the entity is then the firm rather than Google.
 // The tag is in the HTML, so it is read there.
 process.env.ANTHROPIC_KEY='t'; process.env.PORT='3983'; delete process.env.AUDIT_KEY;
-delete process.env.DATAFORSEO_LOGIN; delete process.env.DATAFORSEO_PASSWORD;
+// Set before the server is required: it reads these once, at load.
+process.env.DATAFORSEO_LOGIN='u'; process.env.DATAFORSEO_PASSWORD='p';
+
+// The model's streamed reply, in the shape claudeRun parses.
+const enc = new TextEncoder();
+const sse = text => new ReadableStream({ start(c) {
+  for (const e of [
+    { type:'content_block_start', index:0, content_block:{ type:'text', text:'' } },
+    { type:'content_block_delta', index:0, delta:{ type:'text_delta', text } },
+    { type:'content_block_stop', index:0 },
+    { type:'message_delta', delta:{ stop_reason:'end_turn' } }
+  ]) c.enqueue(enc.encode('data: ' + JSON.stringify(e) + '\n\n'));
+  c.close();
+}});
 
 let failures=0;
 const check=(l,c,d)=>{console.log((c?'  PASS  ':'  FAIL  ')+l+(d?'   → '+d:'')); if(!c) failures++;};
@@ -15,6 +28,12 @@ let home = '';
 const realFetch = global.fetch;
 global.fetch = async (u,o) => {
   const s = String(u);
+  // DataForSEO and the model answer nothing by default; sections F and D
+  // replace this mock when they need them to.
+  if (s.includes('dataforseo.com'))
+    return new Response(JSON.stringify({ status_code:20000, tasks:[{ status_code:20000, result:[] }]}), {status:200});
+  if (s.includes('api.anthropic.com'))
+    return { ok:true, body: sse('---BODY---\n---END---') };
   if (!s.includes('x.com')) return realFetch(u,o);
   if (s === 'https://x.com' || s === 'https://x.com/')
     return new Response(home, {status:200, headers:{'content-type':'text/html'}});
@@ -64,6 +83,8 @@ setTimeout(async () => {
   let d = await get(PAGE('<title>No tags here</title>'));
   check('measured false', d.ga === false, JSON.stringify(d.ga));
   check('and says so plainly', /no analytics tag/.test(d.gaNote||''), d.gaNote);
+  check('without billing the other routes for a page it read',
+        (d.gaRoute||[]).length === 1, JSON.stringify(d.gaRoute));
 
   console.log('\nC. any hint at all ticks the box');
   // The bar is deliberately low. The two mistakes do not cost the same:
@@ -94,9 +115,41 @@ setTimeout(async () => {
   check('and does not also list the loose hints',
         !/dataLayer|gtag on the page/.test(d.gaNote||''), d.gaNote);
 
-  console.log('\nD. a blocked homepage leaves it unmeasured, never false');
+  console.log('\nF. a blocked homepage — the other routes still find it');
+  // The case from the field: an FMG site behind a CDN that refuses this server,
+  // whose markup carries three GA4 properties. One way of looking at the page
+  // was never enough.
+  let crawlerSees = true;
   global.fetch = async (u,o) => {
     const s = String(u);
+    if (s.includes('dataforseo.com') && s.includes('content_parsing'))
+      return new Response(JSON.stringify({ status_code:20000, tasks:[{ status_code:20000,
+        result: crawlerSees
+          ? [{ items:[{ page_content:'<script src="https://www.googletagmanager.com/gtag/js?id=G-0Y7KR0RT0H"></script>' }] }]
+          : [{ items:[{ page_content:'<p>nothing</p>' }] }] }]}), {status:200});
+    if (s.includes('dataforseo.com'))
+      return new Response(JSON.stringify({ status_code:20000, tasks:[{ status_code:20000, result:[] }]}), {status:200});
+    if (s.includes('api.anthropic.com'))
+      return { ok:true, body: sse('---BODY---\n<html><head><title>x</title></head></html>\n---END---') };
+    if (s.includes('x.com'))
+      return new Response('denied', {status:403, headers:{server:'cloudflare','cf-ray':'x'}});
+    return realFetch(u,o);
+  };
+  d = await (async () => (await realFetch('http://127.0.0.1:3983/site/check?url=' +
+      encodeURIComponent('https://x.com'))).json())();
+  check('the crawler found it where we could not', d.ga === true, JSON.stringify(d.ga));
+  check('and says which route got it', /OnPage crawler/.test(d.gaNote||''), d.gaNote);
+  check('the winning route is named', (d.gaRoute||[]).some(x => /found$/.test(x)),
+        JSON.stringify(d.gaRoute));
+
+  console.log('\nD. a blocked homepage no route could read stays unmeasured');
+  crawlerSees = false;
+  global.fetch = async (u,o) => {
+    const s = String(u);
+    if (s.includes('dataforseo.com'))
+      return new Response(JSON.stringify({ status_code:20000, tasks:[{ status_code:20000, result:[] }]}), {status:200});
+    if (s.includes('api.anthropic.com'))
+      return { ok:true, body: sse('---BODY---\n---END---') };
     if (!s.includes('x.com')) return realFetch(u,o);
     return new Response('denied', {status:403, headers:{server:'cloudflare','cf-ray':'x'}});
   };

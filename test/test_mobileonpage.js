@@ -66,7 +66,12 @@ setTimeout(async () => {
   check('MOBILE is measured, not shrugged at', d.viewport===true, JSON.stringify(d.viewport));
   check('and quotes the tag it read', /width=device-width/.test(d.viewportNote||''), d.viewportNote);
   check('crediting the route that got it', /model-fetched/.test(d.viewportNote||''), d.viewportNote);
-  check('the model was asked exactly once', claudeCalls===1, String(claudeCalls));
+  // Twice at most, and only on a page nobody could read: once for the <head>,
+  // which answers viewport and robots, and once for the body, where a tag
+  // manager's noscript iframe lives and the head cannot reach. A page that
+  // loads normally still costs no model call at all -- section C.
+  check('the model was asked no more than twice', claudeCalls<=2, String(claudeCalls));
+  check('and at least once', claudeCalls>=1, String(claudeCalls));
 
   console.log('\nB. a page that declares no viewport is a finding, not a gap');
   const keep = HEAD;

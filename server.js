@@ -6,7 +6,7 @@ const app  = express();
 // Bumped whenever a build is handed over. /health reports it so the app can
 // tell the user their page and their proxy are different vintages -- the
 // failure mode is a fix that silently is not there.
-const BUILD = '2026-10-01.14';
+const BUILD = '2026-10-01.15';
 const PORT = process.env.PORT || 3001;
 
 // Every one of these is trimmed. A key pasted into a hosting panel's env
@@ -1143,6 +1143,66 @@ function readAnalytics(html) {
   return { found: what.length > 0, what: what.slice(0, 3) };
 }
 
+// Every way of finding the tag, tried until one does.
+//
+// Reading the homepage we fetched is route one, and on a site that refuses this
+// server it is the ONLY route the old code had -- so an FMG site behind a CDN
+// came back with no analytics while its markup carried three GA4 properties.
+// The tag is not hiding; our one way of looking at the page was.
+//
+// Each route is independent infrastructure, and each only ever FILLS the
+// answer. None of them can turn a tag that was found into a tag that was not.
+async function analyticsHunt(url, results) {
+  const say = (an, via) => {
+    results.ga = true;
+    results.gaNote = 'found ' + via + ': ' + an.what.join(', ');
+    (results.gaRoute = results.gaRoute || []).push(via + ' — found');
+    return true;
+  };
+  const note = (via, why) => (results.gaRoute = results.gaRoute || []).push(via + ' — ' + why);
+
+  // 2. OnPage's parsed copy of the page. DataForSEO crawls from its own
+  //    network, so a CDN rule aimed at this server does not apply to it.
+  if (DFS_LOGIN) {
+    try {
+      const r = await dfsPost('/on_page/content_parsing/live', [
+        { url, enable_javascript: true, enable_browser_rendering: true }
+      ], { timeout: 60000 });
+      const blob = JSON.stringify(r?.tasks?.[0]?.result || '');
+      const an = readAnalytics(blob);
+      if (an.found) return say(an, 'by the OnPage crawler');
+      note('OnPage crawler', 'no tag in its copy of the page');
+    } catch (e) { note('OnPage crawler', e.message); }
+  }
+
+  // 3. The model's fetcher, which demonstrably reads sites that refuse us.
+  //    The whole page this time, not just the head: a tag manager snippet can
+  //    sit at the end of the body.
+  try {
+    const ai = await claudeFetchRaw(url, 20000);
+    if (!ai.error) {
+      const an = readAnalytics(ai.body || '');
+      if (an.found) return say(an, 'by the model fetcher');
+      note('model fetcher', 'no tag in the first 20k characters');
+    } else note('model fetcher', ai.error);
+  } catch (e) { note('model fetcher', e.message); }
+
+  // 4. The page rendered. A tag injected by a script after parse is in no copy
+  //    of the SOURCE, so ask what the page actually loaded.
+  if (DFS_LOGIN) {
+    try {
+      const r = await dfsPost('/on_page/instant_pages', [
+        { url, enable_javascript: true, enable_browser_rendering: true }
+      ], { timeout: 60000 });
+      const blob = JSON.stringify(r?.tasks?.[0]?.result || '');
+      const an = readAnalytics(blob);
+      if (an.found) return say(an, 'in the rendered page');
+      note('rendered page', 'no tag reported');
+    } catch (e) { note('rendered page', e.message); }
+  }
+  return false;
+}
+
 function readViewport(html) {
   for (const m of String(html).matchAll(/<meta\b[^>]*>/gi)) {
     const tag  = m[0];
@@ -1824,12 +1884,20 @@ function isSitemapTxt(text) {
         for (const m of metas) {
           if (/\bnoindex\b/i.test(m.content)) blockers.push('<meta name="' + m.name + '" content="' + m.content + '">');
         }
-        // The whole homepage was read, so an absent tag is a real finding --
-        // unlike the model-fetched head below, which may simply not reach it.
+        // The whole homepage was read, so an absent tag here is meaningful --
+        // but not final. A tag injected after parse is in no copy of the
+        // source, so the other routes still get their turn below.
         const an = readAnalytics(html);
+        // The whole page was read. A hint anywhere in it ticks the box; none
+        // in 300KB of markup is a finding, and PageSpeed -- which runs anyway
+        // and sees what loaded at runtime -- can still overturn it for free.
+        // The hunt below is for pages we could NOT read, which is where the
+        // gap actually was; running it here would bill a model call and two
+        // crawls on every clean site to confirm what the page already said.
         results.ga     = an.found;
         results.gaNote = an.found ? 'found on the homepage: ' + an.what.join(', ')
                                   : 'no analytics tag in the homepage markup';
+        results.gaRoute = ['homepage markup — ' + (an.found ? 'found' : 'nothing')];
 
         const vp = readViewport(html);
         results.viewport     = vp ? vp.ok : false;
@@ -1854,6 +1922,23 @@ function isSitemapTxt(text) {
       results.ga = null;
       results.gaNote = 'could not fetch the homepage: ' + e.message;
       await onPageRescue(url, results, 'could not fetch the homepage: ' + e.message);
+    }
+
+    // Still no answer on analytics? Try every other way of looking at the page.
+    // Only when it is unresolved: a tag already found costs nothing more, and a
+    // homepage that was read and plainly had none is settled after the hunt.
+    if (results.ga == null) {
+      const hit = await analyticsHunt(url, results);
+      if (!hit) {
+        // Every route looked and none found a tag. That is a finding now, not
+        // a shrug -- unless the page itself was never readable, in which case
+        // there was nothing to look at and the box stays unmeasured.
+        const sawThePage = results.homeStatus >= 200 && results.homeStatus < 400;
+        results.ga = sawThePage ? false : null;
+        results.gaNote = sawThePage
+          ? 'no analytics tag found by any route'
+          : (results.gaNote || 'could not read the homepage');
+      }
     }
 
     console.log('Site check results:', JSON.stringify(results));

@@ -852,7 +852,7 @@ input.masked{-webkit-text-security:disc;text-security:disc}
 // different vintages. Both carry the same stamp and the app compares them,
 // because "did you upload both files?" is not something anyone should have
 // to remember -- and a half-upload looks exactly like a fix that did not work.
-const BUILD = '2026-10-01.14';
+const BUILD = '2026-10-01.15';
 const DEFAULT_PROXY = 'https://jimmy-digital-audit.onrender.com';
 let AD = {}; // audit data store
 
@@ -1438,8 +1438,15 @@ async function runSiteCheck(url) {
     // Lighthouse's third-party list. The tag is in the HTML; PageSpeed having
     // run is not a precondition for seeing it.
     if (d.ga === true) ck('c-ga');
+    // A field that is not in the response at all means the proxy predates this
+    // check -- a different thing from a page we could not read, and the one
+    // that wasted an afternoon reading "could not read the homepage" about a
+    // homepage that was read perfectly well.
+    else if (!('ga' in d))
+      unk('c-ga', 'this proxy build does not check analytics — upload server.js to Render');
     else if (d.ga == null) unk('c-ga', d.gaNote || 'could not read the homepage');
     if (d.ga != null) measured('c-ga');
+    if (d.gaRoute) console.log('ANALYTICS ROUTES:', d.gaRoute.join('  |  '));
 
     // Read straight from the page rather than waiting on PageSpeed, which is
     // one more thing that has to have succeeded. runLighthouse can still tick
