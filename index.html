@@ -852,7 +852,7 @@ input.masked{-webkit-text-security:disc;text-security:disc}
 // different vintages. Both carry the same stamp and the app compares them,
 // because "did you upload both files?" is not something anyone should have
 // to remember -- and a half-upload looks exactly like a fix that did not work.
-const BUILD = '2026-10-01.15';
+const BUILD = '2026-10-01.16';
 const DEFAULT_PROXY = 'https://jimmy-digital-audit.onrender.com';
 let AD = {}; // audit data store
 
@@ -1069,8 +1069,17 @@ function pf(path, opts) {
   // here, so name the proxy and the shapes this actually takes: the free
   // instance asleep or restarting, or the request cut off partway (the long
   // PageSpeed and GBP calls are the ones that hit this).
-  return fetch(proxy + path, Object.assign({}, opts, { headers }))
+  // Nothing here had a deadline, so a proxy that never answered left the page
+  // waiting for ever -- the History tab sat on "Looking…" with no error and no
+  // list, which reads as a broken feature rather than a sleeping server. The
+  // free instance takes the better part of a minute to wake, so the default is
+  // generous; the calls that know they are quick pass their own.
+  const ms = opts.timeout || 120000;
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), ms);
+  return fetch(proxy + path, Object.assign({}, opts, { headers, signal: ctl.signal }))
     .then(r => {
+      clearTimeout(timer);
       // The server is locked with a shared key and this browser does not have
       // it. Every step then fails with a bare "unauthorized", which reads like
       // eleven broken integrations instead of one empty settings field.
@@ -1082,6 +1091,12 @@ function pf(path, opts) {
       return r;
     })
     .catch(e => {
+      clearTimeout(timer);
+      if (e && e.name === 'AbortError') {
+        throw new Error('the proxy did not answer within ' + Math.round(ms / 1000) +
+          ' seconds — the free Render instance sleeps after a while and takes about ' +
+          'a minute to wake. Try again; if it keeps timing out, check the Render logs.');
+      }
       if (e && e.name === 'TypeError') {
         throw new Error('could not reach the proxy at ' + proxy + path.split('?')[0] +
           ' — it may be asleep, restarting, or it dropped the connection mid-request. ' +
@@ -4726,14 +4741,21 @@ async function renderHist() {
   if (!el) return;
   const q = (getVal('hist-q') || '').trim();
   msg.textContent = 'Looking…';
+  // A sleeping proxy takes about a minute to wake, and silence for a minute
+  // reads as a broken page. Say what is being waited on.
+  const waking = setTimeout(() => {
+    if (/Looking/.test(msg.textContent)) msg.textContent = 'Waking the proxy — this can take a minute…';
+  }, 4000);
 
   let audits = null;
   try {
-    const r = await pf('/history/list' + (q ? '?q=' + encodeURIComponent(q) : ''));
+    const r = await pf('/history/list' + (q ? '?q=' + encodeURIComponent(q) : ''), { timeout: 75000 });
+    clearTimeout(waking);
     const d = await r.json();
     if (d.error) throw new Error(d.error);
     audits = d.audits || [];
   } catch (e) {
+    clearTimeout(waking);
     console.error('History unavailable:', e.message);
     const local = JSON.parse(lg('audit_history') || '[]');
     msg.innerHTML = '<span style="color:#b45309">Central history is unavailable (' +
@@ -4750,7 +4772,12 @@ async function renderHist() {
   }
 
   if (!audits.length) {
-    msg.textContent = q ? 'No audits match "' + q + '".' : 'No audits filed yet.';
+    // "No audits filed yet" is also what a proxy with no Supabase credentials
+    // looks like, and the two need telling apart from this screen.
+    msg.innerHTML = q ? 'No audits match "' + escHtml(q) + '".'
+      : 'No audits filed yet. Every PDF you download is filed automatically — ' +
+        'if you have downloaded one and it is not here, check ' +
+        '<b>Settings → Audit history</b>, which says whether the proxy can reach the store.';
     el.innerHTML = '';
     return;
   }
