@@ -39,7 +39,10 @@ const { chromium } = require('playwright');
     pdfMake.vfs   = Object.assign({}, pdfMake.vfs || {}, A.vfs);
     pdfMake.fonts = A.fonts;
     const d = assembleReport();
-    if (MAX) { d.scores.overall = 100; d.projected = 100; }
+    // The widest the band can get. 100 -> 100 is not it: the band only prints
+    // when there is a gain to project, so a firm already at 100 has no band at
+    // all. 99 -> 100 is the real worst case, and it is the one that wrapped.
+    if (MAX) { d.scores.overall = 99; d.projected = 100; }
     if (STRESS) {
       d.summary = 'Your firm is performing well overall across the board, with notably ' +
         'strong visibility and social media scores driving an on-track rating and a solid ' +

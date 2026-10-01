@@ -6,7 +6,7 @@ const app  = express();
 // Bumped whenever a build is handed over. /health reports it so the app can
 // tell the user their page and their proxy are different vintages -- the
 // failure mode is a fix that silently is not there.
-const BUILD = '2026-10-01.9';
+const BUILD = '2026-10-01.11';
 const PORT = process.env.PORT || 3001;
 
 // Every one of these is trimmed. A key pasted into a hosting panel's env
@@ -1085,6 +1085,46 @@ function blockerFrom(headers) {
   return server ? 'origin server (' + server.slice(0, 40) + ')' : null;
 }
 
+// Analytics, read from the page itself.
+//
+// This used to come only from Lighthouse's third-party-summary audit, matched
+// on the entity name. That misses a site whenever PageSpeed does not run at
+// all -- which on a CDN that refuses Google is every time -- and it misses a
+// tag proxied through the firm's own domain, because the entity is then the
+// firm, not Google. Either way a site with analytics plainly in its markup
+// came back as not having it.
+//
+// The tag is in the HTML. Read it there, name what was found, and quote the
+// measurement ID so the answer can be checked rather than trusted.
+function readAnalytics(html) {
+  const h = String(html);
+  const found = [];
+  const add = (label, re) => {
+    const m = re.exec(h);
+    if (m) found.push(label + (m[1] ? ' (' + m[1] + ')' : ''));
+  };
+  // Loader scripts: the measurement ID is in the query string.
+  add('Google Analytics 4',  /googletagmanager\.com\/gtag\/js\?[^"'<>]*id=(G-[A-Z0-9]+)/i);
+  add('Google Tag Manager',  /googletagmanager\.com\/gtm\.js\?[^"'<>]*id=(GTM-[A-Z0-9]+)/i);
+  add('Google Tag Manager',  /googletagmanager\.com\/ns\.html\?[^"'<>]*id=(GTM-[A-Z0-9]+)/i);
+  // The container ID as a quoted string. Google's own snippet never writes the
+  // id into the URL as text -- it builds it in JS, j.src='...gtm.js?id='+i --
+  // so the two loader patterns above only ever matched the body <noscript>
+  // iframe. A head-only install, or one whose loader is served from the firm's
+  // own domain, was missed entirely. The GTM- prefix is unambiguous enough to
+  // stand on its own.
+  add('Google Tag Manager',  /['"](GTM-[A-Z0-9]{4,})['"]/i);
+  add('Universal Analytics', /google-analytics\.com\/(?:analytics|ga)\.js()/i);
+  // Inline configuration. This is what still shows when the loader is served
+  // from the firm's own domain, which is the case the entity match cannot see.
+  add('gtag configuration',  /gtag\(\s*['"]config['"]\s*,\s*['"]((?:G|UA|AW|GT)-[A-Z0-9-]+)['"]/i);
+  add('Universal Analytics', /\bga\(\s*['"]create['"]\s*,\s*['"](UA-[0-9-]+)['"]/i);
+  add('Universal Analytics', /_gaq\.push\s*\(()/i);
+  // Deduplicate: a GA4 site matches both its loader and its config line.
+  const uniq = [...new Set(found)];
+  return { found: uniq.length > 0, what: uniq };
+}
+
 function readViewport(html) {
   for (const m of String(html).matchAll(/<meta\b[^>]*>/gi)) {
     const tag  = m[0];
@@ -1452,6 +1492,13 @@ async function lastResortRead(url, results, why) {
                          : metas.length ? 'it declares ' + metas.map(m => m.name + ': ' + m.content).join(', ')
                                         : 'no robots directive found, which means indexable');
     }
+    // Positive only. A head the model fetched may stop short of the tag, so
+    // its absence there proves nothing -- the same rule the viewport follows.
+    const an = readAnalytics(ai.html);
+    if (an.found && results.ga == null) {
+      results.ga = true;
+      results.gaNote = 'found in the model-fetched head: ' + an.what.join(', ');
+    }
     const vp = readViewport(ai.html);
     if (vp && results.viewport == null) {
       results.viewport = vp.ok;
@@ -1539,7 +1586,7 @@ async function onPageRescue(url, results, whyDirectFailed) {
   // reads that head. So anything still unanswered goes on to it instead of
   // stopping here. It only fills nulls, so nothing OnPage established is lost,
   // and it is skipped entirely when there is nothing left to ask.
-  const missing = ['viewport', 'indexable', 'hasMeta'].filter(k => results[k] == null);
+  const missing = ['viewport', 'indexable', 'hasMeta', 'ga'].filter(k => results[k] == null);
   if (missing.length) {
     // The reason handed on is why the DIRECT read failed, not which fields are
     // outstanding: lastResortRead writes it into whichever note it fills, and
@@ -1744,6 +1791,8 @@ function isSitemapTxt(text) {
         results.indexableNote = why;
         results.viewport = null;
         results.viewportNote = why;
+        results.ga = null;
+        results.gaNote = why;
         // A refusal is exactly what OnPage is for. It is only asked here, on
         // the failure path, because it is billed per call and the plain fetch
         // costs nothing.
@@ -1757,6 +1806,13 @@ function isSitemapTxt(text) {
         for (const m of metas) {
           if (/\bnoindex\b/i.test(m.content)) blockers.push('<meta name="' + m.name + '" content="' + m.content + '">');
         }
+        // The whole homepage was read, so an absent tag is a real finding --
+        // unlike the model-fetched head below, which may simply not reach it.
+        const an = readAnalytics(html);
+        results.ga     = an.found;
+        results.gaNote = an.found ? 'found on the homepage: ' + an.what.join(', ')
+                                  : 'no analytics tag in the homepage markup';
+
         const vp = readViewport(html);
         results.viewport     = vp ? vp.ok : false;
         results.viewportNote = vp
@@ -1777,6 +1833,8 @@ function isSitemapTxt(text) {
       results.indexableNote = 'could not fetch the homepage: ' + e.message;
       results.viewport = null;
       results.viewportNote = 'could not fetch the homepage: ' + e.message;
+      results.ga = null;
+      results.gaNote = 'could not fetch the homepage: ' + e.message;
       await onPageRescue(url, results, 'could not fetch the homepage: ' + e.message);
     }
 

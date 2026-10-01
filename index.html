@@ -851,7 +851,7 @@ input.masked{-webkit-text-security:disc;text-security:disc}
 // different vintages. Both carry the same stamp and the app compares them,
 // because "did you upload both files?" is not something anyone should have
 // to remember -- and a half-upload looks exactly like a fix that did not work.
-const BUILD = '2026-10-01.9';
+const BUILD = '2026-10-01.11';
 const DEFAULT_PROXY = 'https://jimmy-digital-audit.onrender.com';
 let AD = {}; // audit data store
 
@@ -1406,6 +1406,13 @@ async function runSiteCheck(url) {
     else if (d.indexable == null) unk('c-idx', d.indexableNote || 'could not read the homepage');
     if (d.indexable != null) measured('c-idx');
 
+    // Analytics, read from the homepage markup rather than inferred from
+    // Lighthouse's third-party list. The tag is in the HTML; PageSpeed having
+    // run is not a precondition for seeing it.
+    if (d.ga === true) ck('c-ga');
+    else if (d.ga == null) unk('c-ga', d.gaNote || 'could not read the homepage');
+    if (d.ga != null) measured('c-ga');
+
     // Read straight from the page rather than waiting on PageSpeed, which is
     // one more thing that has to have succeeded. runLighthouse can still tick
     // this if it gets there first; neither un-ticks the other.
@@ -1843,8 +1850,13 @@ async function runLighthouse(url) {
     else if (d.imagesOk == null)
       unk('c-img', 'PageSpeed returned no per-image sizes');
     if (d.imagesOk != null) measured('c-img');
-    if (d.hasGA)       ck('c-ga');
-    else if (d.hasGA == null)     unk('c-ga',  'PageSpeed returned no third-party summary');
+    // Only when the homepage read did not already settle it. PageSpeed's null
+    // means "we did not look"; overwriting a reading of the markup with that
+    // would turn a measurement back into a shrug.
+    if (!DIRECT.has('c-ga')) {
+      if (d.hasGA)       ck('c-ga');
+      else if (d.hasGA == null)   unk('c-ga',  'PageSpeed returned no third-party summary');
+    }
     // PageSpeed enumerates the third-party scripts on the page, so a GA tag is
     // either there or it is not. Without this the model's impression could
     // overwrite it -- the one thing this audit is built not to do.
@@ -3783,7 +3795,9 @@ function cover(d, logoWhite) {
           ] },
         { width: '*', columns: [
             { width: '*', stack: [ stat(d.kpiPassed, 'KPIs passed'), { text: '', margin: [0, 9, 0, 0] }, stat(d.aeoPassed, 'AEO KPIs passed') ] },
-            { width: '*', stack: [ stat(d.needWork, 'need work', true), { text: '', margin: [0, 9, 0, 0] }, stat(d.ptsAvailable, `available in ${TOP_N_WORD} fixes`, true) ] }
+            { width: '*', stack: [ stat(d.needWork, 'need work', true), { text: '', margin: [0, 9, 0, 0] }, stat(d.ptsAvailable, d.actions.length
+                  ? `available in ${NUM_WORD(d.actions.length)} ${d.actions.length === 1 ? 'fix' : 'fixes'}`
+                  : 'no fixes listed', true) ] }
           ] }
       ], absolutePosition: { x: M, y: COVER_Y.stats } },
 
@@ -3800,7 +3814,12 @@ function cover(d, logoWhite) {
 // finding all five -- and a heading that promises six things over a list of
 // five is the kind of error nobody notices until a client does.
 const TOP_N = 5;
-const TOP_N_WORD = ['zero','one','two','three','four','five','six','seven','eight','nine','ten'][TOP_N] || String(TOP_N);
+// TOP_N is the MOST page 2 will carry, not a quota. A firm with two failing
+// checks gets two, and the report has to say two -- it used to print "Do these
+// five things first" over a list of two and promise a gain "in five fixes",
+// which a client reads before anyone else does.
+const NUM_WORD = n => ['zero','one','two','three','four','five','six','seven','eight','nine','ten'][n] || String(n);
+const TOP_N_WORD = NUM_WORD(TOP_N);
 
 // Approved recommendation copy, transcribed verbatim from the "Final Use" sheet
 // of SA_Digital_Audit_Questions -- its "Current - Action Items" column. That
@@ -3950,19 +3969,51 @@ function priorities(d, logoPurple) {
     ]);
   });
 
+  const n = d.actions.length;
+  // A firm can pass everything. pdfmake throws on a table with no rows, so the
+  // whole report died rather than printing the best result the audit can give.
+  const unmeasured = d.sections
+    .flatMap(sec => sec.groups).flatMap(g => g.items)
+    .filter(k => k.state === 'unknown').length;
+
+  // Nothing to list has two causes and they are not the same claim. Either
+  // nothing failed, or something failed and its wording is not approved yet --
+  // and saying "all clear" over a withheld recommendation would be a lie the
+  // audit is built not to tell.
+  const emptyNote = d.failedCount === 0
+    ? 'No measured check failed.' +
+      (unmeasured ? ' ' + unmeasured + ' ' + (unmeasured === 1 ? 'check' : 'checks') +
+        ' could not be measured — those are marked on the scorecard pages that follow.'
+        : ' Every check in this audit passed.')
+    : d.failedCount + ' ' + (d.failedCount === 1 ? 'check needs' : 'checks need') +
+      ' work, but approved wording for them is not available yet. They are marked ' +
+      'on the scorecard pages that follow.';
+
+  const heading = n === 0 ? 'No priority fixes'
+                : n === 1 ? 'Do this one thing first'
+                : `Do these ${NUM_WORD(n)} things first`;
+
   return [
     { columns: [
-        { text: `Do these ${TOP_N_WORD} things first`, font: 'Display', fontSize: 21, color: RC.purple, width: '*' },
+        { text: heading, font: 'Display', fontSize: 21, color: RC.purple, width: '*' },
         { svg: logoPurple, width: 95, alignment: 'right' }
       ], margin: [0, 0, 0, 16] },
     rule(CONTENT),
-    { table: { widths: [22, '*'], body: rows },
-      layout: {
-        hLineWidth: (i, node) => (i === 0 || i === node.table.body.length) ? 0 : 0.6,
-        vLineWidth: () => 0, hLineColor: () => RC.g200,
-        paddingTop: () => 10, paddingBottom: () => 10, paddingLeft: () => 0, paddingRight: () => 0
-      }, margin: [0, 4, 0, 16] },
+    n === 0
+      ? { text: emptyNote, font: 'Body', fontSize: 10, color: RC.gray, lineHeight: 1.45,
+          margin: [0, 14, 60, 16] }
+      : { table: { widths: [22, '*'], body: rows },
+          layout: {
+            hLineWidth: (i, node) => (i === 0 || i === node.table.body.length) ? 0 : 0.6,
+            vLineWidth: () => 0, hLineColor: () => RC.g200,
+            paddingTop: () => 10, paddingBottom: () => 10, paddingLeft: () => 0, paddingRight: () => 0
+          }, margin: [0, 4, 0, 16] },
 
+    // The band projects a gain, so it is printed only when there is one. With
+    // nothing to complete it claimed "Completing all five moves this firm from
+    // Strong into the Strong band" -- five fixes that are not listed, and a
+    // move from a band into itself.
+    ...(n > 0 && d.projected > d.scores.overall ? [
     { table: { widths: ['*'], body: [[{
         columns: [
           // 26pt held two digits at 19pt Display bold and wrapped a third, so a
@@ -3973,18 +4024,28 @@ function priorities(d, logoPurple) {
               { width: 24, svg: MARK.arrow, margin: [0, 8, 0, 0] },
               { width: 36, text: String(d.projected), font: 'Display', bold: true, fontSize: 19, color: RC.purple, noWrap: true }
             ], columnGap: 9 },
-          { width: '*', text: [
-              `Completing all ${TOP_N_WORD} moves this firm from `,
-              { text: d.scores.band, bold: true }, ' into the ',
-              { text: d.projectedBand, bold: true }, ' band.'
-            ], font: 'Body', fontSize: 9.5, color: '#1F2A33', lineHeight: 1.4, margin: [0, 3, 0, 0] }
+          { width: '*', text: (d.projectedBand === d.scores.band
+              // Already in the top band, or the gain is not enough to cross
+              // into the next one. Either way the points are real and the band
+              // is not changing, so say that instead of inventing a move.
+              // "Completing all two" is not English; "all five" is.
+              ? [ n === 1 ? 'Completing this one adds ' : n === 2 ? 'Completing both adds '
+                  : `Completing all ${NUM_WORD(n)} adds `,
+                  { text: (d.projected - d.scores.overall) + ' points', bold: true },
+                  ', holding this firm in the ', { text: d.scores.band, bold: true }, ' band.' ]
+              : [ n === 1 ? 'Completing this one moves this firm from '
+                  : n === 2 ? 'Completing both moves this firm from '
+                  : `Completing all ${NUM_WORD(n)} moves this firm from `,
+                  { text: d.scores.band, bold: true }, ' into the ',
+                  { text: d.projectedBand, bold: true }, ' band.' ]),
+            font: 'Body', fontSize: 9.5, color: '#1F2A33', lineHeight: 1.4, margin: [0, 3, 0, 0] }
         ], margin: [18, 12, 14, 12]
       }]] },
       layout: { hLineWidth: () => 0, vLineWidth: () => 0, fillColor: () => RC.blueLt },
-      margin: [0, 0, 0, 12] },
+      margin: [0, 0, 0, 12] }] : []),
 
-    { text: 'Ranked by the score each fix unlocks, hardest-hitting first. Your GrowthLine consultant can walk through the detail with you.',
-      font: 'Body', fontSize: 8, color: RC.grayMid },
+    ...(n > 0 ? [{ text: 'Ranked by the score each fix unlocks, hardest-hitting first. Your GrowthLine consultant can walk through the detail with you.',
+      font: 'Body', fontSize: 8, color: RC.grayMid }] : []),
 
     // The call to action, at the foot of the priorities page — the moment the
     // reader has just seen what six fixes are worth to their score.
@@ -4185,6 +4246,10 @@ function assembleReport() {
   }
   AD.gtextSkipped = skipped.map(c => c.label);
   const top6   = eligible.slice(0, TOP_N);
+  // Page 2 needs to tell "nothing failed" apart from "something failed and its
+  // wording is not approved yet". Both leave the list empty; only one of them
+  // is good news.
+  const failedCount = failed.length;
   const gain   = top6.reduce((a, c) => a + scoreImpact(c), 0);
   const projected = Math.min(100, Math.round(s.overall + gain));
 
@@ -4230,6 +4295,7 @@ function assembleReport() {
        : s.prior.delta < 0 ? `Down ${Math.abs(s.prior.delta)} points since the last review.`
        : 'Unchanged since the last review.')
       : '',
+    failedCount,
     kpiPassed:    `${s.passed} of ${s.total}`,
     needWork:     `${s.total - s.passed} items`,
     aeoPassed:    `${s.aeoPassed} of ${s.aeoTotal}`,

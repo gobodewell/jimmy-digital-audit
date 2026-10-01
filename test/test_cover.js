@@ -66,7 +66,7 @@ print(json.dumps([d[i].get_text() for i in (2,3,4)]))
 
   console.log('\nF. the projection band holds three digits without wrapping');
   // 26pt columns wrapped "100" into "10" above a lone "0". Rendered at the
-  // worst case -- a firm at 100 projected to 100 -- and read as laid-out lines,
+  // worst case -- a firm at 99 projected to 100 -- and read as laid-out lines,
   // because a wrap still extracts the right characters and only the geometry
   // shows the fault.
   cp.execSync('node ' + path.join(__dirname,'render_cover.js'),
@@ -87,8 +87,8 @@ print(json.dumps(out))
   const big = band.filter(l => l.size > 17 && l.size < 21);
   check('both band figures are present', big.length === 2,
         JSON.stringify(big.map(l => l.t)));
-  check('each reads 100, whole and unwrapped', big.every(l => l.t === '100'),
-        JSON.stringify(big.map(l => l.t)));
+  check('they read 99 and 100, whole and unwrapped',
+        big.map(l => l.t).join(',') === '99,100', JSON.stringify(big.map(l => l.t)));
   check('they sit on the same line', big.length === 2 && big[0].y === big[1].y,
         JSON.stringify(big.map(l => l.y)));
   check('no stray single digit was orphaned',
