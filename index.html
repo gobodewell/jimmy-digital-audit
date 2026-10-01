@@ -194,6 +194,8 @@ textarea{resize:vertical;min-height:60px}
 /* Settings key row */
 .kr{display:flex;align-items:center;gap:8px;margin-bottom:8px}
 .kr input{flex:1;font-family:'DM Mono',monospace;font-size:12px}
+/* Dots the key the way type="password" did, without being a password input. */
+input.masked{-webkit-text-security:disc;text-security:disc}
 .ks{font-size:12px;min-width:60px;color:var(--text3)}
 .fm{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 
@@ -681,7 +683,16 @@ textarea{resize:vertical;min-height:60px}
       <div class="kr"><input type="text" id="s-proxy" placeholder="https://jimmy-digital-audit.onrender.com" style="font-family:'DM Mono',monospace;font-size:12px"/></div>
 
       <div class="sl" style="margin-top:12px">Proxy access key</div>
-      <div class="kr"><input type="password" id="s-audit" placeholder="must match AUDIT_KEY on the proxy"/><span class="ks" id="ks-audit">not set</span></div>
+      <!-- Masked with text-security rather than type="password". Chrome offers to
+           save a password whenever a password input exists, and with no <form> on
+           the page it treated the whole document as one, pairing this key with the
+           nearest text field above it -- so the prompt kept offering to save
+           "Houston, Texas" from City, State as a username. No password input, no
+           prompt. The dots look the same and the value still round-trips. -->
+      <div class="kr"><input type="text" id="s-audit" class="masked" autocomplete="off"
+             autocapitalize="off" autocorrect="off" spellcheck="false"
+             data-lpignore="true" data-1p-ignore data-bwignore
+             placeholder="must match AUDIT_KEY on the proxy"/><span class="ks" id="ks-audit">not set</span></div>
       <div style="font-size:11px;color:var(--text3);margin-top:6px;line-height:1.5">Anthropic, DataForSEO, SocialFetch and Airtable keys now live on the proxy server (Render env vars), not in the browser. Only this access key is stored here — it just unlocks your proxy.</div>
 
       <div class="sl" style="margin-top:12px">Build</div>
@@ -690,6 +701,16 @@ textarea{resize:vertical;min-height:60px}
         · proxy: <strong id="build-stamp-proxy" style="font-family:'DM Mono',monospace">checking…</strong><br>
         They should match. index.html is uploaded to Netlify and server.js to Render, and
         the audit tab warns you when they have drifted apart.
+      </div>
+
+      <div class="sl" style="margin-top:12px">Audit history</div>
+      <div style="font-size:11px;color:var(--text3);line-height:1.5;margin-bottom:6px">
+        Status: <strong id="hist-status" style="font-family:'DM Mono',monospace">checking…</strong>
+      </div>
+      <button class="btn bs" type="button" onclick="testHistory()">Test history connection</button>
+      <div style="font-size:11px;color:var(--text3);margin-top:6px;line-height:1.5">
+        Every PDF you download is filed automatically. If this says anything other than
+        connected, it is not being saved — the reason will say which half is refusing.
       </div>
 
       <div class="sl" style="margin-top:12px">Page speed test</div>
@@ -830,7 +851,7 @@ textarea{resize:vertical;min-height:60px}
 // different vintages. Both carry the same stamp and the app compares them,
 // because "did you upload both files?" is not something anyone should have
 // to remember -- and a half-upload looks exactly like a fix that did not work.
-const BUILD = '2026-10-01.1';
+const BUILD = '2026-10-01.9';
 const DEFAULT_PROXY = 'https://jimmy-digital-audit.onrender.com';
 let AD = {}; // audit data store
 
@@ -919,10 +940,37 @@ function toast(msg) {
 }
 
 // ── Navigation ────────────────────────────────────────────────────────────────
+// History is the one feature that fails silently: a PDF still downloads, so
+// nothing on screen says the filing did not happen. This asks the proxy, which
+// is the only place that knows.
+async function testHistory() {
+  const el = document.getElementById('hist-status');
+  if (!el) return;
+  el.textContent = 'checking…'; el.style.color = '';
+  try {
+    const r = await pf('/history/diag');
+    const d = await r.json();
+    if (d.ok) {
+      el.style.color = 'var(--green)';
+      el.textContent = 'connected · ' + (d.rows != null ? d.rows + ' audits filed' : 'ready');
+    } else {
+      el.style.color = 'var(--red)';
+      el.textContent = (d.problem || 'not working') +
+        (d.table && d.table !== 'ok' ? '  ·  table: ' + d.table : '') +
+        (d.storage && d.storage !== 'ok' ? '  ·  storage: ' + d.storage : '') +
+        (d.keyKind ? '  ·  key: ' + d.keyKind : '');
+    }
+  } catch (e) {
+    el.style.color = 'var(--red)';
+    el.textContent = 'could not reach the proxy: ' + e.message;
+  }
+}
+
 function showPage(n) {
   document.querySelectorAll('.page').forEach(p => p.classList.toggle('active', p.id==='page-'+n));
   document.querySelectorAll('.nb').forEach((b,i) => b.classList.toggle('active', ['audit','history','settings'][i]===n));
   if (n==='history') renderHist();
+  if (n==='settings') testHistory();
 }
 
 function st(n) {
@@ -1099,8 +1147,7 @@ async function testGBPImages() {
   const name = getVal('clientName');
   const url  = getVal('clientURL');
   if (!name) { msg.textContent = '✗ Enter the firm name on the audit tab first.'; return; }
-  let loc = (getVal('clientCity') || '').trim().replace(/\s*,\s*/g, ',');
-  if (loc && !/united states|usa/i.test(loc)) loc += ',United States';
+  const loc = (getVal('clientCity') || '').trim();   // the proxy normalises it
   msg.textContent = 'Reading the Google listing for ' + name + '...';
   try {
     const r = await pf('/gbp/diag?name=' + encodeURIComponent(name) +
@@ -1321,11 +1368,18 @@ function renderCrawl(d) {
   h += row('Indexable by search engines',
            d.indexable === true ? 'yes' : d.indexable === false ? 'no' : 'unknown',
            d.indexableNote || '');
-  h += row('Sitemap at /sitemap.xml',
-           d.sitemap === true ? 'yes' : 'no',
-           d.sitemapError ? 'fetch failed: ' + d.sitemapError
-             : d.sitemapStatus ? d.sitemapUrl + ' returned HTTP ' + d.sitemapStatus
-             : d.sitemapUrl || '');
+  // A bare "no" with no detail is what made this look broken: the proxy records
+  // every location it tried and what came back from each, and none of it was
+  // being shown. Found or not, the evidence goes on screen.
+  h += row('Sitemap',
+           d.sitemap === true ? 'yes' : d.sitemapBlocked ? 'unknown' : 'no',
+           d.sitemap === true
+             ? (d.sitemapUrl || '') + (d.sitemapNote ? ' — ' + d.sitemapNote : '')
+             : d.sitemapError ? 'fetch failed: ' + d.sitemapError
+             : (d.sitemapNote ? d.sitemapNote + '. ' : '') +
+               ((d.sitemapTried || []).length
+                 ? 'Tried: ' + d.sitemapTried.join('   ·   ')
+                 : 'no locations were tried'));
   body.innerHTML = h;
 }
 
@@ -1848,10 +1902,13 @@ async function runGBP(name, url, city) {
   if (!name) { setStep('gbp', 'error', 'no firm name entered — the GBP lookup needs one'); return; }
   const proxy = lg('cfg_proxy') || DEFAULT_PROXY;
   try {
-    // GBP listings are local — pass the city/state so the lookup resolves.
-    // DataForSEO wants "Houston,Texas,United States" with NO spaces around commas.
-    let loc = (city || '').trim().replace(/\s*,\s*/g, ',');
-    if (loc && !/united states|usa/i.test(loc)) loc += ',United States';
+    // GBP listings are local, so the city/state goes with the lookup. It is
+    // sent exactly as typed: the proxy owns the conversion into the form
+    // DataForSEO accepts, because doing it here as well meant two rules that
+    // could disagree -- and they did. "Houston, Texas, USA" kept its USA,
+    // which DataForSEO does not accept, and "Houston, TX" kept its TX, which
+    // it does not accept either. Both came back as 40501 Invalid Field.
+    const loc = (city || '').trim();
     const locParam = loc ? '&location=' + encodeURIComponent(loc) : '';
     const r = await pf(`/gbp/info?name=${encodeURIComponent(name)}&url=${encodeURIComponent(url)}${locParam}`);
     const d = await r.json();
@@ -1866,6 +1923,17 @@ async function runGBP(name, url, city) {
       details.innerHTML = '<span class="badge br">GBP not found'+(d.note?' — '+d.note:'')+'</span>';
       setStep('gbp', 'done', d.note || 'no match');
       return;
+    }
+
+    // DataForSEO would not take the city, so this listing was found nationally.
+    // Worth saying: the domain match is what makes it trustworthy, and without
+    // the city there was more to sift through.
+    if (d.degraded) {
+      AD.gbpDegraded = 'DataForSEO did not recognise the city, so the listing was ' +
+                       'found with a nationwide search' +
+                       (d.verified ? ' and matched to this firm by its website.'
+                                   : ' and could NOT be matched to this firm by website.');
+      console.warn('GBP: ' + AD.gbpDegraded);
     }
 
     // Auto-check ONLY when the listing was matched to this firm's own domain.
@@ -1901,9 +1969,16 @@ async function runGBP(name, url, city) {
       (d.verified ? '' :
         '<div style="font-size:12px;color:var(--text3);margin-top:6px">Matched on name only'+
         (d.url ? ' — this listing\'s site is <b>'+d.url+'</b>' : '')+
-        '. Confirm it is the right firm, then tick the GBP boxes by hand.</div>');
+        '. Confirm it is the right firm, then tick the GBP boxes by hand.</div>') +
+      (d.degraded ?
+        '<div style="font-size:12px;color:var(--text3);margin-top:6px">'+
+        'Google did not recognise <b>'+escHtml(getVal('clientCity')||'that city')+'</b> as a '+
+        'searchable location, so this was found with a nationwide search. '+
+        'Check the city spelling if the listing below looks wrong.</div>' : '');
 
-    setStep('gbp', 'done', d.verified ? '' : 'unverified — name-only match');
+    setStep('gbp', 'done', d.verified
+      ? (d.degraded ? 'found nationwide — city not recognised' : '')
+      : 'unverified — name-only match');
   } catch(e) {
     console.error('GBP error:', e.message);
     document.getElementById('gbp-block').style.display = '';
@@ -3569,11 +3644,14 @@ const bar = (pct, w, h, fill, track) => ({
 const rule = (w, color) => ({ canvas: [{ type: 'line', x1: 0, y1: 0, x2: w, y2: 0, lineWidth: 0.6, lineColor: color || RC.g200 }] });
 
 
-// The cover holds about 554 characters of summary before the block below it is
-// pushed onto a second page -- measured by rendering at increasing lengths and
-// watching the page count, not estimated. SUMMARY_MAX leaves headroom for text
-// that wraps worse than the sample did.
-const SUMMARY_MAX = 420;
+// The summary sits in a fixed box on a fixed grid: SUMMARY_LINES lines at
+// SUMMARY_SIZE, and nothing below it moves whatever it does. Overrunning can
+// no longer push the page -- it would only crowd the score label -- so the cap
+// is set to fit the box. 54 characters a line is deliberately pessimistic: the
+// measured average is 66, and this has to hold for the raggedest wrap, not the
+// average one.
+const SUMMARY_SIZE = 12.5, SUMMARY_LEAD = 23.8, SUMMARY_LINES = 7;
+const SUMMARY_MAX = SUMMARY_LINES * 54;      // 378
 function fitSummary(text) {
   const t = (text || '').trim();
   if (t.length <= SUMMARY_MAX) return t;
@@ -3585,8 +3663,12 @@ function fitSummary(text) {
     out += p;
   }
   out = out.trim();
-  // A single sentence longer than the budget still has to be cut somewhere.
-  if (!out) out = t.slice(0, SUMMARY_MAX).replace(/\s+\S*$/, '') + '…';
+  // Dropping a whole sentence can waste most of the budget -- one 190-character
+  // sentence kept and a 210-character one dropped leaves the box two-thirds
+  // empty, which on a fixed grid is a visible hole rather than tighter spacing.
+  // Below three quarters of the budget, cut at a word instead and fill it.
+  if (out.length < SUMMARY_MAX * 0.75)
+    out = t.slice(0, SUMMARY_MAX).replace(/\s+\S*$/, '') + '…';
   return out;
 }
 
@@ -3606,8 +3688,45 @@ const COVER_W = Math.round(792 * COVER_ASPECT);      // 1408
 const COVER_X = Math.round((612 - COVER_W) / 2);     // -398, centred
 
 // ── cover ────────────────────────────────────────────────────────────────────
+// The cover is a FIXED GRID, not a flow. Every block is placed at a hard-coded
+// y from the top of the page and nothing below it can be pushed.
+//
+// It used to be a stack of margins. That works until one value runs long -- a
+// summary two lines over, say -- and then everything below shifts down, the
+// unbreakable score block will not fit, and pdfmake moves the whole of it to
+// page 2. Page 2 has no purple behind it, and the cover's text is white, so
+// the block did not look misplaced: it looked erased. Only the gold and grey
+// survived. That failure was shipped twice.
+//
+// With fixed positions the worst a long value can do is crowd its neighbour.
+// It cannot move anything, it cannot add a page, and nothing can disappear.
+// Change the design by changing these numbers -- they are measured from the
+// rendered sheet, and test_cover.js reads them back out of the PDF.
+const COVER_Y = {
+  logo:      62,   // right-aligned mark
+  title:    152,   // "Digital Audit"
+  meta:     211,   // firm · url · reviewed
+  chip:     255,   // SUMMARY
+  summary:  288,   // fixed box: SUMMARY_LINES at SUMMARY_LEAD
+  scoreLbl: 461,   // OVERALL DIGITAL SCORE — n OF 100
+  band:     476,   // "On track"
+  delta:    514,   // optional "Up n points since the last review."
+  stats:    527,   // score ring + the four figures
+  channels: 635,   // the three category scores and their bars
+  foot:     721    // disclosure
+};
+const COVER_LOGO_W = 168;
+const SUMMARY_W = CONTENT - 120;   // the box the summary wraps inside
+
 function cover(d, logoWhite) {
   const s = d.scores;
+  // Place a block at a hard y. Columns rather than a bare node so the width is
+  // the one named here and not whatever pdfmake infers from the page.
+  const at = (y, node, w) => ({
+    columns: [{ width: w || CONTENT, ...node }],
+    absolutePosition: { x: M, y }
+  });
+
   // `flag` lifts a figure out of the row: on a purple cover magenta is too
   // close to the background to read, so the accent is the gold used for every
   // other call to action in the report.
@@ -3627,55 +3746,52 @@ function cover(d, logoWhite) {
     ]
   });
 
-  // The cover was filling about five sixths of the page and leaving a dead band
-  // along the bottom. The gaps below are what spread it over the full sheet --
-  // they are the design, not padding, so they are set deliberately rather than
-  // left to fall out of the defaults.
   return [
-    { svg: logoWhite, width: 168, alignment: 'right', margin: [0, 14, 0, 40] },
-    { text: 'Digital Audit', font: 'Display', fontSize: 38, color: RC.white, margin: [0, 0, 0, 10] },
-    { text: [d.firm, '  ·  ', d.url, '  ·  Reviewed ', d.reviewed].join(''),
-      font: 'Body', fontSize: 9.5, color: '#CBB8DC', margin: [0, 0, 0, 34] },
+    { svg: logoWhite, width: COVER_LOGO_W,
+      absolutePosition: { x: PAGE_W - M - COVER_LOGO_W, y: COVER_Y.logo } },
+
+    at(COVER_Y.title, { text: 'Digital Audit', font: 'Display', fontSize: 38, color: RC.white }),
+
+    at(COVER_Y.meta, { text: [d.firm, '  ·  ', d.url, '  ·  Reviewed ', d.reviewed].join(''),
+                       font: 'Body', fontSize: 9.5, color: '#CBB8DC' }),
 
     { table: { body: [[{ text: 'SUMMARY', font: 'Body', bold: true, fontSize: 7, color: RC.white,
         characterSpacing: 1.1, margin: [5, 3, 5, 3] }]] },
       layout: { hLineWidth: () => 0.7, vLineWidth: () => 0.7,
                 hLineColor: () => '#A88FC0', vLineColor: () => '#A88FC0' },
-      margin: [0, 0, 0, 14] },
-    { text: fitSummary(d.summary), font: 'Display', fontSize: 12.5, lineHeight: 1.5,
-      color: '#F2EAF7', margin: [0, 0, 120, 30] },
+      absolutePosition: { x: M, y: COVER_Y.chip } },
 
-    // Left-aligned with everything above it. The old 120pt indent floated this
-    // block into the middle of the page with nothing to line up against.
-    { text: `OVERALL DIGITAL SCORE — ${s.overall} OF 100`, font: 'Body', bold: true, fontSize: 7.5,
-      color: '#CBB8DC', characterSpacing: 1.1, margin: [0, 0, 0, 6] },
-    { text: s.band, font: 'Display', fontSize: 23, color: RC.white, margin: [0, 0, 0, 6] },
-    { text: d.deltaLine || '', font: 'Body', fontSize: 9, color: '#CBB8DC', margin: [0, 0, 0, 16] },
+    at(COVER_Y.summary, { text: fitSummary(d.summary), font: 'Display', fontSize: SUMMARY_SIZE,
+                          lineHeight: 1.5, color: '#F2EAF7' }, SUMMARY_W),
 
-    // One unbreakable block. Left to itself pdfmake will split this at a page
-    // boundary, which orphans the category numbers and their bars onto a blank
-    // second page while their labels stay on the cover. The summary is capped
-    // so it should never come to this; unbreakable makes the failure legible
-    // rather than broken.
-    { unbreakable: true, stack: [
-      { columns: [
-          { width: 110, stack: [
-              { canvas: [{ type: 'ellipse', x: 34, y: 34, r1: 33, r2: 33, lineColor: '#B9A3D0', lineWidth: 2.4 }] },
-              { text: String(s.overall), font: 'Display', bold: true, fontSize: 25, color: RC.white,
-                alignment: 'left', margin: [19, -45, 0, 0] }
-            ] },
-          { width: '*', columns: [
-              { width: '*', stack: [ stat(d.kpiPassed, 'KPIs passed'), { text: '', margin: [0, 9, 0, 0] }, stat(d.aeoPassed, 'AEO KPIs passed') ] },
-              { width: '*', stack: [ stat(d.needWork, 'need work', true), { text: '', margin: [0, 9, 0, 0] }, stat(d.ptsAvailable, `available in ${TOP_N_WORD} fixes`, true) ] }
-            ] }
-        ], margin: [0, 0, 0, 36] },
+    at(COVER_Y.scoreLbl, { text: `OVERALL DIGITAL SCORE — ${s.overall} OF 100`, font: 'Body',
+                           bold: true, fontSize: 7.5, color: '#CBB8DC', characterSpacing: 1.1 }),
 
-      { columns: [chan('Company Visibility', s.v), chan('Website Performance', s.w), chan('Social Media', s.s)],
-        columnGap: 16, margin: [0, 0, 0, 32] },
+    at(COVER_Y.band, { text: s.band, font: 'Display', fontSize: 23, color: RC.white }),
 
-      { text: `${DISCLOSURE}  ·  Prepared by Cetera GrowthLine`,
-        font: 'Body', fontSize: 7, color: '#B9A6CC' }
-    ] }
+    // Printed only when there is a prior review. On a flow layout an empty node
+    // still reserved its line; here the slot is simply left blank.
+    ...(d.deltaLine
+      ? [at(COVER_Y.delta, { text: d.deltaLine, font: 'Body', fontSize: 9, color: '#CBB8DC' })]
+      : []),
+
+    { columns: [
+        { width: 110, stack: [
+            { canvas: [{ type: 'ellipse', x: 34, y: 34, r1: 33, r2: 33, lineColor: '#B9A3D0', lineWidth: 2.4 }] },
+            { text: String(s.overall), font: 'Display', bold: true, fontSize: 25, color: RC.white,
+              alignment: 'left', margin: [19, -45, 0, 0] }
+          ] },
+        { width: '*', columns: [
+            { width: '*', stack: [ stat(d.kpiPassed, 'KPIs passed'), { text: '', margin: [0, 9, 0, 0] }, stat(d.aeoPassed, 'AEO KPIs passed') ] },
+            { width: '*', stack: [ stat(d.needWork, 'need work', true), { text: '', margin: [0, 9, 0, 0] }, stat(d.ptsAvailable, `available in ${TOP_N_WORD} fixes`, true) ] }
+          ] }
+      ], absolutePosition: { x: M, y: COVER_Y.stats } },
+
+    { columns: [chan('Company Visibility', s.v), chan('Website Performance', s.w), chan('Social Media', s.s)],
+      columnGap: 16, absolutePosition: { x: M, y: COVER_Y.channels } },
+
+    at(COVER_Y.foot, { text: `${DISCLOSURE}  ·  Prepared by Cetera GrowthLine`,
+                       font: 'Body', fontSize: 7, color: '#B9A6CC' })
   ];
 }
 
@@ -3718,7 +3834,7 @@ const GTEXT = {
   "c-ga":     { title: "Use Google Analytics to Monitor Traffic",
                text: "Google Analytics tracks your website traffic and performance, helping you see which pages and content drive engagement. While it doesn’t directly impact rankings, these insights let you improve content and user experience—factors that support stronger SEO and AEO visibility." },
   "c-rcta":   { title: "Add a Google Review Call-to-Action",
-               text: "Add a call-to-action on your website that directs clients to your Google Business Profile and guides them on how to leave a review. Be sure to follow Cetera’s compliance rules when including this information. Client reviews not only improve visibility in search but also strengthen AEO by signaling credibility and trust to AI tools." },
+               text: "Add a call-to-action on your website that directs clients to your Google Business Profile. There is a Referral systems page in the MarketingCentral website channel you can add to your site.  Simply add it to a resources section to start encouraging reviews.  Be sure to follow Cetera’s compliance rules when including this information." },
   "c-awd":    { title: "Highlight Awards and Recognition",
                text: "Showcase industry awards, community recognition, or firm accolades on your website. Highlighting awards builds credibility with prospects and reinforces authority signals that help your firm surface in both search results and AI-generated answers." },
   "c-spd":    { title: "A New Website Update May help",
@@ -4091,7 +4207,16 @@ function assembleReport() {
     };
   };
 
-  const imgOver = lh.imgList ? lh.imgList.length : null;
+  // imgList is Lighthouse's "these could be optimised" list, which answers a
+  // different question and is often empty on a page that still serves one
+  // oversized image -- so the tile printed 0 next to a failing "Are all images
+  // sized under 500 KB?" on the same page. imgOverCount is the count the check
+  // itself is made of: images in the network log above the limit.
+  //
+  // Gated on imagesOk so an unmeasured run prints an em dash rather than a
+  // confident zero: imgOverCount is 0 both when nothing is over the limit and
+  // when nothing was looked at.
+  const imgOver = lh.imagesOk == null ? null : (lh.imgOverCount ?? null);
   const imgAll  = (lh.byType || []).find(t => t.type === 'image');
 
   return {
@@ -4128,8 +4253,9 @@ function assembleReport() {
       section('v', [
         { label:'Business listings', value: dirs ? dirs.freeFound : null,
           unit: dirs ? `of ${dirs.freeTotal} free` : '', good:'Above 3 is good', ok: dirs && dirs.freeFound >= 3 },
-        { label:'Domain authority', value: AD.da ?? null,
-          unit: AD.daSource === 'dataforseo' ? '/ 100 (DataForSEO)' : '/ 100',
+        // Which vendor supplied the figure is ours to know, not the client's --
+        // it is still recorded on AD.daSource for the audit log.
+        { label:'Domain authority', value: AD.da ?? null, unit: '/ 100',
           good:'Above 5 is good', ok: AD.da > 5 },
         { label:'Organic traffic', value: AD.traffic ?? null, unit:'visits / mo', good:'Above 50 is good', ok: AD.traffic > 50 },
         { label:'Ranking keywords', value: AD.keywords ?? null, unit:'keywords', good:'Above 75 is good', ok: AD.keywords > 75 }

@@ -1,11 +1,12 @@
 const express = require('express');
+const zlib    = require('zlib');
 const cors    = require('cors');
 
 const app  = express();
 // Bumped whenever a build is handed over. /health reports it so the app can
 // tell the user their page and their proxy are different vintages -- the
 // failure mode is a fix that silently is not there.
-const BUILD = '2026-10-01.1';
+const BUILD = '2026-10-01.9';
 const PORT = process.env.PORT || 3001;
 
 // Every one of these is trimmed. A key pasted into a hosting panel's env
@@ -1527,6 +1528,26 @@ async function onPageRescue(url, results, whyDirectFailed) {
   }
   if (op.title) results.title = op.title;
   if (op.description) results.description = op.description;
+
+  // OnPage answers indexability and the meta description, but its response
+  // carries no viewport field at all. So on a site that refuses a direct fetch,
+  // a SUCCESSFUL OnPage call used to fill those two and return -- leaving
+  // "Mobile optimized" unmeasured for a site whose homepage plainly declares a
+  // viewport. The reader never got the chance to look.
+  //
+  // The mobile declaration is one meta tag in the head, and the model's fetcher
+  // reads that head. So anything still unanswered goes on to it instead of
+  // stopping here. It only fills nulls, so nothing OnPage established is lost,
+  // and it is skipped entirely when there is nothing left to ask.
+  const missing = ['viewport', 'indexable', 'hasMeta'].filter(k => results[k] == null);
+  if (missing.length) {
+    // The reason handed on is why the DIRECT read failed, not which fields are
+    // outstanding: lastResortRead writes it into whichever note it fills, and
+    // an indexability note explaining that OnPage had no viewport field reads
+    // as a non-sequitur to whoever is trying to understand the box.
+    console.log('OnPage did not report ' + missing.join(', ') + ' — asking the model');
+    await lastResortRead(url, results, whyDirectFailed);
+  }
 }
 
 app.get('/site/onpage', async (req, res) => {
@@ -1582,6 +1603,33 @@ app.get('/site/check', async (req, res) => {
       if (rr.ok) robotsBody = (await rr.text()).slice(0, 100000);
     } catch (e) { results.robotsTxt = false; }
 
+// What counts as a sitemap, and why a status code is not enough.
+//
+// "Just ping /sitemap.xml and look for a 404" fails on the most common case in
+// this market: a site with no sitemap that answers /sitemap.xml with its styled
+// 404 page and HTTP 200. Status alone would pass every one of those. So the
+// body is sniffed -- but the sniff had gaps of its own:
+//
+//   * a prefixed root element (<sm:urlset) failed a bare '<urlset' match
+//   * a .gz sitemap arrives as gzip BYTES, not a gzip-encoded response, so
+//     fetch hands back binary and the text match never had a chance
+//   * sitemaps.org also allows a plain-text file of one URL per line
+const SITEMAP_RE = /<\s*([a-z0-9_.-]+:)?(urlset|sitemapindex)\b/i;
+
+function sitemapBody(buf) {
+  if (buf.length > 2 && buf[0] === 0x1f && buf[1] === 0x8b) {
+    try { return zlib.gunzipSync(buf).toString('utf8'); } catch { return ''; }
+  }
+  return buf.toString('utf8');
+}
+
+// The plain-text form, validated strictly: every line a URL and nothing else,
+// so an ordinary text file cannot pass for one.
+function isSitemapTxt(text) {
+  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean).slice(0, 50);
+  return lines.length > 0 && lines.every(l => /^https?:\/\/\S+$/i.test(l));
+}
+
     const declared = [...robotsBody.matchAll(/^\s*sitemap\s*:\s*(\S+)/gim)].map(m => m[1].trim());
     const candidates = [
       ...declared,
@@ -1589,32 +1637,42 @@ app.get('/site/check', async (req, res) => {
       base + '/sitemap_index.xml',     // Yoast, and most WordPress SEO plugins
       base + '/wp-sitemap.xml',        // WordPress 5.5+ core
       base + '/sitemap-index.xml',
-      base + '/sitemap1.xml'
+      base + '/sitemap1.xml',
+      base + '/sitemap.xml.gz',        // served as gzip bytes, not gzip encoding
+      base + '/sitemap.txt'            // the plain-text form the spec allows
     ].filter((v, i, a) => a.indexOf(v) === i);
     results.sitemapDeclared = declared;
 
-    results.sitemap = false;
-    results.sitemapTried = [];
-    for (const cand of candidates) {
+    // Probed together rather than one after another. Sequentially, a site with
+    // no sitemap and a slow 404 spent up to ten seconds per candidate before
+    // answering, and adding candidates made that worse; concurrently the whole
+    // probe costs one round trip and the list can grow freely. Priority order
+    // is preserved by picking from `candidates`, not by arrival.
+    const probes = await Promise.all(candidates.map(async cand => {
       try {
         const sr = await fetch(cand, { headers: UA, redirect: 'follow', signal: AbortSignal.timeout(10000) });
-        if (!sr.ok) { results.sitemapTried.push(cand + ' → HTTP ' + sr.status); continue; }
-        // Sniff the body: a soft-404 that returns 200 with an HTML page is not
-        // a sitemap. Requiring <urlset or <sitemapindex rather than merely
-        // "<?xml" also stops an XML-formatted error page counting as one.
-        const body = (await sr.text()).slice(0, 4000).toLowerCase();
-        if (body.includes('<urlset') || body.includes('<sitemapindex')) {
-          results.sitemap    = true;
-          results.sitemapUrl = cand;
-          results.sitemapStatus = sr.status;
-          results.sitemapNote = declared.includes(cand)
-            ? 'declared in robots.txt' : 'found at ' + cand.replace(base, '');
-          break;
-        }
-        results.sitemapTried.push(cand + ' → 200 but not a sitemap');
+        if (!sr.ok) return { cand, note: cand + ' → HTTP ' + sr.status };
+        const ct   = (sr.headers.get('content-type') || '').split(';')[0].trim();
+        const body = sitemapBody(Buffer.from(await sr.arrayBuffer()));
+        const ok   = SITEMAP_RE.test(body.slice(0, 20000)) ||
+                     (/\.txt$/i.test(cand) && isSitemapTxt(body));
+        if (ok) return { cand, ok: true, status: sr.status };
+        // Say WHAT came back. "200 but not a sitemap" gave no way to tell a
+        // soft 404 from a sitemap this code failed to recognise.
+        return { cand, note: cand + ' → 200 ' + (ct || 'no content-type') + ', not a sitemap: "' +
+                 body.replace(/\s+/g, ' ').trim().slice(0, 60) + '"' };
       } catch (e) {
-        results.sitemapTried.push(cand + ' → ' + e.message);
+        return { cand, note: cand + ' → ' + e.message };
       }
+    }));
+    const hit = probes.find(p => p.ok);
+    results.sitemap = !!hit;
+    results.sitemapTried = probes.filter(p => !p.ok).map(p => p.note);
+    if (hit) {
+      results.sitemapUrl    = hit.cand;
+      results.sitemapStatus = hit.status;
+      results.sitemapNote   = declared.includes(hit.cand)
+        ? 'declared in robots.txt' : 'found at ' + hit.cand.replace(base, '');
     }
     if (!results.sitemap) {
       // Every candidate refused with the same status? That is the WAF blocking
@@ -1641,7 +1699,7 @@ app.get('/site/check', async (req, res) => {
         } else {
           // OnPage was refused too. One fetcher left that demonstrably is not.
           const ai = await claudeFetchRaw(probe, 600);
-          if (!ai.error && /<\s*(urlset|sitemapindex)\b/i.test(ai.body)) {
+          if (!ai.error && SITEMAP_RE.test(ai.body)) {
             // The same test a direct fetch would face: prose describing a
             // sitemap fails it, so only real markup can pass.
             results.sitemap     = true;
@@ -1982,39 +2040,76 @@ function auditDomain(url, fallback) {
   return v.split(/[\/?#]/)[0];
 }
 
+// How the key is sent. This was wrong, and it is worth saying exactly how so it
+// does not get "fixed" back.
+//
+// The code used to send the key on the apikey header ALONE for the new
+// sb_secret_ format, on the strength of a docs line saying a secret key cannot
+// go in Authorization: Bearer. Checked against the reference implementation,
+// that is backwards. supabase-js builds its headers like this:
+//
+//   const allowKeyAsBearer = !omitApiKeyAsBearer && isNewApiKey(supabaseKey)
+//   if (!headers.has('apikey'))        headers.set('apikey', supabaseKey)
+//   if (!headers.has('Authorization')) {
+//     const bearer = realToken ?? (allowKeyAsBearer ? supabaseKey : null)
+//     if (bearer) headers.set('Authorization', `Bearer ${bearer}`)
+//   }
+//
+// -- it sends Bearer SPECIFICALLY for a new-format key, and for a legacy JWT
+// _getAccessToken falls back to the key itself, so both formats get both
+// headers. Storage in particular authenticates on Authorization, which is why
+// sending apikey alone filed nothing and uploaded nothing.
+//
+// So: both headers, as the official client does. And because this has now been
+// wrong in each direction, a 401 or 403 is retried once with apikey alone
+// rather than taken as final -- whichever combination the platform wants, the
+// proxy finds it, and says which one worked.
+let SB_AUTH_MODE = null;        // 'both' | 'apikey' once something has answered
+
+function sbHeaders(withBearer) {
+  const h = { apikey: SUPABASE_KEY };
+  if (withBearer) h.Authorization = 'Bearer ' + SUPABASE_KEY;
+  return h;
+}
+
 async function sbFetch(path, opts) {
   if (!SUPABASE_URL || !SUPABASE_KEY) {
     const e = new Error('History is not configured on the proxy — set SUPABASE_URL and SUPABASE_SERVICE_KEY');
     e.unconfigured = true; throw e;
   }
   const o = opts || {};
-  // Supabase now issues two kinds of key and they are NOT sent the same way.
-  //
-  //   legacy  service_role, a JWT starting "eyJ". Goes on both headers, which
-  //           is what every older example shows.
-  //   new     sb_secret_..., which is NOT a JWT. Supabase's own docs are
-  //           explicit: "You cannot send a publishable or secret key in the
-  //           Authorization: Bearer header. Send it on the apikey header
-  //           instead." Sent on both, the platform tries to parse it as a JWT
-  //           and rejects the request.
-  //
-  // The apikey header is correct for both, so it is always set, and the
-  // Authorization header is added only for a key that really is a JWT.
-  const isJwt = /^eyJ/.test(SUPABASE_KEY);
-  const auth  = { apikey: SUPABASE_KEY };
-  if (isJwt) auth.Authorization = 'Bearer ' + SUPABASE_KEY;
-
-  const r = await fetch(SUPABASE_URL + path, {
-    method: o.method || 'GET',
-    headers: Object.assign(auth, o.headers || {}),
-    body: o.body,
-    signal: AbortSignal.timeout(o.timeout || 20000)
-  });
-  if (!r.ok) {
+  // The remembered mode ORDERS the attempts, it does not remove one. Latching
+  // it as the only option meant a later refusal could not recover -- and the
+  // two stores do not have to agree, so one answering does not settle it for
+  // the other. The first attempt is almost always the right one, so the second
+  // costs nothing in the ordinary case.
+  const first = SB_AUTH_MODE !== 'apikey';
+  let last = null;
+  for (const withBearer of [first, !first]) {
+    const r = await fetch(SUPABASE_URL + path, {
+      method: o.method || 'GET',
+      headers: Object.assign(sbHeaders(withBearer), o.headers || {}),
+      body: o.body,
+      signal: AbortSignal.timeout(o.timeout || 20000)
+    });
+    if (r.ok) {
+      const mode = withBearer ? 'both' : 'apikey';
+      if (SB_AUTH_MODE !== mode) {
+        SB_AUTH_MODE = mode;
+        console.log('Supabase auth mode:', mode);
+      }
+      return r;
+    }
     const t = await r.text().catch(() => '');
-    throw new Error('Supabase ' + r.status + ': ' + t.slice(0, 300));
+    last = new Error('Supabase ' + r.status + ': ' + t.slice(0, 300));
+    last.status = r.status;
+    // Only an auth refusal is worth trying the other way. A 404, a constraint
+    // violation or a payload that is too large will fail identically.
+    if (r.status !== 401 && r.status !== 403) throw last;
+    console.log('Supabase ' + r.status + ' with ' +
+                (withBearer ? 'apikey+bearer' : 'apikey only') + ' — trying the other');
   }
-  return r;
+  throw last;
 }
 
 const sbJson = async (path, opts) => (await sbFetch(path, Object.assign({
@@ -2077,6 +2172,55 @@ app.post('/history/save', express.json({ limit: '25mb' }), async (req, res) => {
 
 // The history list. Deliberately does NOT select `state`: 200 audits of 14KB
 // each is 3MB to render a list of names.
+// Why history is not working, answered from the proxy rather than guessed at
+// from the browser. It reports the two things that can be wrong without saying
+// so out loud -- the env vars are missing, or the key is refused -- and tries
+// BOTH stores, because a save writes to storage first and the table second, so
+// a storage refusal leaves the table empty and looks like nothing ran.
+app.get('/history/diag', async (req, res) => {
+  const out = {
+    urlSet: !!SUPABASE_URL,
+    keySet: !!SUPABASE_KEY,
+    // Enough to tell which key was pasted, never enough to use it.
+    keyKind: !SUPABASE_KEY ? 'none'
+           : /^eyJ/.test(SUPABASE_KEY) ? 'legacy JWT'
+           : /^sb_secret_/.test(SUPABASE_KEY) ? 'new secret (sb_secret_)'
+           : /^sb_publishable_/.test(SUPABASE_KEY) ? 'PUBLISHABLE — this is the wrong key, it cannot write'
+           : 'unrecognised format',
+    keyTail: SUPABASE_KEY ? '…' + SUPABASE_KEY.slice(-4) : null,
+    bucket: HIST_BUCKET,
+    authMode: SB_AUTH_MODE
+  };
+  if (!SUPABASE_URL || !SUPABASE_KEY) {
+    out.ok = false;
+    out.problem = 'The proxy has no Supabase credentials. Set SUPABASE_URL and ' +
+                  'SUPABASE_SERVICE_KEY in the Render environment and redeploy.';
+    return res.json(out);
+  }
+  // The table: can we read it, and how many rows are already filed?
+  try {
+    const r = await sbFetch('/rest/v1/audits?select=id&limit=1', { headers: { Prefer: 'count=exact' } });
+    out.table = 'ok';
+    const range = r.headers.get('content-range') || '';
+    out.rows = range.includes('/') ? range.split('/').pop() : null;
+  } catch (e) { out.table = 'FAILED: ' + e.message; }
+  // Storage: a save uploads the PDF before it inserts the row, so this is the
+  // half that fails first and the half that leaves no trace when it does.
+  try {
+    await sbFetch('/storage/v1/object/list/' + HIST_BUCKET, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prefix: '', limit: 1 })
+    });
+    out.storage = 'ok';
+  } catch (e) { out.storage = 'FAILED: ' + e.message; }
+
+  out.authMode = SB_AUTH_MODE;
+  out.ok = out.table === 'ok' && out.storage === 'ok';
+  if (!out.ok) out.problem = 'Supabase refused the proxy. Check the key is the ' +
+    'SECRET (service) key, not the publishable one, and that it belongs to this project.';
+  res.json(out);
+});
+
 app.get('/history/list', async (req, res) => {
   const q = String(req.query.q || '').trim();
   const cols = 'id,created_at,client_domain,client_name,client_url,score_overall,' +
@@ -2264,6 +2408,86 @@ app.get('/directories', async (req, res) => {
 });
 
 // ── 4. GBP — claimed, rating, review count, photos ───────────────────────────
+// DataForSEO matches location_name against its own list and nothing else: the
+// canonical form is "Houston,Texas,United States" -- no space after the comma,
+// the state spelled out in full, the country on the end. The audit asks for
+// "City, State" in free text, so the obvious thing to type, "Houston, Texas",
+// is not in that list and comes back as
+//
+//   40501 Invalid Field: 'location_name'
+//
+// which killed the whole Google Business check, and no amount of retrying the
+// same string was ever going to fix it.
+//
+// So normalise what was typed into the form DataForSEO accepts, and if it still
+// will not take it, fall back to the country rather than losing the check. A
+// national lookup on an advisory firm's name usually finds the same listing --
+// the city only disambiguates -- so the degraded answer is worth having, and
+// the caller is told which one it got.
+const US_STATES = {
+  al:'Alabama', ak:'Alaska', az:'Arizona', ar:'Arkansas', ca:'California',
+  co:'Colorado', ct:'Connecticut', de:'Delaware', fl:'Florida', ga:'Georgia',
+  hi:'Hawaii', id:'Idaho', il:'Illinois', in:'Indiana', ia:'Iowa', ks:'Kansas',
+  ky:'Kentucky', la:'Louisiana', me:'Maine', md:'Maryland', ma:'Massachusetts',
+  mi:'Michigan', mn:'Minnesota', ms:'Mississippi', mo:'Missouri', mt:'Montana',
+  ne:'Nebraska', nv:'Nevada', nh:'New Hampshire', nj:'New Jersey',
+  nm:'New Mexico', ny:'New York', nc:'North Carolina', nd:'North Dakota',
+  oh:'Ohio', ok:'Oklahoma', or:'Oregon', pa:'Pennsylvania', ri:'Rhode Island',
+  sc:'South Carolina', sd:'South Dakota', tn:'Tennessee', tx:'Texas',
+  ut:'Utah', vt:'Vermont', va:'Virginia', wa:'Washington', wv:'West Virginia',
+  wi:'Wisconsin', wy:'Wyoming', dc:'District of Columbia'
+};
+const GBP_FALLBACK_LOCATION = 'United States';
+
+// "Houston, TX" -> "Houston,Texas,United States". Returns null for empty input
+// so the caller uses the country on its own.
+function dfsLocation(raw) {
+  const t = String(raw || '').trim();
+  if (!t) return null;
+  // Split on commas, drop the empties, and tidy each part.
+  let parts = t.split(',').map(x => x.trim()).filter(Boolean);
+  if (!parts.length) return null;
+  // Already carries a country we recognise? Leave it to the caller's hands.
+  const last = parts[parts.length - 1].toLowerCase();
+  const hasCountry = last === 'united states' || last === 'usa' || last === 'us';
+  if (hasCountry) parts = parts.slice(0, -1);
+  // Expand a two-letter state. "TX" and "Tx" both arrive.
+  parts = parts.map(x => US_STATES[x.toLowerCase()] || x);
+  return parts.concat('United States').join(',');
+}
+
+// True when DataForSEO rejected the location rather than the request as a
+// whole -- the one failure a different location can recover from.
+const isLocationError = msg => /location/i.test(String(msg || ''));
+
+// One live my_business_info call, retried at country level when the location
+// is what DataForSEO objected to. Returns the task plus the location actually
+// used, so the caller can say which answer it has.
+async function gbpLookup(name, location, opts) {
+  const tried = [];
+  const wanted = dfsLocation(location);
+  for (const loc of [wanted, GBP_FALLBACK_LOCATION].filter(Boolean)) {
+    if (tried.includes(loc)) continue;
+    tried.push(loc);
+    const d = await dfsPost('/business_data/google/my_business_info/live', [
+      { keyword: name, location_name: loc, language_name: 'English' }
+    ], opts);
+    const top  = d && d.status_code && d.status_code !== 20000 ? d : null;
+    const task = d?.tasks?.[0];
+    const err  = top ? top : (task && task.status_code !== 20000 ? task : null);
+    if (!err) return { task, location: loc, tried, degraded: loc !== wanted };
+    // Only a location complaint is worth another call; anything else (auth,
+    // credits, a bad keyword) will fail identically at country level.
+    if (!isLocationError(err.status_message)) {
+      return { error: 'DataForSEO ' + err.status_code + ': ' + err.status_message,
+               location: loc, tried };
+    }
+    console.log('DFS GBP location rejected:', loc, '-', err.status_message);
+  }
+  return { error: 'DataForSEO rejected every location tried: ' + tried.join(' | '),
+           tried };
+}
+
 // Endpoint: /v3/business_data/google/my_business_info/live  (no polling!)
 // Two checks hang off image fields we have never actually seen the shape of,
 // and the code cannot currently tell "this firm uploaded no photos" from
@@ -2282,15 +2506,9 @@ app.get('/gbp/diag', async (req, res) => {
   if (!name) return res.status(400).json({ error: 'name required' });
   if (!DFS_LOGIN) return res.status(500).json({ error: 'DataForSEO not configured' });
   try {
-    const d = await dfsPost('/business_data/google/my_business_info/live', [
-      { keyword: name, location_name: location || 'United States', language_name: 'English' }
-    ]);
-    if (d?.status_code && d.status_code !== 20000)
-      return res.json({ error: 'DataForSEO ' + d.status_code + ': ' + d.status_message });
-    const task = d?.tasks?.[0];
-    if (task && task.status_code !== 20000)
-      return res.json({ error: 'DataForSEO ' + task.status_code + ': ' + task.status_message });
-    const items = task?.result?.[0]?.items || [];
+    const r = await gbpLookup(name, location);
+    if (r.error) return res.json({ error: r.error });
+    const items = r.task?.result?.[0]?.items || [];
     if (!items.length) return res.json({ error: 'no listing returned for that name/location' });
 
     const want = rootDomain(url || '');
@@ -2337,25 +2555,15 @@ app.get('/gbp/info', async (req, res) => {
   if (!DFS_LOGIN) return res.status(500).json({ error: 'DataForSEO not configured' });
   try {
     // The slowest call in the audit: Google Business data is fetched live.
-    const d = await dfsPost('/business_data/google/my_business_info/live', [
-      {
-        keyword:       name,
-        location_name: location || 'United States',
-        language_name: 'English'
-      }
-    ], { timeout: 90000 });
-    console.log('DFS GBP full response:', JSON.stringify(d)?.slice(0, 400));
-    // Top-level DataForSEO error (auth, credits, access) — catches what the
-    // task-level check below misses when there are no tasks at all.
-    if (d && d.status_code && d.status_code !== 20000) {
-      return res.json({ found: false, note: 'DataForSEO ' + d.status_code + ': ' + d.status_message });
-    }
-    const task = d?.tasks?.[0];
-    if (task && task.status_code !== 20000) {
-      return res.json({ found: false, note: 'DataForSEO ' + task.status_code + ': ' + task.status_message });
-    }
+    // gbpLookup normalises the typed location and retries at country level if
+    // DataForSEO will not accept it, so a "Houston, Texas" in the form no
+    // longer takes the whole check down with it.
+    const r = await gbpLookup(name, location, { timeout: 90000 });
+    if (r.error) return res.json({ found: false, note: r.error });
+    const task = r.task;
     const items = task?.result?.[0]?.items;
-    if (!items || items.length === 0) return res.json({ found: false });
+    if (!items || items.length === 0)
+      return res.json({ found: false, searchedLocation: r.location, degraded: r.degraded });
 
     // Match the listing to the firm by its website domain. Advisory firms share
     // names constantly ("Cornerstone", "Integrity"), and Google returns them by
@@ -2374,6 +2582,11 @@ app.get('/gbp/info', async (req, res) => {
     res.json({
       found:       true,
       verified,                                    // listing's site matched the audited domain
+      // Which location actually answered. `degraded` means the typed city was
+      // refused and this is the country-wide result -- still a real listing,
+      // but found without the city narrowing it.
+      searchedLocation: r.location,
+      degraded:    !!r.degraded,
       candidates:  items.length,
       matchedOn:   verified ? 'domain' : (want ? 'name-only' : 'no-url-supplied'),
       title:       biz.title        || '',

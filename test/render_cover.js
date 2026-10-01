@@ -16,7 +16,12 @@ const { chromium } = require('playwright');
   // at 100 projected to 100 -- so three-digit scores are exercised for real
   // rather than assumed to fit.
   const MAX = !!process.env.BAND_MAX;
-  const b64 = await page.evaluate(async (MAX) => {
+  // COVER_STRESS is the case that broke the cover in the field: an AI summary
+  // far longer than the sample's, plus a delta line the sample does not have.
+  // On the old flow layout this pushed the unbreakable score block onto page 2,
+  // where its white text had no purple behind it and read as erased.
+  const STRESS = !!process.env.COVER_STRESS;
+  const b64 = await page.evaluate(async ([MAX, STRESS]) => {
     // A realistic run: the figures from the screenshot the cover was critiqued on.
     document.getElementById('clientName').value = 'Totus wealth Managment';
     document.getElementById('clientURL').value  = 'https://totuswm.com';
@@ -35,11 +40,23 @@ const { chromium } = require('playwright');
     pdfMake.fonts = A.fonts;
     const d = assembleReport();
     if (MAX) { d.scores.overall = 100; d.projected = 100; }
+    if (STRESS) {
+      d.summary = 'Your firm is performing well overall across the board, with notably ' +
+        'strong visibility and social media scores driving an on-track rating and a solid ' +
+        'majority of answer-engine checks passed on the first run. The biggest single drag ' +
+        'on performance is mobile optimization, compounded by a homepage size well above the ' +
+        'benchmark and a slow largest-contentful-paint figure on throttled connections. ' +
+        'Fixing these is achievable within a quarter and should meaningfully strengthen the ' +
+        'website performance score, which is the weakest of the three categories measured. ' +
+        'Several directory listings also remain unclaimed, and the structured data markup on ' +
+        'the homepage is incomplete, both of which are quick wins for the visibility score.';
+      d.deltaLine = 'Up 7 points since the last review.';
+    }
     const doc = buildReportDoc(d, { logoWhite: A.logoWhite, logoPurple: A.logoPurple, coverBg: A.cover });
     return await new Promise(res => pdfMake.createPdf(doc).getBase64(x => res(x)));
-  }, MAX);
+  }, [MAX, STRESS]);
 
-  const name = MAX ? 'band.pdf' : 'cover.pdf';
+  const name = MAX ? 'band.pdf' : STRESS ? 'cover-stress.pdf' : 'cover.pdf';
   fs.writeFileSync(path.resolve(__dirname, name), Buffer.from(b64, 'base64'));
   console.log('wrote test/' + name);
   await b.close();

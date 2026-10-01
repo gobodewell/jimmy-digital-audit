@@ -100,6 +100,62 @@ print(pymupdf.open('${bandPdf}').page_count)
 "`).toString().trim();
   check('still five pages at the worst case', bp === '5', bp);
 
+  console.log('\nG. the cover is a fixed grid, and a long summary cannot move it');
+  // The cover used to be a stack of margins. A summary two lines over pushed the
+  // unbreakable score block onto page 2, where white text on a white page read as
+  // erased -- shipped twice. Every block now sits at a hard-coded y, so this reads
+  // those numbers out of the source and checks the PDF put the ink exactly there,
+  // both for the sample and for a summary far longer than it.
+  const srcY = fs.readFileSync(path.join(__dirname,'..','index.html'),'utf8')
+                 .match(/const COVER_Y = \{([\s\S]*?)\};/);
+  check('COVER_Y is declared in one place', !!srcY);
+  const Y = {};
+  (srcY ? srcY[1] : '').replace(/(\w+)\s*:\s*(\d+)/g, (_, k, v) => { Y[k] = +v; });
+  check('it names every block', Object.keys(Y).length === 11, Object.keys(Y).join(','));
+
+  cp.execSync('node ' + path.join(__dirname,'render_cover.js'),
+              { stdio:'pipe', env: Object.assign({}, process.env, { COVER_STRESS:'1' }) });
+
+  const linesOf = f => JSON.parse(cp.execSync(`python3 -c "
+import pymupdf, json
+d = pymupdf.open('${path.join(__dirname, f)}')
+out = []
+for blk in d[0].get_text('dict')['blocks']:
+    for ln in blk.get('lines', []):
+        t = ''.join(sp['text'] for sp in ln['spans']).strip()
+        if t: out.append({'t': t, 'y': round(ln['bbox'][1],1), 'b': round(ln['bbox'][3],1)})
+print(json.dumps({'lines': out, 'pages': d.page_count}))
+"`).toString());
+
+  // Each block identified by text only it carries.
+  const MARK = [
+    ['title',    /^Digital Audit$/],
+    ['meta',     /Reviewed \d\d\/\d\d\/\d{4}/],
+    ['summary',  /^Your firm is performing/],
+    ['scoreLbl', /^OVERALL DIGITAL SCORE/],
+    ['band',     /^On track$/],
+    ['stats',    /^\d+ of \d+$/],
+    ['channels', /^Company Visibility$/],
+    ['foot',     /^For financial professional/]
+  ];
+
+  for (const [label, file, extra] of [['sample','cover.pdf',[]],
+                                      ['long summary','cover-stress.pdf',[['delta',/^Up \d+ points/]]]]) {
+    const r = linesOf(file);
+    check(`${label}: still five pages`, r.pages === 5, String(r.pages));
+    for (const [key, re] of MARK.concat(extra)) {
+      const hit = r.lines.find(l => re.test(l.t));
+      // 1pt of tolerance: pymupdf reports the glyph box, not the layout box.
+      check(`${label}: ${key} sits at its declared y (${Y[key]})`,
+            hit && Math.abs(hit.y - Y[key]) <= 1, hit ? String(hit.y) : 'MISSING');
+    }
+    // The one thing a long summary could still do is run into the score label.
+    const sum = r.lines.filter(l => l.y >= Y.summary && l.y < Y.scoreLbl);
+    const last = sum.length ? Math.max(...sum.map(l => l.b)) : 0;
+    check(`${label}: the summary stays inside its box`, last < Y.scoreLbl,
+          last + ' vs ' + Y.scoreLbl);
+  }
+
   console.log(failures?`\n${failures} FAILURE(S)`:'\nall checks passed');
   process.exit(failures?1:0);
 })();

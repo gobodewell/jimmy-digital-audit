@@ -90,12 +90,18 @@ setTimeout(async()=>{
   console.log('\nG. the service key never leaves the proxy');
   check('every Supabase call carried it', seen.every(x=>x.hasKey), String(seen.filter(x=>!x.hasKey).length)+' without');
 
-  console.log('\nH. the key goes on the header its TYPE requires');
-  // Supabase's new sb_secret_ keys are not JWTs: sent on Authorization: Bearer
-  // the platform tries to parse one and rejects the request. Only a legacy
-  // service_role JWT belongs there.
-  check('a non-JWT secret key is apikey-only',
-        seen.every(x=>x.auth===null), JSON.stringify(seen.filter(x=>x.auth).map(x=>x.auth)));
+  console.log('\nH. the key goes on BOTH headers, whatever its format');
+  // This section used to assert the opposite -- that a new sb_secret_ key is
+  // apikey-only -- on the strength of a docs line. It was wrong, and it is why
+  // nothing was ever filed: Storage authenticates on Authorization, so the PDF
+  // upload was refused, and because a save stores the PDF before inserting the
+  // row, the table stayed empty too. supabase-js sets Bearer SPECIFICALLY for
+  // a new-format key and falls back to the key itself for a legacy JWT, so
+  // both formats carry both headers.
+  check('a new secret key is sent on Authorization too',
+        seen.length > 0 && seen.every(x => x.auth === 'Bearer svc'),
+        JSON.stringify([...new Set(seen.map(x => x.auth))]));
+  check('and on apikey', seen.every(x => x.hasKey));
 
   console.log('\nI. an audit with no URL is refused rather than filed under ""');
   r=await post('/history/save',{ clientName:'No URL', state:STATE });
@@ -108,10 +114,10 @@ setTimeout(async()=>{
   seen.length = 0;
   await new Promise(r => { delete require.cache[require.resolve('../server.js')]; r(); });
   process.env.SUPABASE_SERVICE_KEY = 'eyJhbGciOiJIUzI1NiJ9.fake.jwt';
-  process.env.PORT = '3986';
+  process.env.PORT = '3975';
   require('../server.js');
   await new Promise(r => setTimeout(r, 300));
-  await realFetch('http://127.0.0.1:3986/history/list');
+  await realFetch('http://127.0.0.1:3975/history/list');
   check('legacy key sent on Authorization too',
         seen.length > 0 && seen.every(x => x.auth === 'Bearer eyJhbGciOiJIUzI1NiJ9.fake.jwt'),
         JSON.stringify(seen.map(x => x.auth)));
