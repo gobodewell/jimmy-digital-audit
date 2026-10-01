@@ -6,7 +6,7 @@ const app  = express();
 // Bumped whenever a build is handed over. /health reports it so the app can
 // tell the user their page and their proxy are different vintages -- the
 // failure mode is a fix that silently is not there.
-const BUILD = '2026-10-01.13';
+const BUILD = '2026-10-01.14';
 const PORT = process.env.PORT || 3001;
 
 // Every one of these is trimmed. A key pasted into a hosting panel's env
@@ -2547,6 +2547,141 @@ function dfsLocation(raw) {
 const isRetryableLocation = (code, msg) =>
   code === 40102 || /location|no search results/i.test(String(msg || ''));
 
+// Finding the listing when my_business_info will not.
+//
+// Archstone Financial is in Google Maps -- name, address, phone, category,
+// four reviews, a website link -- and my_business_info answered "No Search
+// Results". The Business Data endpoint matches a business name against its own
+// records; the Maps SERP endpoint runs the search a person runs, against the
+// same index Maps itself serves, and its location list is the full SERP one
+// rather than the narrower business-data list. So when the first comes back
+// empty, search Maps.
+//
+// Every field is read by several possible names and only ever FILLED, never
+// asserted from absence: this endpoint's exact shape cannot be verified from
+// here, so a field that is missing leaves its check unmeasured rather than
+// failing it.
+const pick = (o, keys) => {
+  for (const k of keys) {
+    const v = k.split('.').reduce((a, part) => (a == null ? a : a[part]), o);
+    if (v !== undefined && v !== null && v !== '') return v;
+  }
+  return null;
+};
+
+async function mapsLookup(name, location, url) {
+  const loc = dfsLocation(location);
+  const want = rootDomain(url || '');
+  const body = { keyword: name, language_code: 'en', depth: 20 };
+  if (loc) body.location_name = loc;
+  const d = await dfsPost('/serp/google/maps/live/advanced', [body], { timeout: 60000 });
+
+  const top = d && d.status_code && d.status_code !== 20000 ? d : null;
+  const task = d?.tasks?.[0];
+  const err = top || (task && task.status_code !== 20000 ? task : null);
+  if (err) return { error: 'Maps ' + err.status_code + ': ' + err.status_message };
+
+  const items = (task?.result || []).flatMap(r => r.items || [])
+    .filter(i => i && (i.title || i.name));
+  if (!items.length) return { error: 'no Maps result for ' + name + (loc ? ' in ' + loc : '') };
+
+  // The audited domain is what tells this firm's listing from a neighbour's.
+  const byDomain = want
+    ? items.find(i => rootDomain(pick(i, ['url', 'domain', 'website'])) === want)
+    : null;
+  const item = byDomain || items[0];
+  return { item, verified: !!byDomain, candidates: items.length, searched: loc };
+}
+
+// A Maps result in the shape /gbp/info returns. Only what is present is
+// claimed; anything the endpoint did not carry stays null, which the page
+// reads as unmeasured rather than as a finding.
+function gbpFromMaps(item, verified) {
+  const rating = pick(item, ['rating.value', 'rating_value']);
+  const votes  = pick(item, ['rating.votes_count', 'rating_votes_count', 'reviews_count', 'rating.reviews_count']);
+  const photos = pick(item, ['total_photos', 'photos_count', 'main_image', 'photos']);
+  const desc   = pick(item, ['description', 'snippet', 'about']);
+  return {
+    found: true, verified,
+    matchedOn: verified ? 'domain' : 'maps-name-only',
+    source: 'maps',
+    title:       pick(item, ['title', 'name']) || '',
+    address:     pick(item, ['address', 'address_info.address']) || '',
+    phone:       pick(item, ['phone']) || '',
+    rating:      rating != null ? rating : null,
+    reviewCount: votes != null ? Number(votes) : 0,
+    // Maps does not report claim status. Null, so the box reads unmeasured --
+    // it is not evidence either way.
+    claimed:     pick(item, ['is_claimed']) == null ? null : !!item.is_claimed,
+    hasLogo:     pick(item, ['logo']) ? true : null,
+    hasPhotos:   photos == null ? null : !!(typeof photos === 'number' ? photos : String(photos).length),
+    description: typeof desc === 'string' ? desc : '',
+    hasDescription: desc == null ? null : !!String(desc).trim(),
+    category:    pick(item, ['category', 'category_ids.0']) || '',
+    url:         pick(item, ['url', 'domain', 'website']) || '',
+    cid:         pick(item, ['cid']) || null
+  };
+}
+
+// The firm's own website usually points at its Google listing, and nobody
+// links to a profile that does not exist. A "Review us on Google" button, a
+// Maps embed, a g.page short link -- each one is proof the listing is there,
+// and most of them carry the CID, which my_business_info accepts as a keyword.
+// So when every search has failed, stop searching and follow the link the firm
+// put there themselves.
+const GBP_LINKS = [
+  // CID, the number that identifies a listing. Best case: it can be looked up.
+  [/maps\.google\.[a-z.]{2,8}\/[^"'<>\s]*[?&]cid=(\d{5,})/i,                 'cid'],
+  [/google\.[a-z.]{2,8}\/maps[^"'<>\s]*[?&]cid=(\d{5,})/i,                    'cid'],
+  [/[?&]ludocid=(\d{5,})/i,                                                     'cid'],
+  // The review link Google itself generates, which carries a place id.
+  [/search\.google\.com\/local\/(?:writereview|reviews)\?[^"'<>\s]*placeid=([A-Za-z0-9_-]{10,})/i, 'place'],
+  [/[?&]place_?id=(ChI[A-Za-z0-9_-]{10,})/i,                                     'place'],
+  // No identifier, but still proof somebody linked to a listing.
+  [/google\.[a-z.]{2,8}\/maps\/place\/[^"'<>\s]+/i,                          'link'],
+  [/\bg\.page\/[^"'<>\s]+/i,                                                  'link'],
+  [/goo\.gl\/maps\/[^"'<>\s]+/i,                                              'link'],
+  [/google\.[a-z.]{2,8}\/maps\/embed\?pb=[^"'<>\s]+/i,                       'link']
+];
+
+function readGbpLinks(html) {
+  const h = String(html);
+  const out = { cid: null, placeId: null, links: [] };
+  for (const [re, kind] of GBP_LINKS) {
+    const m = re.exec(h);
+    if (!m) continue;
+    if (kind === 'cid'   && !out.cid)     out.cid = m[1];
+    if (kind === 'place' && !out.placeId) out.placeId = m[1];
+    const shown = m[0].slice(0, 90);
+    if (!out.links.includes(shown)) out.links.push(shown);
+  }
+  out.found = !!(out.cid || out.placeId || out.links.length);
+  return out;
+}
+
+// Fetch the homepage and look for those links. Only ever called once every
+// search has already come back empty, so the extra request costs nothing on
+// the ordinary path.
+async function gbpLinksFromSite(url) {
+  if (!url) return { found: false };
+  try {
+    // BROWSER_HEADERS, not UA: UA is a local inside the site-check route, so
+    // referencing it here threw ReferenceError on every call and the whole
+    // route reported "no links found" when it had never read the page.
+    const r = await fetch(url, { headers: BROWSER_HEADERS, redirect: 'follow',
+                                 signal: AbortSignal.timeout(15000) });
+    if (!r.ok) {
+      // Blocked. The model's fetcher reads these sites, so ask it instead.
+      const ai = await claudeFetchHead(url);
+      return ai.error ? { found: false, note: 'homepage ' + r.status + ', model fetch failed' }
+                      : readGbpLinks(ai.html);
+    }
+    return readGbpLinks((await r.text()).slice(0, 400000));
+  } catch (e) {
+    return { found: false, note: e.message };
+  }
+}
+
 // One live my_business_info call, retried at country level when the location
 // is what DataForSEO objected to. Returns the task plus the location actually
 // used, so the caller can say which answer it has.
@@ -2594,6 +2729,70 @@ async function gbpLookup(name, location, opts) {
 // passes that category (or a distinguishing image host) through, the
 // distinction is free and deterministic. If it does not, no amount of looking
 // at the picture makes it a measurement.
+// Which request shape actually finds a listing. Archstone Financial is plainly
+// in Google Maps -- name, address, phone, category, four reviews -- and
+// my_business_info answered "No Search Results" for it. That is this proxy
+// asking the wrong way, not a firm without a profile, and the difference
+// cannot be guessed at from outside: it has to be asked.
+//
+// So ask every plausible shape in one go and report which ones answer. Each
+// variant is a billed call, which is why this runs only when a human presses
+// the button, never during an audit.
+app.get('/gbp/probe', async (req, res) => {
+  const { name, location, url } = req.query;
+  if (!name) return res.status(400).json({ error: 'name required' });
+  if (!DFS_LOGIN) return res.status(500).json({ error: 'DataForSEO not configured' });
+
+  const city    = dfsLocation(location);
+  const domain  = rootDomain(url || '');
+  // Firms are listed under a shorter name than the one on their letterhead
+  // more often than not: "Archstone Financial" rather than "Archstone
+  // Financial Group LLC".
+  const short   = String(name).replace(/\b(llc|inc|ltd|l\.l\.c\.|group|partners|associates|advisors?|wealth management)\b/gi, '')
+                              .replace(/[,.]/g, ' ').replace(/\s+/g, ' ').trim();
+
+  const variants = [
+    { label: 'name + city',                  body: { keyword: name,  location_name: city } },
+    { label: 'name + country',               body: { keyword: name,  location_name: GBP_FALLBACK_LOCATION } },
+    { label: 'name + US location_code 2840', body: { keyword: name,  location_code: 2840 } },
+    { label: 'name, no location at all',     body: { keyword: name } },
+    ...(short && short.toLowerCase() !== String(name).toLowerCase()
+      ? [{ label: 'shortened name + city',   body: { keyword: short, location_name: city } }] : []),
+    ...(domain
+      ? [{ label: 'domain as the keyword',   body: { keyword: domain, location_name: city } },
+         { label: 'name + city, domain too', body: { keyword: name + ' ' + domain, location_name: city } }] : []),
+    ...(location
+      ? [{ label: 'city exactly as typed',   body: { keyword: name, location_name: String(location).trim() } }] : [])
+  ];
+
+  const out = { name, short, city, domain, tried: [] };
+  for (const v of variants) {
+    const body = Object.assign({ language_name: 'English' }, v.body);
+    try {
+      const d = await dfsPost('/business_data/google/my_business_info/live', [body]);
+      const task = d?.tasks?.[0];
+      const code = (d && d.status_code !== 20000) ? d.status_code : task?.status_code;
+      const items = task?.result?.[0]?.items || [];
+      out.tried.push({
+        label: v.label, sent: body, status: code,
+        message: code === 20000 ? null : (task?.status_message || d?.status_message),
+        listings: items.length,
+        // The title and site of whatever came back, so a wrong firm is obvious.
+        found: items.slice(0, 3).map(i => (i.title || '?') + (i.url ? ' — ' + i.url : ''))
+      });
+    } catch (e) {
+      out.tried.push({ label: v.label, sent: body, error: e.message });
+    }
+  }
+  const winners = out.tried.filter(t => t.listings > 0);
+  out.verdict = winners.length
+    ? 'These shapes return a listing: ' + winners.map(w => w.label).join(', ') +
+      '. The live call should use the first of them.'
+    : 'No shape returned a listing. This firm is not in DataForSEO\'s business database, ' +
+      'whatever Google Maps shows — the audit cannot read it and the GBP boxes must be ticked by hand.';
+  res.json(out);
+});
+
 app.get('/gbp/diag', async (req, res) => {
   const { name, location, url } = req.query;
   if (!name) return res.status(400).json({ error: 'name required' });
@@ -2642,6 +2841,60 @@ app.get('/gbp/diag', async (req, res) => {
   }
 });
 
+// One my_business_info item list, in the shape the page expects. Shared so a
+// listing found by name and one found by its id through the firm's own site
+// are read by exactly the same rules.
+function gbpRead(items, url) {
+  // Match the listing to the firm by its website domain. Advisory firms share
+  // names constantly ("Cornerstone", "Integrity"), and Google returns them by
+  // keyword relevance — so the audited site is the only reliable way to tell
+  // this firm's listing from a neighbour's. When no listing matches we still
+  // return the top hit for a human to eyeball, but flag it unverified so the
+  // caller does not score it automatically.
+  const want = rootDomain(url);
+  let biz = null, verified = false;
+  if (want) {
+    biz = items.find(i => rootDomain(i.url || i.domain) === want) || null;
+    verified = !!biz;
+  }
+  if (!biz) biz = items[0];
+
+  return {
+    found:       true,
+    verified,                                    // listing's site matched the audited domain
+    candidates:  items.length,
+    matchedOn:   verified ? 'domain' : (want ? 'name-only' : 'no-url-supplied'),
+    title:       biz.title        || '',
+    address:     biz.address      || '',
+    phone:       biz.phone        || '',
+    rating:      biz.rating?.value               || null,
+    reviewCount: biz.rating?.votes_count         || 0,
+    // DataForSEO returns null for is_claimed when it does not know. `|| false`
+    // turned that into a confident "Unclaimed", which is a different claim
+    // about the business than "we could not tell". Null now survives to the
+    // caller, which marks the box unmeasured rather than failed.
+    claimed:     biz.is_claimed == null ? null : !!biz.is_claimed,
+    // Deliberately NOT given the same null treatment as is_claimed. A firm
+    // with no logo is the ordinary case and the field is simply absent, so
+    // reading absence as "unknown" would turn a real, common finding into a
+    // shrug -- the opposite error, and it would bury the unmeasured list in
+    // noise. is_claimed is different: DataForSEO documents null there as
+    // "not determined", which is genuinely not the same as unclaimed.
+    hasLogo:     !!biz.logo,                     // the real logo field
+    hasPhotos:   !!(biz.main_image || (biz.images && biz.images.length > 0)),
+    // The profile's own description. Absent key means DataForSEO did not
+    // return the field at all, which is unmeasured -- treating that as "no
+    // description" would fail every firm on an 8-point check. An explicit
+    // empty value is a real finding: the box is there and nothing is in it.
+    description:    biz.description || '',
+    hasDescription: biz.description === undefined
+                      ? null
+                      : !!(biz.description && String(biz.description).trim()),
+    category:    biz.category                    || '',
+    url:         biz.url                         || ''
+  };
+}
+
 app.get('/gbp/info', async (req, res) => {
   const { name, location, url } = req.query;
   if (!name) return res.status(400).json({ error: 'name required' });
@@ -2652,65 +2905,63 @@ app.get('/gbp/info', async (req, res) => {
     // DataForSEO will not accept it, so a "Houston, Texas" in the form no
     // longer takes the whole check down with it.
     const r = await gbpLookup(name, location, { timeout: 90000 });
-    if (r.error) return res.json({ found: false, note: r.error });
-    const task = r.task;
-    const items = task?.result?.[0]?.items;
-    if (!items || items.length === 0)
-      return res.json({ found: false, searchedLocation: r.location, degraded: r.degraded });
+    const route = ['my_business_info: ' + (r.error ? r.error : 'ok')];
+    const items = r.error ? null : r.task?.result?.[0]?.items;
 
-    // Match the listing to the firm by its website domain. Advisory firms share
-    // names constantly ("Cornerstone", "Integrity"), and Google returns them by
-    // keyword relevance — so the audited site is the only reliable way to tell
-    // this firm's listing from a neighbour's. When no listing matches we still
-    // return the top hit for a human to eyeball, but flag it unverified so the
-    // caller does not score it automatically.
-    const want = rootDomain(url);
-    let biz = null, verified = false;
-    if (want) {
-      biz = items.find(i => rootDomain(i.url || i.domain) === want) || null;
-      verified = !!biz;
+    // Business Data had nothing. It matches a name against its own records,
+    // and a listing it has not got is not a listing Google has not got --
+    // Archstone Financial is in Maps with an address, a phone number and four
+    // reviews, and this endpoint has never heard of it. So keep looking.
+    // An account-level refusal -- auth, credits, access -- will refuse Maps in
+    // exactly the same way, because it is the same account. Trying the rest of
+    // the chain would bill for a second identical failure and report the same
+    // thing more slowly.
+    if (r.error && /DataForSEO 40[123]\d\d/.test(r.error))
+      return res.json({ found: false, note: r.error, route });
+
+    if (!items || items.length === 0) {
+      // 1. Maps itself, the search a person would run.
+      const m = await mapsLookup(name, location, url);
+      route.push('maps: ' + (m.error || (m.verified ? 'matched by domain' : 'name-only match')));
+      if (!m.error && m.verified)
+        return res.json(Object.assign(gbpFromMaps(m.item, true),
+          { candidates: m.candidates, searchedLocation: m.searched, route }));
+
+      // 2. The firm's own site. Nobody links to a listing that is not there,
+      //    and the link usually carries the id to look it up with.
+      const l = await gbpLinksFromSite(url);
+      route.push('site links: ' + (l.found ? (l.cid ? 'cid ' + l.cid
+                                  : l.placeId ? 'place ' + l.placeId : l.links[0])
+                                  : 'none' + (l.note ? ' (' + l.note + ')' : '')));
+      if (l.cid || l.placeId) {
+        const key = l.cid ? 'cid:' + l.cid : 'place_id:' + l.placeId;
+        const byId = await gbpLookup(key, location, { timeout: 60000 });
+        const idItems = byId.error ? null : byId.task?.result?.[0]?.items;
+        route.push('lookup by id: ' + (byId.error || (idItems && idItems.length ? 'ok' : 'empty')));
+        if (idItems && idItems.length)
+          return res.json(Object.assign(gbpRead(idItems, url), { route, foundVia: 'website link' }));
+      }
+      // 3. A Maps name-only hit, or a bare link, still proves a listing EXISTS
+      //    even though nothing can be scored from it automatically.
+      if (!m.error || l.found) {
+        const base = !m.error ? gbpFromMaps(m.item, false) : { found: true, verified: false };
+        return res.json(Object.assign(base, {
+          found: true, verified: false,
+          matchedOn: !m.error ? 'maps-name-only' : 'website-link',
+          listingExists: true,
+          siteLinks: l.links || [],
+          note: 'a Google listing exists — ' + (!m.error
+                  ? 'found in Maps, but its website does not match the audited domain'
+                  : 'the firm\'s own site links to it') +
+                '. Confirm it is the right one, then tick the boxes by hand.',
+          route
+        }));
+      }
+      return res.json({ found: false, searchedLocation: r.location, degraded: r.degraded,
+                        note: r.error, route });
     }
-    if (!biz) biz = items[0];
 
-    res.json({
-      found:       true,
-      verified,                                    // listing's site matched the audited domain
-      // Which location actually answered. `degraded` means the typed city was
-      // refused and this is the country-wide result -- still a real listing,
-      // but found without the city narrowing it.
-      searchedLocation: r.location,
-      degraded:    !!r.degraded,
-      candidates:  items.length,
-      matchedOn:   verified ? 'domain' : (want ? 'name-only' : 'no-url-supplied'),
-      title:       biz.title        || '',
-      address:     biz.address      || '',
-      phone:       biz.phone        || '',
-      rating:      biz.rating?.value               || null,
-      reviewCount: biz.rating?.votes_count         || 0,
-      // DataForSEO returns null for is_claimed when it does not know. `|| false`
-      // turned that into a confident "Unclaimed", which is a different claim
-      // about the business than "we could not tell". Null now survives to the
-      // caller, which marks the box unmeasured rather than failed.
-      claimed:     biz.is_claimed == null ? null : !!biz.is_claimed,
-      // Deliberately NOT given the same null treatment as is_claimed. A firm
-      // with no logo is the ordinary case and the field is simply absent, so
-      // reading absence as "unknown" would turn a real, common finding into a
-      // shrug -- the opposite error, and it would bury the unmeasured list in
-      // noise. is_claimed is different: DataForSEO documents null there as
-      // "not determined", which is genuinely not the same as unclaimed.
-      hasLogo:     !!biz.logo,                     // the real logo field
-      hasPhotos:   !!(biz.main_image || (biz.images && biz.images.length > 0)),
-      // The profile's own description. Absent key means DataForSEO did not
-      // return the field at all, which is unmeasured -- treating that as "no
-      // description" would fail every firm on an 8-point check. An explicit
-      // empty value is a real finding: the box is there and nothing is in it.
-      description:    biz.description || '',
-      hasDescription: biz.description === undefined
-                        ? null
-                        : !!(biz.description && String(biz.description).trim()),
-      category:    biz.category                    || '',
-      url:         biz.url                         || ''
-    });
+    return res.json(Object.assign(gbpRead(items, url), { route, searchedLocation: r.location, degraded: !!r.degraded }));
   } catch (e) {
     console.error('DFS GBP error:', e.message);
     res.status(500).json({ error: e.message });

@@ -765,6 +765,7 @@ input.masked{-webkit-text-security:disc;text-security:disc}
       <button class="btn btn-ghost" onclick="testMentions()">Test AI mentions</button>
       <button class="btn btn-ghost" onclick="testOnPage()">Test OnPage</button>
       <button class="btn btn-ghost" onclick="testGBPImages()">Test GBP images</button>
+      <button class="btn btn-ghost" onclick="probeGBP()">Probe GBP lookup</button>
     </div>
     <div id="s-msg" style="margin-top:10px;font-size:13px;color:var(--text2);white-space:pre-wrap"></div>
   </div>
@@ -851,7 +852,7 @@ input.masked{-webkit-text-security:disc;text-security:disc}
 // different vintages. Both carry the same stamp and the app compares them,
 // because "did you upload both files?" is not something anyone should have
 // to remember -- and a half-upload looks exactly like a fix that did not work.
-const BUILD = '2026-10-01.13';
+const BUILD = '2026-10-01.14';
 const DEFAULT_PROXY = 'https://jimmy-digital-audit.onrender.com';
 let AD = {}; // audit data store
 
@@ -1142,6 +1143,33 @@ async function testMentions() {
 // the code cannot tell an absent field from an absent photo. This prints what
 // the listing actually carries, including whether anything distinguishes a
 // Street View capture of the building from a photo the firm uploaded.
+// Asks DataForSEO the same question several ways and reports which ones answer.
+// For a firm that is plainly in Google Maps but comes back "No Search Results",
+// this is the only way to tell a wrong request from an absent record.
+async function probeGBP() {
+  const msg  = document.getElementById('s-msg');
+  const name = getVal('clientName');
+  if (!name) { msg.textContent = '✗ Enter the firm name on the audit tab first.'; return; }
+  msg.textContent = 'Asking DataForSEO for ' + name + ' several ways — this bills a few calls...';
+  try {
+    const r = await pf('/gbp/probe?name=' + encodeURIComponent(name) +
+                       '&location=' + encodeURIComponent(getVal('clientCity')) +
+                       '&url=' + encodeURIComponent(getVal('clientURL')));
+    const d = await r.json();
+    if (d.error) { msg.textContent = '✗ ' + d.error; return; }
+    const lines = ['Firm: ' + d.name + (d.short && d.short !== d.name ? '   shortened: ' + d.short : ''),
+                   'City sent: ' + (d.city || '(none)'), ''];
+    (d.tried || []).forEach(t => {
+      lines.push((t.listings ? '  ' + String(t.listings).padStart(2) + ' ' : '   — ') +
+        t.label + (t.message ? '   [' + t.message + ']' : '') + (t.error ? '   [' + t.error + ']' : ''));
+      (t.found || []).forEach(f => lines.push('        ' + f));
+    });
+    lines.push('', d.verdict || '');
+    msg.textContent = lines.join('\n');
+    console.log('GBP PROBE:', JSON.stringify(d, null, 2));
+  } catch (e) { msg.textContent = '✗ ' + e.message; }
+}
+
 async function testGBPImages() {
   const msg  = document.getElementById('s-msg');
   const name = getVal('clientName');
@@ -1911,6 +1939,10 @@ async function retryLighthouse() {
 }
 
 // ── DataForSEO: GBP ───────────────────────────────────────────────────────────
+// The six checks that hang off the Google listing. Named once so a lookup that
+// finds nothing can mark all of them at once.
+const GBP_IDS = ['c-gbp-f', 'c-gbp-v', 'c-gbp-d', 'c-gbp-p', 'c-gbp-l', 'c-gbp-r'];
+
 async function runGBP(name, url, city) {
   setStep('gbp', 'running');
   if (!name) { setStep('gbp', 'error', 'no firm name entered — the GBP lookup needs one'); return; }
@@ -1934,8 +1966,24 @@ async function runGBP(name, url, city) {
     block.style.display = '';
 
     if (!d.found) {
-      details.innerHTML = '<span class="badge br">GBP not found'+(d.note?' — '+d.note:'')+'</span>';
-      setStep('gbp', 'done', d.note || 'no match');
+      // Not finding a listing is NOT the same as the firm not having one, and
+      // the six boxes below are worth forty points. Archstone Financial is in
+      // Google Maps with an address, a phone number, a category and four
+      // reviews, and this lookup still came back empty -- leaving the boxes
+      // blank failed every one of them and put "create a Google Business
+      // Profile" in front of a firm that already has one.
+      //
+      // Unmeasured is the honest state. A consultant who can see the listing
+      // ticks them by hand; one who checks and finds nothing leaves them, and
+      // the report says the check could not be completed rather than asserting
+      // an absence nobody established.
+      GBP_IDS.forEach(id => unk(id, d.note || 'no Google listing matched this firm name'));
+      details.innerHTML = '<span class="badge ba">No Google listing matched</span>' +
+        '<div style="font-size:12px;color:var(--text3);margin-top:6px">' +
+        (d.note ? escHtml(d.note) + '<br>' : '') +
+        'These six checks are left <b>unmeasured</b> rather than failed — search Google ' +
+        'for the firm, and tick them by hand if a listing is there.</div>';
+      setStep('gbp', 'done', 'no match — six checks left unmeasured');
       return;
     }
 
