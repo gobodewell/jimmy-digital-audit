@@ -852,7 +852,7 @@ input.masked{-webkit-text-security:disc;text-security:disc}
 // different vintages. Both carry the same stamp and the app compares them,
 // because "did you upload both files?" is not something anyone should have
 // to remember -- and a half-upload looks exactly like a fix that did not work.
-const BUILD = '2026-10-01.18';
+const BUILD = '2026-10-01.19';
 const DEFAULT_PROXY = 'https://jimmy-digital-audit.onrender.com';
 let AD = {}; // audit data store
 
@@ -1419,6 +1419,16 @@ function renderCrawl(d) {
   // a broken check rather than a page nobody could read. The three things that
   // decide the answer -- did we get the page, how much of it, and what each
   // route found -- now sit where the unticked box is.
+  // A challenge answers 200, so without this the panel showed a healthy status
+  // beside three empty checks and nothing explaining the contradiction.
+  if (d.homeChallenge)
+    h += row('Homepage',
+             'unknown',
+             'HTTP ' + d.homeStatus + ' but the response was ' + d.homeChallenge +
+             (d.homeBlockedBy ? ' — ' + d.homeBlockedBy : '') +
+             '. Analytics, structured data and the mobile viewport were read by ' +
+             'other routes instead of this page.');
+
   h += row('Google Analytics',
            d.ga === true ? 'yes' : d.ga === false ? 'no' : 'unknown',
            [ d.gaNote || '',

@@ -6,7 +6,7 @@ const app  = express();
 // Bumped whenever a build is handed over. /health reports it so the app can
 // tell the user their page and their proxy are different vintages -- the
 // failure mode is a fix that silently is not there.
-const BUILD = '2026-10-01.18';
+const BUILD = '2026-10-01.19';
 const PORT = process.env.PORT || 3001;
 
 // Every one of these is trimmed. A key pasted into a hosting panel's env
@@ -1203,6 +1203,52 @@ async function analyticsHunt(url, results) {
   return false;
 }
 
+// A 200 that is not the page.
+//
+// This is the hole every fallback fell through. The chain -- OnPage's crawler,
+// the model's fetcher, Google's index -- is triggered by `if (!pr.ok)`, and a
+// Cloudflare JavaScript challenge answers HTTP 200. So the proxy believed it
+// had read the homepage, found no viewport, no schema and no analytics in an
+// interstitial, reported all three as measured negatives, and never asked any
+// of the other routes. Three checks failing together on a page that plainly
+// has all three is the signature.
+//
+// Detected by the markers these pages carry, and by shape: an interstitial is
+// tiny and titleless, which no real advisory homepage is.
+const CHALLENGE_MARKERS = [
+  [/Just a moment\s*\.{0,3}/i,                       'Cloudflare "Just a moment" challenge'],
+  [/cf-browser-verification|__cf_chl|cf_chl_/i,       'Cloudflare browser verification'],
+  [/\/cdn-cgi\/challenge-platform/i,                  'Cloudflare challenge platform'],
+  [/Checking (?:your|if the site) (?:browser|connection)/i, 'Cloudflare interstitial'],
+  [/Enable JavaScript and cookies to continue/i,      'Cloudflare JavaScript gate'],
+  [/Attention Required!\s*\|\s*Cloudflare/i,          'Cloudflare block page'],
+  [/Access Denied[\s\S]{0,40}Sucuri|sucuri_cloudproxy/i, 'Sucuri firewall'],
+  [/Incapsula incident|_Incapsula_Resource/i,         'Imperva/Incapsula challenge'],
+  [/_pxhd|PerimeterX|px-captcha/i,                    'PerimeterX challenge'],
+  [/DataDome|datadome\.co/i,                           'DataDome challenge'],
+  [/Request unsuccessful\. Incapsula/i,                'Imperva block page'],
+  [/<title>\s*(?:403|Forbidden|Access Denied)\s*<\/title>/i, 'an access-denied page'],
+  [/captcha-delivery\.com|hcaptcha\.com\/captcha/i,     'a CAPTCHA wall']
+];
+
+function challengePage(html, headers) {
+  const h = String(html || '');
+  for (const [re, name] of CHALLENGE_MARKERS)
+    if (re.test(h)) return name;
+  // No known marker, but nothing a homepage has either. Kept deliberately
+  // narrow -- this is a backstop for a challenge style nobody has catalogued,
+  // and calling a real page a decoy would send every check down the fallback
+  // routes for nothing. A page under a kilobyte with no title, no viewport,
+  // no stylesheet and no JSON-LD is not an advisory firm's homepage.
+  const signal = /<title[^>]*>\s*\S/i.test(h)
+              || /<meta[^>]*viewport/i.test(h)
+              || /<link\b/i.test(h)
+              || /application\/ld\+json/i.test(h);
+  if (h.length < 1024 && !signal)
+    return 'a ' + h.length + '-byte response with nothing a homepage carries';
+  return null;
+}
+
 function readViewport(html) {
   for (const m of String(html).matchAll(/<meta\b[^>]*>/gi)) {
     const tag  = m[0];
@@ -1861,9 +1907,20 @@ function isSitemapTxt(text) {
     try {
       const pr = await fetch(url, { headers: UA, redirect: 'follow', signal: AbortSignal.timeout(15000) });
       results.homeStatus = pr.status;
-      if (!pr.ok) {
+      // Read the body before deciding, because a challenge answers 200 and the
+      // only way to tell it from the homepage is to look at it.
+      const body200 = pr.ok ? (await pr.text()).slice(0, 5000000) : null;
+      const decoy   = pr.ok ? challengePage(body200, pr.headers) : null;
+      if (decoy) {
+        results.homeBytes    = body200.length;
+        results.homeChallenge = decoy;
+      }
+      if (!pr.ok || decoy) {
         const who = blockerFrom(pr.headers);
-        const why = 'homepage returned HTTP ' + pr.status + (who ? ' from ' + who : '');
+        const why = decoy
+          ? 'the homepage answered HTTP ' + pr.status + ' with ' + decoy +
+            (who ? ' (' + who + ')' : '') + ' — not the page itself'
+          : 'homepage returned HTTP ' + pr.status + (who ? ' from ' + who : '');
         results.homeBlockedBy = who;
         results.indexable = null;
         results.indexableNote = why;
@@ -1877,13 +1934,14 @@ function isSitemapTxt(text) {
         await onPageRescue(url, results, why);
       } else {
         const xRobots = (pr.headers.get('x-robots-tag') || '').trim();
+        // Already read above, to tell a challenge from the real page.
         // The WHOLE page, not the first 300KB of it. That cap is why
         // archstonefinancial.net came back with no analytics: its gtag.js sits
         // at the end of a <head> padded with inline Datadog RUM, past the cut.
         // The tag was in the page and in the reader's patterns; the page was
         // simply handed over with the end missing. Capped far higher only to
         // bound a pathological response.
-        const full    = (await pr.text()).slice(0, 5000000);
+        const full    = body200;
         const html    = full;
         results.homeBytes = full.length;
         const metas   = readRobotsMeta(html);
@@ -1944,7 +2002,11 @@ function isSitemapTxt(text) {
         // Every route looked and none found a tag. That is a finding now, not
         // a shrug -- unless the page itself was never readable, in which case
         // there was nothing to look at and the box stays unmeasured.
-        const sawThePage = results.homeStatus >= 200 && results.homeStatus < 400;
+        // A challenge answers 200, so the status alone does not mean the page
+        // was seen -- which would turn "nobody could read it" back into the
+        // finding this whole change exists to prevent.
+        const sawThePage = results.homeStatus >= 200 && results.homeStatus < 400
+                           && !results.homeChallenge;
         results.ga = sawThePage ? false : null;
         results.gaNote = sawThePage
           ? 'no analytics tag found by any route'
