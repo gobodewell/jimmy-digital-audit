@@ -6,7 +6,7 @@ const app  = express();
 // Bumped whenever a build is handed over. /health reports it so the app can
 // tell the user their page and their proxy are different vintages -- the
 // failure mode is a fix that silently is not there.
-const BUILD = '2026-10-01.16';
+const BUILD = '2026-10-01.17';
 const PORT = process.env.PORT || 3001;
 
 // Every one of these is trimmed. A key pasted into a hosting panel's env
@@ -1877,7 +1877,15 @@ function isSitemapTxt(text) {
         await onPageRescue(url, results, why);
       } else {
         const xRobots = (pr.headers.get('x-robots-tag') || '').trim();
-        const html    = (await pr.text()).slice(0, 300000);
+        // The WHOLE page, not the first 300KB of it. That cap is why
+        // archstonefinancial.net came back with no analytics: its gtag.js sits
+        // at the end of a <head> padded with inline Datadog RUM, past the cut.
+        // The tag was in the page and in the reader's patterns; the page was
+        // simply handed over with the end missing. Capped far higher only to
+        // bound a pathological response.
+        const full    = (await pr.text()).slice(0, 5000000);
+        const html    = full;
+        results.homeBytes = full.length;
         const metas   = readRobotsMeta(html);
         const blockers = [];
         if (/\bnoindex\b/i.test(xRobots)) blockers.push('X-Robots-Tag: ' + xRobots);
@@ -1897,7 +1905,10 @@ function isSitemapTxt(text) {
         results.ga     = an.found;
         results.gaNote = an.found ? 'found on the homepage: ' + an.what.join(', ')
                                   : 'no analytics tag in the homepage markup';
-        results.gaRoute = ['homepage markup — ' + (an.found ? 'found' : 'nothing')];
+        // Size on the record: a tag missed because the page was cut short is
+        // indistinguishable from a page with no tag unless this is visible.
+        results.gaRoute = ['homepage markup, ' + Math.round(full.length / 1024) +
+                           'KB — ' + (an.found ? 'found' : 'nothing')];
 
         const vp = readViewport(html);
         results.viewport     = vp ? vp.ok : false;
@@ -2761,7 +2772,7 @@ async function gbpLinksFromSite(url) {
       return ai.error ? { found: false, note: 'homepage ' + r.status + ', model fetch failed' }
                       : readGbpLinks(ai.html);
     }
-    return readGbpLinks((await r.text()).slice(0, 400000));
+    return readGbpLinks((await r.text()).slice(0, 5000000));
   } catch (e) {
     return { found: false, note: e.message };
   }
