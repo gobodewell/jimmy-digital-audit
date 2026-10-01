@@ -6,7 +6,7 @@ const app  = express();
 // Bumped whenever a build is handed over. /health reports it so the app can
 // tell the user their page and their proxy are different vintages -- the
 // failure mode is a fix that silently is not there.
-const BUILD = '2026-10-01.11';
+const BUILD = '2026-10-01.13';
 const PORT = process.env.PORT || 3001;
 
 // Every one of these is trimmed. A key pasted into a hosting panel's env
@@ -1091,38 +1091,56 @@ function blockerFrom(headers) {
 // on the entity name. That misses a site whenever PageSpeed does not run at
 // all -- which on a CDN that refuses Google is every time -- and it misses a
 // tag proxied through the firm's own domain, because the entity is then the
-// firm, not Google. Either way a site with analytics plainly in its markup
-// came back as not having it.
+// firm, not Google.
 //
-// The tag is in the HTML. Read it there, name what was found, and quote the
-// measurement ID so the answer can be checked rather than trusted.
+// The bar here is deliberately LOW: any hint of Google tagging ticks the box.
+// The check asks whether the firm is measuring its traffic, and the cost of
+// the two mistakes is not symmetric. Missing a tag that is plainly in the
+// markup tells a firm to install something they already have, in a document
+// they hand to a client. Counting a stray dataLayer on a site with no tag
+// costs a recommendation nobody was going to act on anyway. So the specific
+// patterns run first, for a note that names what was found and quotes the
+// measurement ID, and the loose ones catch everything else.
+const GA_HINTS = [
+  // Specific first: these carry an ID worth printing.
+  ['Google Analytics 4',   /googletagmanager\.com\/gtag\/js\?[^"'<>]*id=(G-[A-Z0-9]+)/i],
+  ['Google Tag Manager',   /['"](GTM-[A-Z0-9]{4,})['"]/i],
+  // The noscript iframe carries the ID unquoted, in the URL.
+  ['Google Tag Manager',   /googletagmanager\.com\/(?:gtm\.js|ns\.html)\?[^"'<>]*id=(GTM-[A-Z0-9]+)/i],
+  ['Google Analytics 4',   /['"](G-[A-Z0-9]{6,})['"]/i],
+  ['Universal Analytics',  /['"](UA-\d{4,}-\d+)['"]/i],
+  ['Google Ads tag',       /['"](AW-\d{6,})['"]/i],
+  // Then the hints with no ID attached.
+  ['Google Tag Manager',   /googletagmanager\.com\/(?:gtm|ns)\.(?:js|html)()/i],
+  ['Google Tag Manager',   /googletagmanager\.com()/i],
+  ['Universal Analytics',  /google-analytics\.com()/i],
+  ['Universal Analytics',  /\banalytics\.js\b()/i],
+  ['gtag on the page',     /\bgtag\s*\(()/i],
+  ['ga() tracker',         /\bga\s*\(\s*['"]create['"]()/i],
+  ['legacy _gaq queue',    /\b_gaq\b()/],
+  ['a dataLayer',          /\bdataLayer\b()/]
+];
+
 function readAnalytics(html) {
   const h = String(html);
   const found = [];
-  const add = (label, re) => {
+  for (const [label, re] of GA_HINTS) {
     const m = re.exec(h);
-    if (m) found.push(label + (m[1] ? ' (' + m[1] + ')' : ''));
-  };
-  // Loader scripts: the measurement ID is in the query string.
-  add('Google Analytics 4',  /googletagmanager\.com\/gtag\/js\?[^"'<>]*id=(G-[A-Z0-9]+)/i);
-  add('Google Tag Manager',  /googletagmanager\.com\/gtm\.js\?[^"'<>]*id=(GTM-[A-Z0-9]+)/i);
-  add('Google Tag Manager',  /googletagmanager\.com\/ns\.html\?[^"'<>]*id=(GTM-[A-Z0-9]+)/i);
-  // The container ID as a quoted string. Google's own snippet never writes the
-  // id into the URL as text -- it builds it in JS, j.src='...gtm.js?id='+i --
-  // so the two loader patterns above only ever matched the body <noscript>
-  // iframe. A head-only install, or one whose loader is served from the firm's
-  // own domain, was missed entirely. The GTM- prefix is unambiguous enough to
-  // stand on its own.
-  add('Google Tag Manager',  /['"](GTM-[A-Z0-9]{4,})['"]/i);
-  add('Universal Analytics', /google-analytics\.com\/(?:analytics|ga)\.js()/i);
-  // Inline configuration. This is what still shows when the loader is served
-  // from the firm's own domain, which is the case the entity match cannot see.
-  add('gtag configuration',  /gtag\(\s*['"]config['"]\s*,\s*['"]((?:G|UA|AW|GT)-[A-Z0-9-]+)['"]/i);
-  add('Universal Analytics', /\bga\(\s*['"]create['"]\s*,\s*['"](UA-[0-9-]+)['"]/i);
-  add('Universal Analytics', /_gaq\.push\s*\(()/i);
-  // Deduplicate: a GA4 site matches both its loader and its config line.
-  const uniq = [...new Set(found)];
-  return { found: uniq.length > 0, what: uniq };
+    if (!m) continue;
+    found.push(label + (m[1] ? ' (' + m[1] + ')' : ''));
+  }
+  // The same tag matches several patterns -- a GA4 site hits its loader, the
+  // googletagmanager.com host, gtag() and dataLayer, which would read as four
+  // findings for one tag. When anything carrying a measurement ID was found,
+  // that is the answer; the loose hints only speak when nothing else did.
+  const named = [], loose = [];
+  for (const f of found) {
+    const id = (f.match(/\(([^)]+)\)/) || [])[1];
+    if (!id) { if (!loose.includes(f)) loose.push(f); continue; }
+    if (!named.some(u => u.includes('(' + id + ')'))) named.push(f);
+  }
+  const what = named.length ? named : loose;
+  return { found: what.length > 0, what: what.slice(0, 3) };
 }
 
 function readViewport(html) {
@@ -2516,7 +2534,18 @@ function dfsLocation(raw) {
 
 // True when DataForSEO rejected the location rather than the request as a
 // whole -- the one failure a different location can recover from.
-const isLocationError = msg => /location/i.test(String(msg || ''));
+// Two different refusals are both worth asking again with a wider location.
+//
+//   40501 Invalid Field: 'location_name'   -- it would not accept the place
+//   40102 No Search Results                -- it accepted the place and found
+//                                             nothing in it
+//
+// The second is not an error in the usual sense: the request was understood.
+// But a firm's listing is registered at one address, and a city that is not
+// where Google has it filed returns nothing while a nationwide search for the
+// same name finds it immediately. So it gets the same second attempt.
+const isRetryableLocation = (code, msg) =>
+  code === 40102 || /location|no search results/i.test(String(msg || ''));
 
 // One live my_business_info call, retried at country level when the location
 // is what DataForSEO objected to. Returns the task plus the location actually
@@ -2536,14 +2565,20 @@ async function gbpLookup(name, location, opts) {
     if (!err) return { task, location: loc, tried, degraded: loc !== wanted };
     // Only a location complaint is worth another call; anything else (auth,
     // credits, a bad keyword) will fail identically at country level.
-    if (!isLocationError(err.status_message)) {
+    if (!isRetryableLocation(err.status_code, err.status_message)) {
       return { error: 'DataForSEO ' + err.status_code + ': ' + err.status_message,
                location: loc, tried };
+
     }
     console.log('DFS GBP location rejected:', loc, '-', err.status_message);
   }
-  return { error: 'DataForSEO rejected every location tried: ' + tried.join(' | '),
-           tried };
+  // Both attempts came back empty. Say it in words a reader can act on rather
+  // than handing them a vendor error code: "40102: No Search Results" told
+  // nobody what had happened or what to do about it.
+  return { error: 'no Google listing found for this firm name — searched ' +
+                  tried.join(' and ') + '. Check the name matches how Google ' +
+                  'lists the business, or confirm the listing by hand.',
+           noResults: true, tried };
 }
 
 // Endpoint: /v3/business_data/google/my_business_info/live  (no polling!)

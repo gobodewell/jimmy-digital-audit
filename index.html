@@ -851,7 +851,7 @@ input.masked{-webkit-text-security:disc;text-security:disc}
 // different vintages. Both carry the same stamp and the app compares them,
 // because "did you upload both files?" is not something anyone should have
 // to remember -- and a half-upload looks exactly like a fix that did not work.
-const BUILD = '2026-10-01.11';
+const BUILD = '2026-10-01.13';
 const DEFAULT_PROXY = 'https://jimmy-digital-audit.onrender.com';
 let AD = {}; // audit data store
 
@@ -1850,13 +1850,15 @@ async function runLighthouse(url) {
     else if (d.imagesOk == null)
       unk('c-img', 'PageSpeed returned no per-image sizes');
     if (d.imagesOk != null) measured('c-img');
-    // Only when the homepage read did not already settle it. PageSpeed's null
-    // means "we did not look"; overwriting a reading of the markup with that
-    // would turn a measurement back into a shrug.
-    if (!DIRECT.has('c-ga')) {
-      if (d.hasGA)       ck('c-ga');
-      else if (d.hasGA == null)   unk('c-ga',  'PageSpeed returned no third-party summary');
-    }
+    // A hint from EITHER source ticks it. PageSpeed sees what the page loaded
+    // at runtime, so it catches a tag injected by a manager after parse, which
+    // is not in the markup to be read -- that is a hint too, and it outranks a
+    // markup read that found nothing.
+    if (d.hasGA) ck('c-ga');
+    // Its null means "we did not look", which must not overwrite a reading of
+    // the markup with a shrug.
+    else if (d.hasGA == null && !DIRECT.has('c-ga'))
+      unk('c-ga', 'PageSpeed returned no third-party summary');
     // PageSpeed enumerates the third-party scripts on the page, so a GA tag is
     // either there or it is not. Without this the model's impression could
     // overwrite it -- the one thing this audit is built not to do.
@@ -3722,7 +3724,11 @@ const COVER_Y = {
   summary:  288,   // fixed box: SUMMARY_LINES at SUMMARY_LEAD
   scoreLbl: 461,   // OVERALL DIGITAL SCORE — n OF 100
   band:     476,   // "On track"
-  delta:    514,   // optional "Up n points since the last review."
+  // No delta slot. The cover carried "Up 3 points since the last review",
+  // compared against an earlier run of the same client saved in this browser's
+  // local history -- which in practice is a half-finished test run, not a
+  // review anyone agreed was a baseline. Citing it to a client as "the last
+  // review" claims a history that was never established.
   stats:    527,   // score ring + the four figures
   channels: 635,   // the three category scores and their bars
   foot:     721    // disclosure
@@ -3780,12 +3786,6 @@ function cover(d, logoWhite) {
                            bold: true, fontSize: 7.5, color: '#CBB8DC', characterSpacing: 1.1 }),
 
     at(COVER_Y.band, { text: s.band, font: 'Display', fontSize: 23, color: RC.white }),
-
-    // Printed only when there is a prior review. On a flow layout an empty node
-    // still reserved its line; here the slot is simply left blank.
-    ...(d.deltaLine
-      ? [at(COVER_Y.delta, { text: d.deltaLine, font: 'Body', fontSize: 9, color: '#CBB8DC' })]
-      : []),
 
     { columns: [
         { width: 110, stack: [
@@ -4290,11 +4290,6 @@ function assembleReport() {
     reviewed: new Date().toLocaleDateString('en-US', { month:'2-digit', day:'2-digit', year:'numeric' }),
     summary: AD.coverSummary || '',
     scores: s,
-    deltaLine: s.prior
-      ? (s.prior.delta > 0 ? `Up ${s.prior.delta} points since the last review.`
-       : s.prior.delta < 0 ? `Down ${Math.abs(s.prior.delta)} points since the last review.`
-       : 'Unchanged since the last review.')
-      : '',
     failedCount,
     kpiPassed:    `${s.passed} of ${s.total}`,
     needWork:     `${s.total - s.passed} items`,

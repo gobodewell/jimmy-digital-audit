@@ -17,7 +17,7 @@ const { chromium } = require('playwright');
   // rather than assumed to fit.
   const MAX = !!process.env.BAND_MAX;
   // COVER_STRESS is the case that broke the cover in the field: an AI summary
-  // far longer than the sample's, plus a delta line the sample does not have.
+  // far longer than the sample's.
   // On the old flow layout this pushed the unbreakable score block onto page 2,
   // where its white text had no purple behind it and read as erased.
   const STRESS = !!process.env.COVER_STRESS;
@@ -53,7 +53,6 @@ const { chromium } = require('playwright');
         'website performance score, which is the weakest of the three categories measured. ' +
         'Several directory listings also remain unclaimed, and the structured data markup on ' +
         'the homepage is incomplete, both of which are quick wins for the visibility score.';
-      d.deltaLine = 'Up 7 points since the last review.';
     }
     const doc = buildReportDoc(d, { logoWhite: A.logoWhite, logoPurple: A.logoPurple, coverBg: A.cover });
     return await new Promise(res => pdfMake.createPdf(doc).getBase64(x => res(x)));

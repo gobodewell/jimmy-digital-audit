@@ -101,6 +101,7 @@ print(pymupdf.open('${bandPdf}').page_count)
   check('still five pages at the worst case', bp === '5', bp);
 
   console.log('\nG. the cover is a fixed grid, and a long summary cannot move it');
+
   // The cover used to be a stack of margins. A summary two lines over pushed the
   // unbreakable score block onto page 2, where white text on a white page read as
   // erased -- shipped twice. Every block now sits at a hard-coded y, so this reads
@@ -111,7 +112,7 @@ print(pymupdf.open('${bandPdf}').page_count)
   check('COVER_Y is declared in one place', !!srcY);
   const Y = {};
   (srcY ? srcY[1] : '').replace(/(\w+)\s*:\s*(\d+)/g, (_, k, v) => { Y[k] = +v; });
-  check('it names every block', Object.keys(Y).length === 11, Object.keys(Y).join(','));
+  check('it names every block', Object.keys(Y).length === 10, Object.keys(Y).join(','));
 
   cp.execSync('node ' + path.join(__dirname,'render_cover.js'),
               { stdio:'pipe', env: Object.assign({}, process.env, { COVER_STRESS:'1' }) });
@@ -140,7 +141,7 @@ print(json.dumps({'lines': out, 'pages': d.page_count}))
   ];
 
   for (const [label, file, extra] of [['sample','cover.pdf',[]],
-                                      ['long summary','cover-stress.pdf',[['delta',/^Up \d+ points/]]]]) {
+                                      ['long summary','cover-stress.pdf',[]]]) {
     const r = linesOf(file);
     check(`${label}: still five pages`, r.pages === 5, String(r.pages));
     for (const [key, re] of MARK.concat(extra)) {
@@ -149,6 +150,13 @@ print(json.dumps({'lines': out, 'pages': d.page_count}))
       check(`${label}: ${key} sits at its declared y (${Y[key]})`,
             hit && Math.abs(hit.y - Y[key]) <= 1, hit ? String(hit.y) : 'MISSING');
     }
+    // The cover used to carry "Up 3 points since the last review", compared
+    // against a run saved in this browser's local history and presented to a
+    // client as an agreed baseline. It is gone, and it stays gone.
+    check(`${label}: no comparison to a previous review`,
+          !r.lines.some(l => /since the last/i.test(l.t)),
+          (r.lines.find(l => /since the last/i.test(l.t)) || {}).t || 'none');
+
     // The one thing a long summary could still do is run into the score label.
     const sum = r.lines.filter(l => l.y >= Y.summary && l.y < Y.scoreLbl);
     const last = sum.length ? Math.max(...sum.map(l => l.b)) : 0;

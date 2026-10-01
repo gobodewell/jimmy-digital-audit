@@ -65,12 +65,34 @@ setTimeout(async () => {
   check('measured false', d.ga === false, JSON.stringify(d.ga));
   check('and says so plainly', /no analytics tag/.test(d.gaNote||''), d.gaNote);
 
-  console.log('\nC. dataLayer alone is not analytics');
-  d = await get(PAGE('<title>x</title>') .replace('hi', 'We use GTM and Google Analytics here.'));
-  check('prose mentioning GTM is not a tag', d.ga === false, JSON.stringify(d.ga) + ' ' + (d.gaNote||''));
-  // Plenty of sites declare dataLayer with no tag attached to it.
-  d = await get(PAGE('<script>window.dataLayer = window.dataLayer || [];</script>'));
-  check('not counted', d.ga === false, JSON.stringify(d.ga) + ' ' + (d.gaNote||''));
+  console.log('\nC. any hint at all ticks the box');
+  // The bar is deliberately low. The two mistakes do not cost the same:
+  // missing a tag that is plainly in the markup tells a firm to install
+  // something they already have, in a document they hand to a client, while
+  // counting a stray dataLayer costs a recommendation nobody would act on.
+  for (const [label, markup] of [
+    ['a bare dataLayer',   '<script>window.dataLayer = window.dataLayer || [];</script>'],
+    ['a bare gtag call',   '<script>gtag("event","page_view");</script>'],
+    ['a UA id on its own', '<script>var t = "UA-12345678-1";</script>'],
+    ['the host alone',     '<script src="https://www.googletagmanager.com/x.js"></script>']
+  ]) {
+    d = await get(PAGE(markup));
+    check(label, d.ga === true, JSON.stringify(d.ga) + ' ' + (d.gaNote||''));
+  }
+  d = await get(PAGE('<title>x</title>'));
+  check('but a page with no tagging at all is still false', d.ga === false,
+        JSON.stringify(d.ga) + ' ' + (d.gaNote||''));
+
+  console.log('\nE. the note names one finding, not four');
+  // A GA4 site matches its loader, the googletagmanager host, gtag() and
+  // dataLayer. One tag, one finding -- and the measurement ID wins over the
+  // loose hints so the answer can be checked.
+  d = await get(PAGE('<script async src="https://www.googletagmanager.com/gtag/js?id=G-0Y7KR0RT0H">'
+    + '</script><script>window.dataLayer=window.dataLayer||[];gtag("config","G-0Y7KR0RT0H");</script>'));
+  check('ticked', d.ga === true);
+  check('names the measurement ID', /G-0Y7KR0RT0H/.test(d.gaNote||''), d.gaNote);
+  check('and does not also list the loose hints',
+        !/dataLayer|gtag on the page/.test(d.gaNote||''), d.gaNote);
 
   console.log('\nD. a blocked homepage leaves it unmeasured, never false');
   global.fetch = async (u,o) => {
