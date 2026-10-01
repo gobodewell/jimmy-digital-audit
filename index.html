@@ -852,7 +852,7 @@ input.masked{-webkit-text-security:disc;text-security:disc}
 // different vintages. Both carry the same stamp and the app compares them,
 // because "did you upload both files?" is not something anyone should have
 // to remember -- and a half-upload looks exactly like a fix that did not work.
-const BUILD = '2026-10-01.17';
+const BUILD = '2026-10-01.18';
 const DEFAULT_PROXY = 'https://jimmy-digital-audit.onrender.com';
 let AD = {}; // audit data store
 
@@ -1414,6 +1414,19 @@ function renderCrawl(d) {
   // A bare "no" with no detail is what made this look broken: the proxy records
   // every location it tried and what came back from each, and none of it was
   // being shown. Found or not, the evidence goes on screen.
+  // Analytics on screen, beside the other two. Four routes look for the tag and
+  // all of it was going to the console, so a box that did not tick looked like
+  // a broken check rather than a page nobody could read. The three things that
+  // decide the answer -- did we get the page, how much of it, and what each
+  // route found -- now sit where the unticked box is.
+  h += row('Google Analytics',
+           d.ga === true ? 'yes' : d.ga === false ? 'no' : 'unknown',
+           [ d.gaNote || '',
+             d.homeStatus ? 'homepage HTTP ' + d.homeStatus +
+               (d.homeBytes ? ', ' + Math.round(d.homeBytes / 1024) + 'KB read' : '') : '',
+             (d.gaRoute || []).length ? 'routes: ' + d.gaRoute.join('  ·  ') : ''
+           ].filter(Boolean).join(' — '));
+
   h += row('Sitemap',
            d.sitemap === true ? 'yes' : d.sitemapBlocked ? 'unknown' : 'no',
            d.sitemap === true
