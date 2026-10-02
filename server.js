@@ -6,7 +6,7 @@ const app  = express();
 // Bumped whenever a build is handed over. /health reports it so the app can
 // tell the user their page and their proxy are different vintages -- the
 // failure mode is a fix that silently is not there.
-const BUILD = '2026-10-02.7';
+const BUILD = '2026-10-02.8';
 const PORT = process.env.PORT || 3001;
 
 // Every one of these is trimmed. A key pasted into a hosting panel's env
@@ -2449,9 +2449,21 @@ async function sbFetch(path, opts) {
   throw last;
 }
 
-const sbJson = async (path, opts) => (await sbFetch(path, Object.assign({
+// The caller's options first, then the merged headers LAST.
+//
+// These two were the other way round, so Object.assign copied opts.headers
+// straight over the object that had just had Content-Type merged into it. The
+// only call site that passes headers of its own is the audits insert, which
+// sends Prefer: return=representation -- so that one request went out with
+// Prefer and no Content-Type, and PostgREST rejected a body it could not type
+// with a 400 before Postgres ever saw it. The PDF uploaded, the row did not,
+// and History read an empty table while the bucket filled up.
+//
+// Everything else kept working and hid it: GETs have no body, and the storage
+// sign call passes no headers, so its merged Content-Type survived.
+const sbJson = async (path, opts) => (await sbFetch(path, Object.assign({}, opts, {
   headers: Object.assign({ 'Content-Type': 'application/json' }, (opts || {}).headers || {})
-}, opts))).json();
+}))).json();
 
 // Save one audit. The PDF arrives base64 in the same request so a save is
 // atomic from the app's point of view: it cannot end up with a row whose file

@@ -661,10 +661,19 @@ input.masked{-webkit-text-security:disc;text-security:disc}
           <label class="ci" style="align-items:flex-start"><input type="checkbox" id="ack-judgment" onchange="renderApproval()"/><span class="ci-l">I have reviewed the checks based on Claude's reading of the site and corrected any that are wrong.</span></label>
         </div>
         <div id="appr-unmeasured" class="cl" style="display:none"></div>
+        <div class="cl" style="margin-top:2px">
+          <label class="ci"><input type="checkbox" id="save-hist" checked/><span class="ci-l">File this audit to history when I download it \u2014 the answers and the exact PDF the client receives.</span></label>
+        </div>
         <div id="appr-msg" style="font-size:12px;color:var(--text3);margin-top:10px;line-height:1.5"></div>
         <div class="btn-row" style="margin-top:12px">
           <button class="btn btn-green" id="dlBtn" onclick="downloadReportPDF()" disabled>Download PDF</button>
         </div>
+        <!-- The outcome of the last download lives here, not in appr-msg.
+             downloadReportPDF ends with renderApproval(), which rewrites
+             appr-msg to the readiness line -- so every "filed to history" and
+             every filing error was overwritten the instant it was set, and a
+             failed save looked identical to a successful one. -->
+        <div id="dl-result" style="font-size:12px;margin-top:10px;line-height:1.5"></div>
       </div>
 
       <div class="card">
@@ -877,7 +886,7 @@ input.masked{-webkit-text-security:disc;text-security:disc}
 // different vintages. Both carry the same stamp and the app compares them,
 // because "did you upload both files?" is not something anyone should have
 // to remember -- and a half-upload looks exactly like a fix that did not work.
-const BUILD = '2026-10-02.7';
+const BUILD = '2026-10-02.8';
 const DEFAULT_PROXY = 'https://jimmy-digital-audit.onrender.com';
 let AD = {}; // audit data store
 
@@ -4738,25 +4747,29 @@ async function downloadReportPDF() {
                  new Date().toLocaleDateString('en-US', { month:'long', year:'numeric' }) + '.pdf';
     const pdf = pdfMake.createPdf(doc);
     await new Promise(res => pdf.download(name, res));
-    if (msg) { msg.style.color = 'var(--green)'; msg.textContent = 'Downloaded ' + name; }
+    const out = document.getElementById('dl-result');
+    const say = (colour, text) => { if (out) { out.style.color = colour; out.textContent = text; } };
+    say('var(--green)', 'Downloaded ' + name);
 
     // File it centrally, with the exact bytes the client just received. The
     // download has already happened, so a filing failure is reported but never
     // costs the report -- and the local copy is written either way.
     saveHist();
-    try {
+    if (!document.getElementById('save-hist')?.checked) {
+      say('var(--text3)', 'Downloaded ' + name +
+          ' \u2014 not filed to history, because Save was unticked. ' +
+          'This browser keeps a local copy.');
+    } else try {
+      say('var(--text3)', 'Downloaded ' + name + ' \u2014 filing to history\u2026');
       const b64 = await new Promise(r => pdf.getBase64(x => r(x)));
       const f = await fileAudit(b64);
-      if (msg) msg.textContent = 'Downloaded ' + name + ' · filed to history';
+      say('var(--green)', 'Downloaded ' + name + ' \u00b7 filed to history');
       console.log('Filed audit', f.id, 'under', f.domain);
     } catch (e) {
       console.error('History save failed:', e.message);
-      if (msg) {
-        msg.style.color = '#b45309';
-        msg.textContent = 'Downloaded ' + name +
-          ' — but it could not be filed to history: ' + e.message +
-          '. It is saved in this browser only.';
-      }
+      say('#b45309', 'Downloaded ' + name +
+          ' \u2014 but it could not be filed to history: ' + e.message +
+          '. It is saved in this browser only.');
     }
   } catch (e) {
     console.error('PDF error:', e);
@@ -5149,6 +5162,10 @@ function resetAudit() {
   txt('outBlock',      'Complete the audit to generate a summary.');
   txt('at-msg',        'Complete the audit tabs then push to Airtable.');
   txt('sf-status', ''); txt('sf-lastpost', ''); txt('hist-msg', ''); txt('extMsg', '');
+  txt('dl-result', '');
+  // Deliberately re-armed rather than remembered: opting out is a decision
+  // about one audit, and the safe setting is the one you start from.
+  const sh = document.getElementById('save-hist'); if (sh) sh.checked = true;
 
   AD = {};
   // renderApproval, not recalc: it calls recalc itself and also re-disables
