@@ -270,6 +270,15 @@ input.masked{-webkit-text-security:disc;text-security:disc}
         </div>
         <div class="fr fr2">
           <div class="fg"><label>City, State (helps find the Google Business Profile)</label><input type="text" id="clientCity" placeholder="e.g. Houston, Texas"/></div>
+          <div class="fg" style="grid-column:1/-1">
+            <label>Page reading from the browser extension (optional — for sites that refuse the server)</label>
+            <textarea id="extPaste" rows="2" placeholder="Open the client site, click the GrowthLine Audit Reader, Copy for the audit, paste here"
+                      style="width:100%;font-family:'DM Mono',monospace;font-size:11px;padding:8px;border:1px solid var(--line);border-radius:6px"></textarea>
+            <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
+              <button class="btn bs" type="button" onclick="applyExtension()">Apply page reading</button>
+              <span id="extMsg" style="font-size:11px;color:var(--text3)"></span>
+            </div>
+          </div>
           <div class="fg"><label>Airtable record ID (optional — patches existing record)</label><input type="text" id="atRecordId" placeholder="rec..."/></div>
         </div>
       </div>
@@ -857,7 +866,7 @@ input.masked{-webkit-text-security:disc;text-security:disc}
 // different vintages. Both carry the same stamp and the app compares them,
 // because "did you upload both files?" is not something anyone should have
 // to remember -- and a half-upload looks exactly like a fix that did not work.
-const BUILD = '2026-10-02.2';
+const BUILD = '2026-10-02.3';
 const DEFAULT_PROXY = 'https://jimmy-digital-audit.onrender.com';
 let AD = {}; // audit data store
 
@@ -1338,6 +1347,51 @@ function setStep(id, state, msg) {
     ? ` <button id="retry-${id}" onclick="retryStep('${id}')" class="step-retry" title="Run this step again">Retry</button>`
     : '';
   el.innerHTML = `<span class="si">${icons[state]||'○'}</span>${label}${note}${retry}`;
+}
+
+// A reading taken by the browser extension, from the page the browser already
+// loaded. This is the one source a firewall cannot refuse: it is not a fetch.
+// Everything here is a MEASUREMENT -- a human opened the real site and the
+// extension read its live DOM -- so it is recorded as one and the AI passes
+// cannot overwrite it. Absent fields change nothing: the extension reports null
+// where it could not establish something, and null must not become a finding.
+function applyExtension() {
+  const msg = document.getElementById('extMsg');
+  const raw = (getVal('extPaste') || '').trim();
+  if (!raw) { msg.textContent = 'Nothing pasted.'; return; }
+  let d;
+  try { d = JSON.parse(raw); }
+  catch (e) { msg.style.color = 'var(--red)';
+              msg.textContent = 'That is not the reading — copy it again from the extension.'; return; }
+  if (!d || !/growthline-extension/.test(d.source || '')) {
+    msg.style.color = 'var(--red)';
+    msg.textContent = 'That JSON did not come from the audit reader.'; return;
+  }
+
+  const set = [];
+  const take = (id, val, label) => {
+    if (val == null) return;
+    if (val) { ck(id); set.push(label); }
+    UNK.delete(id);
+    measured(id);
+  };
+  take('c-ga',   d.analytics, 'analytics' + (d.analyticsIds && d.analyticsIds.length
+                                ? ' (' + d.analyticsIds.join(', ') + ')' : ''));
+  take('c-mob',  d.viewport,  'mobile viewport');
+  take('c-sch',  d.schema,    'structured data' + (d.schemaTypes && d.schemaTypes.length
+                                ? ' (' + d.schemaTypes.slice(0,2).join(', ') + ')' : ''));
+  take('c-meta', !!d.metaDescription, 'meta description');
+
+  AD.extReading = d;
+  // A link to the firm's listing is proof one exists, but not proof it is
+  // theirs -- it is shown, never scored.
+  const gbp = (d.gbpLinks || []).length
+    ? '  ·  ' + d.gbpLinks.length + ' Google listing link(s) on the page' : '';
+  recalc();
+  msg.style.color = 'var(--green)';
+  msg.textContent = (set.length ? 'Set from the page: ' + set.join(', ') : 'Read, nothing to set') +
+                    '  ·  ' + d.host + ', ' + Math.round(d.bytes / 1024) + 'KB' + gbp;
+  console.log('EXTENSION READING:', d);
 }
 
 // ── Main audit runner ─────────────────────────────────────────────────────────
