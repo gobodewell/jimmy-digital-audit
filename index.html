@@ -57,6 +57,13 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);fon
 .nb:hover{background:var(--surface2);color:var(--text)}
 .nb.active{background:var(--pbg);color:var(--purple)}
 .nb svg{width:15px;height:15px;flex-shrink:0;stroke-width:1.8}
+/* The Current audit entry carries a second line naming the firm, so the one
+   nav item whose meaning changes says what it currently holds. */
+.nb-cur{display:flex;flex-direction:column;gap:1px;min-width:0}
+.nb-cur em{font-style:normal;font-size:10.5px;color:var(--text3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nb.active .nb-cur em{color:var(--purple);opacity:.72}
+.nb:disabled{opacity:.45;cursor:default}
+.nb:disabled:hover{background:none;color:var(--text2)}
 .sb-foot{margin-top:auto;padding:12px 16px 0;border-top:1px solid var(--border);font-size:11px;color:var(--text3)}
 
 /* Main */
@@ -225,16 +232,20 @@ input.masked{-webkit-text-security:disc;text-security:disc}
   </div>
   <div class="ng">
     <span class="nl">Audit</span>
-    <button class="nb active" onclick="showPage('audit')">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>New Audit
+    <button class="nb" onclick="newAudit()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M12 5v14M5 12h14"/></svg>New audit
     </button>
-    <button class="nb" onclick="showPage('history')">
+    <button class="nb active" data-page="audit" id="nav-audit" onclick="showPage('audit')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+      <span class="nb-cur">Current audit<em id="nav-current">nothing in progress</em></span>
+    </button>
+    <button class="nb" data-page="history" onclick="showPage('history')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 9h6M9 12h6M9 15h4"/></svg>History
     </button>
   </div>
   <div class="ng" style="margin-top:6px">
     <span class="nl">Config</span>
-    <button class="nb" onclick="showPage('settings')">
+    <button class="nb" data-page="settings" onclick="showPage('settings')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/></svg>Settings
     </button>
   </div>
@@ -247,8 +258,8 @@ input.masked{-webkit-text-security:disc;text-security:disc}
 <!-- ═══ AUDIT PAGE ════════════════════════════════════════════════════════════ -->
 <div class="page active" id="page-audit">
   <div class="ph">
-    <div class="ph-t">New Audit</div>
-    <div class="ph-s">DataForSEO + AI-powered analysis</div>
+    <div class="ph-t" id="audit-title">New Audit</div>
+    <div class="ph-s" id="audit-sub">DataForSEO + AI-powered analysis</div>
     <div class="tabs">
       <button class="tab active" onclick="st('setup')">Setup</button>
       <button class="tab" onclick="st('aireview')">AI Review</button>
@@ -265,8 +276,8 @@ input.masked{-webkit-text-security:disc;text-security:disc}
       <div class="card">
         <div class="ct"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>Client info</div>
         <div class="fr fr2">
-          <div class="fg"><label>Client name</label><input type="text" id="clientName" placeholder="e.g. Convergent Financial Partners"/></div>
-          <div class="fg"><label>Website URL</label><input type="url" id="clientURL" placeholder="https://www.example.com"/></div>
+          <div class="fg"><label>Client name</label><input type="text" id="clientName" placeholder="e.g. Convergent Financial Partners" oninput="navCurrent()"/></div>
+          <div class="fg"><label>Website URL</label><input type="url" id="clientURL" placeholder="https://www.example.com" oninput="navCurrent()"/></div>
         </div>
         <div class="fr fr2">
           <div class="fg"><label>City, State (helps find the Google Business Profile)</label><input type="text" id="clientCity" placeholder="e.g. Houston, Texas"/></div>
@@ -311,7 +322,7 @@ input.masked{-webkit-text-security:disc;text-security:disc}
         <button class="btn btn-primary" id="runBtn" onclick="runAudit()">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>Run audit
         </button>
-        <button class="btn btn-ghost" onclick="clearAll()">Clear</button>
+        <button class="btn btn-ghost" onclick="newAudit()">Start a new audit</button>
       </div>
     </div>
 
@@ -866,7 +877,7 @@ input.masked{-webkit-text-security:disc;text-security:disc}
 // different vintages. Both carry the same stamp and the app compares them,
 // because "did you upload both files?" is not something anyone should have
 // to remember -- and a half-upload looks exactly like a fix that did not work.
-const BUILD = '2026-10-02.6';
+const BUILD = '2026-10-02.7';
 const DEFAULT_PROXY = 'https://jimmy-digital-audit.onrender.com';
 let AD = {}; // audit data store
 
@@ -887,7 +898,7 @@ const STEP_DEFS = [
 // ── Boot ──────────────────────────────────────────────────────────────────────
 // renderHist now talks to the proxy, so it runs when the History tab is
 // opened rather than on every page load.
-window.onload = () => { loadSettings(); recalc(); renderApproval(); };
+window.onload = () => { loadSettings(); recalc(); renderApproval(); navCurrent(); };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const ls  = (k,v) => localStorage.setItem(k,v);
@@ -983,9 +994,43 @@ async function testHistory() {
 
 function showPage(n) {
   document.querySelectorAll('.page').forEach(p => p.classList.toggle('active', p.id==='page-'+n));
-  document.querySelectorAll('.nb').forEach((b,i) => b.classList.toggle('active', ['audit','history','settings'][i]===n));
+  // Keyed off data-page rather than the button's position. The old version
+  // read ['audit','history','settings'][i], so adding the New audit button
+  // above them shifted every nav item onto the wrong page.
+  document.querySelectorAll('.nb').forEach(b =>
+    b.classList.toggle('active', b.dataset.page === n));
   if (n==='history') renderHist();
   if (n==='settings') testHistory();
+}
+
+// Is there audit work on screen worth protecting? A URL typed in, or any
+// answer ticked. Deliberately keyed off CHECKS rather than '.ci input': the
+// approval tab has its own acknowledgement checkboxes, and ticking one of
+// those is not audit work.
+function auditDirty() {
+  return !!getVal('clientURL') ||
+         CHECKS.some(c => (document.getElementById(c.id) || {}).checked);
+}
+
+// The Current audit nav entry and the page heading both name the firm, so
+// neither one claims to be a new audit while a finished one is still loaded.
+function navCurrent() {
+  const name = getVal('clientName');
+  const url  = getVal('clientURL');
+  const who  = name || (url ? url.replace(/^https?:\/\/(www\.)?/,'').replace(/\/.*$/,'') : '');
+  const em = document.getElementById('nav-current');
+  if (em) em.textContent = who || (auditDirty() ? 'in progress' : 'nothing in progress');
+  const t = document.getElementById('audit-title');
+  const sub = document.getElementById('audit-sub');
+  if (t) t.textContent = who || 'New Audit';
+  // AD.scores exists from the first recalc() on page load, so testing it said
+  // "Audit run" over a form where nothing had run. A run has produced
+  // something only once a check has actually been answered.
+  const ran = AD.scores && (AD.scores.passed > 0 || UNK.size > 0);
+  if (sub) sub.textContent = !who ? 'DataForSEO + AI-powered analysis'
+    : ran ? 'Score ' + AD.scores.overall + ' \u00b7 ' + AD.scores.passed +
+            ' of ' + AD.scores.total + ' checks passed'
+    : 'Not run yet';
 }
 
 function st(n) {
@@ -1443,6 +1488,7 @@ async function runAudit() {
   btn.disabled = true;
   btn.innerHTML = '<span class="spin">⟳</span> Running...';
   AD = { url, name, domain };
+  navCurrent();
 
   initSteps();
 
@@ -1477,6 +1523,7 @@ async function runAudit() {
 
   btn.disabled = false;
   btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg> Run audit';
+  navCurrent();
   toast('Audit complete - correct any social handles and click Pull to recheck');
   st('aireview');
 }
@@ -4874,6 +4921,7 @@ function applyState(st) {
   CHECKS.forEach(c => { const e = document.getElementById(c.id); if (e) e.checked = false; });
   (st.checks || []).forEach(([id, on]) => { const e = document.getElementById(id); if (e) e.checked = !!on; });
   recalc();
+  navCurrent();
 }
 
 // The local copy. Unchanged in spirit -- last 50, this browser only -- but it
@@ -5033,11 +5081,8 @@ async function histPdf(path) {
 // Confirms first: this replaces whatever is on screen.
 async function histOpen(id) {
   const msg = document.getElementById('hist-msg');
-  // Same reason as auditState: the approval acknowledgement is a .ci input too,
-  // and ticking it should not count as unsaved audit work.
-  const dirty = getVal('clientURL') ||
-    CHECKS.some(c => (document.getElementById(c.id) || {}).checked);
-  if (dirty && !confirm('Open this audit? It replaces what is currently on the audit tabs.')) return;
+  if (auditDirty() &&
+      !confirm('Open this audit? It replaces what is currently on the audit tabs.')) return;
   msg.textContent = 'Loading…';
   try {
     const r = await pf('/history/get?id=' + encodeURIComponent(id));
@@ -5052,22 +5097,85 @@ async function histOpen(id) {
 }
 
 // ── Clear ─────────────────────────────────────────────────────────────────────
-function clearAll() {
+// Everything the audit page holds, put back to the state a fresh load is in.
+//
+// This replaces clearAll(), which had drifted out of step with the page in two
+// ways that both showed the previous firm's findings under a heading that said
+// New Audit. It hid 'ai-vis-panel', 'ai-web-panel' and 'ai-soc-panel', none of
+// which exist -- the AI cards are keyed ai-vis-text / ai-vis-status -- and it
+// never hid crawl-block, aiment-block or tech-block, which do. It also left
+// the approval card reading "Approved by <name>. Ready to download." over an
+// empty audit, because it called recalc() and not renderApproval().
+//
+// The preparer is kept on purpose: the same person runs several of these in a
+// sitting, and retyping their own name each time is not a safeguard.
+const AI_CARDS = ['vis','web','soc'];
+const RUN_BLOCKS = ['gbp-block','dirs-block','crawl-block','schema-block',
+                    'aiment-block','aivis-block','tech-block','weight-block',
+                    'stepsWrap','gtext-note'];
+
+function resetAudit() {
   UNK.clear();
-  ['v','w','s'].forEach(c => { sv('adj-'+c,''); sv('adjr-'+c,''); });
   DIRECT.clear();
-  document.querySelectorAll('input[type=checkbox]').forEach(c => c.checked=false);
-  document.querySelectorAll('input[type=number]').forEach(i => i.value='');
-  document.querySelectorAll('textarea').forEach(t => t.value='');
-  ['clientName','clientURL','clientCity','atRecordId','h-fb','h-li','h-ig','h-yt'].forEach(id => sv(id,''));
-  ['da','kw','tr','bl','rd','spd','sz','ps','aivis','aicite','aibrand','aibcite'].forEach(id => setMV(id,'-',null));
-  ['gbp-block','schema-block','dirs-block','aivis-block','weight-block','ai-vis-panel','ai-web-panel','ai-soc-panel','stepsWrap'].forEach(id => {
-    const e = document.getElementById(id); if(e) e.style.display='none';
+  ['v','w','s'].forEach(c => { sv('adj-'+c,''); sv('adjr-'+c,''); });
+
+  // Scoped to the audit page. The unscoped version reached the drawer's ask
+  // box and anything else on the document that happened to be a textarea.
+  const page = document.getElementById('page-audit');
+  page.querySelectorAll('input[type=checkbox]').forEach(c => c.checked = false);
+  page.querySelectorAll('input[type=number]').forEach(i => i.value = '');
+  page.querySelectorAll('textarea').forEach(t => t.value = '');
+
+  ['clientName','clientURL','clientCity','atRecordId',
+   'h-fb','h-li','h-ig','h-yt'].forEach(id => sv(id,''));
+  ['da','kw','tr','bl','rd','spd','sz','ps',
+   'aivis','aicite','aibrand','aibcite'].forEach(id => setMV(id,'-',null));
+  RUN_BLOCKS.forEach(id => {
+    const e = document.getElementById(id); if (e) e.style.display = 'none';
   });
-  document.getElementById('sf-status').textContent = '';
-  const _lp = document.getElementById('sf-lastpost'); if (_lp) _lp.textContent = '';
-  AD = {}; recalc(); toast('Cleared');
+
+  // The AI cards back to their "not run yet" wording, so an unrun review reads
+  // as unrun rather than as the last firm's review.
+  AI_CARDS.forEach(k => {
+    const tx = document.getElementById('ai-' + k + '-text');
+    const bd = document.getElementById('ai-' + k + '-status');
+    if (tx) { tx.textContent = 'Not run yet \u2014 click Run Audit on Setup tab.';
+              tx.style.color = 'var(--text3)'; }
+    if (bd) { bd.textContent = '\u2014'; bd.className = 'badge bgr'; }
+  });
+
+  const txt = (id, v) => { const e = document.getElementById(id); if (e) e.textContent = v; };
+  txt('cover-summary', 'Not written yet \u2014 click below once the audit is complete.');
+  txt('outBlock',      'Complete the audit to generate a summary.');
+  txt('at-msg',        'Complete the audit tabs then push to Airtable.');
+  txt('sf-status', ''); txt('sf-lastpost', ''); txt('hist-msg', ''); txt('extMsg', '');
+
+  AD = {};
+  // renderApproval, not recalc: it calls recalc itself and also re-disables
+  // Download PDF and clears the approval line. Clearing used to leave both
+  // claiming a signed-off audit that no longer existed.
+  renderApproval();
+  navCurrent();
+  st('setup');
+  const pb = document.querySelector('#page-audit .pb');
+  if (pb) pb.scrollTop = 0;
+  window.scrollTo(0, 0);
 }
+
+// Starting a new one is the destructive act, so it is the one that asks.
+function newAudit() {
+  if (auditDirty() && !confirm(
+      'Start a new audit? This clears ' +
+      (getVal('clientName') || 'the audit') + ' from the tabs.\n\n' +
+      'Audits you have downloaded a PDF for are saved in History and can be reopened.'))
+    return;
+  resetAudit();
+  showPage('audit');
+  toast('Ready for a new audit');
+}
+
+// Kept so anything still calling the old name resets rather than throwing.
+function clearAll() { resetAudit(); toast('Cleared'); }
 
 // ── AI Assistant drawer ───────────────────────────────────────────────────────
 // Checkboxes the assistant may set from web research (presence / content checks).
