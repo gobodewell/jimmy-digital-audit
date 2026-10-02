@@ -6,7 +6,7 @@ const app  = express();
 // Bumped whenever a build is handed over. /health reports it so the app can
 // tell the user their page and their proxy are different vintages -- the
 // failure mode is a fix that silently is not there.
-const BUILD = '2026-10-01.19';
+const BUILD = '2026-10-02.2';
 const PORT = process.env.PORT || 3001;
 
 // Every one of these is trimmed. A key pasted into a hosting panel's env
@@ -776,6 +776,66 @@ app.get('/domain/overview', async (req, res) => {
 
 // ── 2. PageSpeed — page speed, size, mobile, HTTPS, meta, indexable, GA, images
 // Using Google PageSpeed Insights API (free, reliable, no CORS issues)
+// What the site is built on, without being allowed to look at it.
+//
+// This is what Wappalyzer does, and it is worth being precise about why
+// Wappalyzer succeeds where this proxy fails: it runs INSIDE the browser, on a
+// page the firewall already let through. It is not defeating bot management,
+// it is on the other side of it. Their server-side API would be making the
+// same request this proxy makes, from the same kind of address.
+//
+// So take the signal from the crawl that is already allowed. Wappalyzer
+// identifies technology mostly by WHICH URLS A PAGE LOADS, and Lighthouse's
+// network-requests audit is exactly that list, gathered by Google. Two more
+// fields in the same response have never been read: stackPacks, where
+// Lighthouse names the CMS outright, and the js-libraries audit, which needs
+// the best-practices category the request was not asking for.
+//
+// Hosts only -- no claim is made from a URL that merely mentions a name.
+const TECH_SIGNS = [
+  ['Analytics',     'Google Analytics',     /google-analytics\.com|\/gtag\/js/i],
+  ['Analytics',     'Google Tag Manager',   /googletagmanager\.com\/gtm\.js|googletagmanager\.com\/ns\.html/i],
+  ['Analytics',     'Datadog RUM',          /datadoghq|datadog-rum/i],
+  ['Analytics',     'Hotjar',               /hotjar\.com/i],
+  ['Analytics',     'Microsoft Clarity',    /clarity\.ms/i],
+  ['Analytics',     'Matomo',               /matomo\.(?:cloud|org)/i],
+  ['Analytics',     'Plausible',            /plausible\.io/i],
+  ['Advertising',   'Meta Pixel',           /connect\.facebook\.net/i],
+  ['Advertising',   'LinkedIn Insight',     /snap\.licdn\.com/i],
+  ['Advertising',   'Microsoft Ads',        /bat\.bing\.com/i],
+  ['Advertising',   'Google Ads',           /googleadservices\.com|doubleclick\.net/i],
+  ['Platform',      'WordPress',            /\/wp-content\/|\/wp-includes\//i],
+  ['Platform',      'Squarespace',          /squarespace\.com|sqspcdn|static1\.squarespace/i],
+  ['Platform',      'Wix',                  /parastorage\.com|wixstatic\.com/i],
+  ['Platform',      'Webflow',              /website-files\.com|webflow\.com/i],
+  ['Platform',      'HubSpot CMS',          /hs-scripts\.com|hubspot\.com|hsforms\.net/i],
+  ['Platform',      'FMG Suite',            /fmgsuite\.com|fmgcontent\.com/i],
+  ['Scheduling',    'Calendly',             /calendly\.com/i],
+  ['Chat',          'Intercom',             /intercom\.(?:io|com)/i],
+  ['Chat',          'Drift',                /drift\.com|driftt\.com/i],
+  ['Chat',          'Tawk.to',              /tawk\.to/i],
+  ['Delivery',      'Cloudflare',           /cdnjs\.cloudflare\.com|cloudflareinsights\.com/i],
+  ['Delivery',      'Akamai',               /akamaized\.net|akamaihd\.net/i],
+  ['Delivery',      'Fastly',               /fastly\.net/i]
+];
+
+function detectTech(urls, stackPacks, jsLibs) {
+  const blob = (urls || []).join(' \n ');
+  const found = [];
+  for (const [group, name, re] of TECH_SIGNS)
+    if (re.test(blob)) found.push({ group, name, via: 'a request the page made' });
+  // Lighthouse names the CMS itself, which beats guessing from asset paths.
+  for (const sp of (stackPacks || []))
+    if (sp && sp.title && !found.some(f => f.name === sp.title))
+      found.push({ group: 'Platform', name: sp.title, via: 'identified by Lighthouse' });
+  // And the libraries it recognises in the running page.
+  for (const it of (jsLibs || []))
+    if (it && it.name)
+      found.push({ group: 'Library', name: it.name + (it.version ? ' ' + it.version : ''),
+                   via: 'detected in the page' });
+  return found;
+}
+
 app.get('/site/lighthouse', async (req, res) => {
   const { url } = req.query;
   if (!url) return res.status(400).json({ error: 'url required' });
@@ -795,7 +855,8 @@ app.get('/site/lighthouse', async (req, res) => {
     // viewport, is-crawlable, meta-description and robots-txt are in seo.
     const psUrl = 'https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=' +
       encodeURIComponent(url) + '&strategy=' + strategy +
-      '&category=performance&category=seo' + (GOOGLE_KEY ? '&key=' + GOOGLE_KEY : '');
+      '&category=performance&category=seo&category=best-practices' +
+      (GOOGLE_KEY ? '&key=' + GOOGLE_KEY : '');
     console.log('PageSpeed fetching:', psUrl.slice(0, 100));
     // Lighthouse drives a real browser against a live site, so failures here are
     // mostly transient: a slow first byte, a cold CDN, a redirect that settles
@@ -845,7 +906,8 @@ app.get('/site/lighthouse', async (req, res) => {
     }
 
     console.log('PageSpeed response status:', d?.lighthouseResult ? 'ok' : (gMsg || 'no lighthouse result'));
-    const audits = d?.lighthouseResult?.audits;
+    const lh     = d?.lighthouseResult || {};
+    const audits = lh.audits;
     const cats   = d?.lighthouseResult?.categories;
     if (!audits) {
       // Translate the codes that have a real remedy. Everything else is
@@ -994,19 +1056,54 @@ app.get('/site/lighthouse', async (req, res) => {
       .sort((a, b) => b.kb - a.kb);
 
     // Google Analytics — check third-party summary
-    // If Lighthouse did not produce a third-party summary we have not looked
-    // for Analytics at all, so we cannot say it is absent.
+    // Analytics, from the one fetcher these sites do not refuse.
+    //
+    // Every source-reading route runs from this server, and to a WAF that is a
+    // crawler from a cloud IP range: refused outright, or handed an
+    // interstitial. Widening the patterns cannot fix being shown a different
+    // page. But Lighthouse already ran on this URL from GOOGLE's addresses,
+    // which these sites do allow -- the audit's own progress list shows the
+    // PageSpeed step passing on the sites where every other route failed.
+    //
+    // network-requests is its complete enumeration of what the page loaded,
+    // and a page running Google Analytics loads it from googletagmanager.com
+    // or google-analytics.com. Nothing can be blocked out of that list, and it
+    // catches what no source read ever could: a tag injected at runtime by a
+    // tag manager, which is in nobody's HTML.
+    const netUrls = (netAudit?.details?.items || [])
+      .map(i => String(i.url || '')).filter(Boolean);
+    const gaReq = netUrls.filter(u =>
+      /googletagmanager\.com|google-analytics\.com|\/gtag\/js|\/gtm\.js|analytics\.js/i.test(u));
+
+    // third-party-summary stays as a second opinion: it names entities rather
+    // than URLs, so it can recognise a tag served from the firm's own domain
+    // that the URL test would miss.
     const thirdParty = audits['third-party-summary']?.details?.items;
-    const hasGA = !thirdParty ? null : thirdParty.some(i =>
+    const tpGA = !thirdParty ? null : thirdParty.some(i =>
       /google.tag|google.analytics|googletagmanager/i.test(i.entity || '')
     );
+
+    // Either one is enough. Null only when NEITHER audit came back -- then
+    // Lighthouse did not look, which is not the same as finding nothing.
+    const hasGA = gaReq.length ? true
+                : tpGA === true ? true
+                : (netUrls.length || thirdParty) ? false
+                : null;
+    const gaFrom = gaReq.length ? 'loaded by the page: ' + gaReq[0].slice(0, 110)
+                 : tpGA ? 'named in the third-party summary'
+                 : null;
 
     res.json({
       strategy,
       attempts: tries,
       speed, sizeMB, perfScore, seoScore,
       isHttps, isMobile, isIndexable, hasMeta, robotsTxtValid,
-      speedPass, sizePass, imagesOk, imgList, hasGA,
+      // The technology fingerprint, from the crawl these sites allow.
+      tech: detectTech(netUrls,
+                       lh.stackPacks,
+                       audits['js-libraries']?.details?.items),
+      speedPass, sizePass, imagesOk, imgList, hasGA, gaFrom,
+      gaRequests: gaReq.slice(0, 5),
       imgLimitKb: IMG_LIMIT_KB,
       imgOverCount: imgOver.length,
       imgOver: imgOver.slice(0, 10).map(i => ({

@@ -493,6 +493,11 @@ input.masked{-webkit-text-security:disc;text-security:disc}
         </div>
       </div>
 
+      <div id="tech-block" class="card" style="display:none">
+        <div class="ct">Technology — what this site is built on</div>
+        <div id="tech-body"></div>
+      </div>
+
       <div id="weight-block" class="card" style="display:none">
         <div class="ct">Page weight — what is loading, and from where</div>
         <div id="weight-body"></div>
@@ -852,7 +857,7 @@ input.masked{-webkit-text-security:disc;text-security:disc}
 // different vintages. Both carry the same stamp and the app compares them,
 // because "did you upload both files?" is not something anyone should have
 // to remember -- and a half-upload looks exactly like a fix that did not work.
-const BUILD = '2026-10-01.19';
+const BUILD = '2026-10-02.2';
 const DEFAULT_PROXY = 'https://jimmy-digital-audit.onrender.com';
 let AD = {}; // audit data store
 
@@ -1927,7 +1932,16 @@ async function runLighthouse(url) {
     // at runtime, so it catches a tag injected by a manager after parse, which
     // is not in the markup to be read -- that is a hint too, and it outranks a
     // markup read that found nothing.
-    if (d.hasGA) ck('c-ga');
+    // Google's own crawler reached the page from Google's addresses, which
+    // these sites allow where they refuse ours. If Lighthouse saw the page
+    // request googletagmanager.com, the tag is there -- whatever our own fetch
+    // was shown. This outranks a markup read that found nothing.
+    if (d.hasGA) {
+      ck('c-ga');
+      measured('c-ga');
+      AD.gaFrom = d.gaFrom || 'seen by PageSpeed';
+      if (d.gaFrom) console.log('ANALYTICS via PageSpeed:', d.gaFrom);
+    }
     // Its null means "we did not look", which must not overwrite a reading of
     // the markup with a shrug.
     else if (d.hasGA == null && !DIRECT.has('c-ga'))
@@ -1937,6 +1951,7 @@ async function runLighthouse(url) {
     // overwrite it -- the one thing this audit is built not to do.
     if (d.hasGA != null) measured('c-ga');
 
+    renderTech(d);
     renderPageWeight(d);
     // It worked, so the manual control has nothing left to offer.
     const rt = document.getElementById('psi-retry');
@@ -2101,6 +2116,34 @@ async function runGBP(name, url, city) {
 // host. On these sites the answer is usually a single vendor CDN serving
 // unresized originals, which is a finding that repeats across every client on
 // the same platform — so it is worth showing the host totals, not just files.
+// What the site runs, identified from the crawl these sites allow rather than
+// from a page they will not show us. Grouped, and every entry says how it was
+// found, because a technology list nobody can check is just an assertion.
+function renderTech(d) {
+  const block = document.getElementById('tech-block');
+  const body  = document.getElementById('tech-body');
+  if (!block || !body) return;
+  const tech = d.tech || [];
+  if (!tech.length) { block.style.display = 'none'; return; }
+  block.style.display = '';
+
+  const groups = {};
+  tech.forEach(t => { (groups[t.group] = groups[t.group] || []).push(t); });
+  body.innerHTML =
+    '<div style="font-size:11px;color:var(--text3);margin-bottom:10px">' +
+    'Read from what the page loaded during Google\'s own crawl — the one request ' +
+    'these sites do not refuse.</div>' +
+    Object.keys(groups).map(g =>
+      '<div style="display:flex;gap:10px;padding:6px 0;border-bottom:1px solid var(--line)">' +
+      '<div style="min-width:92px;font-size:11px;font-weight:600;color:var(--text2)">' +
+        escHtml(g) + '</div>' +
+      '<div style="font-size:12px">' +
+        groups[g].map(t => '<span class="badge bgr" style="margin:0 6px 4px 0" title="' +
+          escHtml(t.via) + '">' + escHtml(t.name) + '</span>').join('') +
+      '</div></div>'
+    ).join('');
+}
+
 function renderPageWeight(d) {
   const block = document.getElementById('weight-block');
   const body  = document.getElementById('weight-body');
