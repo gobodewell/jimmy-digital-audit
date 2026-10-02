@@ -6,7 +6,11 @@ const app  = express();
 // Bumped whenever a build is handed over. /health reports it so the app can
 // tell the user their page and their proxy are different vintages -- the
 // failure mode is a fix that silently is not there.
-const BUILD = '2026-10-02.8';
+const BUILD = '2026-10-03.3';
+// Building the report without a browser. See render.js: the scoring engine
+// stays in the page, this turns the page's report DATA into the same pages.
+const { renderReport, reportName, templateNames, templateInfo, checkReport, rendererStatus } = require('./render.js');
+
 const PORT = process.env.PORT || 3001;
 
 // Every one of these is trimmed. A key pasted into a hosting panel's env
@@ -571,6 +575,11 @@ app.get('/health', (req, res) => res.json({ ok: true, dfs: !!DFS_LOGIN,
   sem: !!(SEM_KEY_V3 || SEM_KEY_V4), semV3: !!SEM_KEY_V3, semV4: !!SEM_KEY_V4,
   sf: !!SF_KEY, ai: !!ANTHROPIC_KEY, at: !!AIRTABLE_TOKEN, google: !!GOOGLE_KEY,
   locked: !!AUDIT_KEY, model: AI_MODEL, build: BUILD,
+  // Whether this proxy can build a report, and if not, which file it is
+  // missing. The renderer needs assets/report-doc.js and report-assets.js,
+  // which used to go to the web host only -- so this is the first place to
+  // look after a deploy that updated server.js alone.
+  report: rendererStatus(),
   history: !!(SUPABASE_URL && SUPABASE_KEY) }));
 
 // ── SEMrush diagnostics ───────────────────────────────────────────────────────
@@ -2465,6 +2474,11 @@ const sbJson = async (path, opts) => (await sbFetch(path, Object.assign({}, opts
   headers: Object.assign({ 'Content-Type': 'application/json' }, (opts || {}).headers || {})
 }))).json();
 
+// Where an audit can come from. Mirrors the database's check constraint; kept
+// here as well so a bad value is refused with a list of the good ones rather
+// than as a Postgres error the app has to parse.
+const SOURCES = ['internal', 'public', 'airtable'];
+
 // Save one audit. The PDF arrives base64 in the same request so a save is
 // atomic from the app's point of view: it cannot end up with a row whose file
 // never uploaded, because the row is written last.
@@ -2473,6 +2487,12 @@ app.post('/history/save', async (req, res) => {
   const domain = auditDomain(b.clientUrl, b.clientDomain);
   if (!domain) return res.status(400).json({ error: 'a client URL is required to file an audit' });
   if (!b.state)  return res.status(400).json({ error: 'no audit state supplied' });
+  if (b.source && !SOURCES.includes(b.source))
+    return res.status(400).json({ error: 'unknown source "' + b.source +
+      '" — an audit comes from: ' + SOURCES.join(', ') });
+  if (b.template && !templateNames().includes(b.template))
+    return res.status(400).json({ error: 'unknown report template "' + b.template +
+      '" — this proxy builds: ' + templateNames().join(', ') });
 
   try {
     let pdfPath = null, pdfBytes = null;
@@ -2505,6 +2525,14 @@ app.post('/history/save', async (req, res) => {
       pdf_bytes:     pdfBytes,
       prepared_by:   String(b.preparedBy || '').slice(0, 200),
       build:         String(b.build || '').slice(0, 40),
+      // Where it came from and what it renders. Rejected here rather than by
+      // the database's own check constraint, so a bad value says which ones
+      // are allowed instead of surfacing as a Postgres 400.
+      source:        b.source   || 'internal',
+      template:      b.template || 'growthline',
+      // The assembled report data. Without it a filed audit can be reopened
+      // but its PDF can never be rebuilt -- only the stored file would exist.
+      report:        b.report || null,
       note:          String(b.note || '').slice(0, 1000)
     };
     const saved = await sbJson('/rest/v1/audits', {
@@ -4159,5 +4187,50 @@ app.post('/airtable', async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+
+// Build a report without a browser.
+//
+// Two ways to ask: `id` rebuilds a filed audit from the report data stored with
+// it, and `report` renders data sent in the request -- which is what an
+// unattended run will use once there is one. `template` names the document; an
+// unknown name is refused rather than quietly rendered as the default, because
+// the default footer reads "For financial professional use only. Not for use
+// with the public." and the cost of getting that wrong is handing a prospect a
+// document that says it is not for them.
+app.post('/report/build', async (req, res) => {
+  const b = req.body || {};
+  try {
+    let d = b.report || null, template = b.template || null;
+
+    if (!d && b.id) {
+      const rows = await sbJson('/rest/v1/audits?id=eq.' + encodeURIComponent(b.id) +
+                                '&select=report,template,client_name&limit=1');
+      const row = (rows || [])[0];
+      if (!row) return res.status(404).json({ error: 'no audit with that id' });
+      if (!row.report) return res.status(409).json({
+        error: 'that audit was filed before the report data was kept, so its PDF ' +
+               'cannot be rebuilt. The report delivered at the time is still stored.' });
+      d = row.report;
+      template = template || row.template;
+    }
+
+    const bad = checkReport(d);
+    if (bad) return res.status(400).json({ error: bad });
+
+    const pdf = await renderReport(d, { template, draft: !!b.draft });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition',
+      'attachment; filename="' + reportName(d).replace(/"/g, '') + '"');
+    res.send(pdf);
+  } catch (e) {
+    console.error('report build error:', e.message);
+    res.status(e.badRequest ? 400 : e.rendererMissing ? 503 : 500).json({ error: e.message });
+  }
+});
+
+// What this proxy can build, so the app can show the choice rather than
+// hard-coding a list that drifts from the server's.
+app.get('/report/templates', (req, res) =>
+  res.json({ templates: templateInfo(), sources: SOURCES, renderer: rendererStatus() }));
 
 app.listen(PORT, () => console.log('Proxy running on port ' + PORT));

@@ -3,7 +3,14 @@ services:
     name: jimmy-digital-audit
     runtime: node
     plan: free
-    buildCommand: npm install
+    # --omit=dev on purpose. playwright is a devDependency (the test suite drives
+    # a real browser), and a plain `npm install` installs it here and runs its
+    # postinstall, which downloads browser binaries -- hundreds of MB this
+    # service never uses, on a free instance with a small disk. Render usually
+    # sets NODE_ENV=production, which would skip devDependencies anyway, but a
+    # build should not depend on an environment variable it does not set
+    # itself. Measured: 32MB, express + cors + pdfmake and nothing else.
+    buildCommand: npm install --omit=dev
     startCommand: node server.js
     envVars:
       # Secret that the app must send (set the same value as the app's
