@@ -6,7 +6,7 @@ const app  = express();
 // Bumped whenever a build is handed over. /health reports it so the app can
 // tell the user their page and their proxy are different vintages -- the
 // failure mode is a fix that silently is not there.
-const BUILD = '2026-10-02.3';
+const BUILD = '2026-10-02.6';
 const PORT = process.env.PORT || 3001;
 
 // Every one of these is trimmed. A key pasted into a hosting panel's env
@@ -101,7 +101,13 @@ const HIST_BUCKET  = 'audit-reports';
 
 app.use(cors({ origin: '*', methods: ['GET','POST','OPTIONS'], allowedHeaders: ['Content-Type','Authorization','X-Audit-Key'] }));
 app.options('*', cors());
-app.use(express.json());
+// 25MB, not express's 100KB default. The default silently governed every route
+// -- including /history/save, whose own 25MB parser never got a look in,
+// because this one runs first and had already rejected the body. A filed audit
+// carries its PDF as base64, so ~300KB of report arrives as ~400KB of JSON and
+// came back 413 with an HTML error page. Nothing was ever written: the Supabase
+// request log shows reads succeeding and not one write arriving.
+app.use(express.json({ limit: '25mb' }));
 
 // ── Auth gate ─────────────────────────────────────────────────────────────────
 // If AUDIT_KEY is set, every request (except /health and CORS preflight) must
@@ -2450,7 +2456,7 @@ const sbJson = async (path, opts) => (await sbFetch(path, Object.assign({
 // Save one audit. The PDF arrives base64 in the same request so a save is
 // atomic from the app's point of view: it cannot end up with a row whose file
 // never uploaded, because the row is written last.
-app.post('/history/save', express.json({ limit: '25mb' }), async (req, res) => {
+app.post('/history/save', async (req, res) => {
   const b = req.body || {};
   const domain = auditDomain(b.clientUrl, b.clientDomain);
   if (!domain) return res.status(400).json({ error: 'a client URL is required to file an audit' });

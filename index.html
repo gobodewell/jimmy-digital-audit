@@ -866,7 +866,7 @@ input.masked{-webkit-text-security:disc;text-security:disc}
 // different vintages. Both carry the same stamp and the app compares them,
 // because "did you upload both files?" is not something anyone should have
 // to remember -- and a half-upload looks exactly like a fix that did not work.
-const BUILD = '2026-10-02.3';
+const BUILD = '2026-10-02.6';
 const DEFAULT_PROXY = 'https://jimmy-digital-audit.onrender.com';
 let AD = {}; // audit data store
 
@@ -1382,7 +1382,39 @@ function applyExtension() {
                                 ? ' (' + d.schemaTypes.slice(0,2).join(', ') + ')' : ''));
   take('c-meta', !!d.metaDescription, 'meta description');
 
+  // Four checks that were judgements only because nothing could read the page.
+  // A link to the firm's Google listing IS the review call-to-action the check
+  // asks about -- it was never a matter of opinion, only of access.
+  if (d.gbpLinks) take('c-rcta', d.gbpLinks.length > 0, 'review call-to-action');
+  if (d.hasFaq != null)       take('c-faq', d.hasFaq, 'FAQs' + (d.faqVia ? ' (' + d.faqVia + ')' : ''));
+  if (d.hasResources != null) take('c-res', d.hasResources, 'blog or resources section');
+  if (d.internalLinks != null) take('c-lnk', d.internalLinks > 3,
+                                    d.internalLinks + ' internal links');
+
+  // "All active social profile links present on your website" needs both
+  // halves: which channels the firm has, and which the site links to. The
+  // audit holds the first and the extension the second, so together it is a
+  // measurement. With no channels recorded there is nothing to be complete
+  // against, and it stays unmeasured.
+  if (d.socialLinks) {
+    const want = [['h-li','linkedin'], ['h-fb','facebook'], ['h-ig','instagram'], ['h-yt','youtube']]
+      .filter(([field]) => getVal(field));
+    if (want.length) {
+      const missing = want.filter(([, key]) => !d.socialLinks[key]).map(([, k]) => k);
+      take('c-sln', missing.length === 0,
+           missing.length ? 'social links incomplete — no ' + missing.join(', ')
+                          : 'all ' + want.length + ' social profiles linked');
+    }
+  }
+
   AD.extReading = d;
+  // The page's own words, for the passes that read rather than measure. Nine
+  // checks are decided by a judgement, and on a site that refuses the server
+  // that judgement was being made with nothing in front of it.
+  if (d.text) { AD.pageText = d.text; AD.pageHeadings = d.headings || []; }
+  // Counted, not scored: "descriptive CTAs" is a judgement, but "Click here"
+  // is a fact, and the reviewer should see it.
+  if (d.weakCtaCount) console.log('WEAK CTAs on the page:', d.weakCtaExamples.join(', '));
   // A link to the firm's listing is proof one exists, but not proof it is
   // theirs -- it is shown, never scored.
   const gbp = (d.gbpLinks || []).length
@@ -2619,23 +2651,37 @@ async function runAIWebsite(name, url) {
 CRITICAL — read the real site, do not rely on search snippets or memory:
 - Use the web_fetch tool to load ${url} and READ THE ACTUAL HTML, including the navigation menu and footer.
 - Then follow the links you see in the nav/footer and web_fetch the key pages: About, Services, Contact, and especially any Blog / Insights / Resources / News page (a nav link like "Explore our blog", "Insights", or "Resources" counts as a blog/resources section even if it is just one click away).
-- Base every answer below ONLY on content you actually fetched from the site. Quote the specific nav labels, headlines, or buttons you saw as your evidence. Never guess or assume — if you did not fetch evidence for an item, mark it false.
+- Base every answer below ONLY on content you actually fetched from the site. Quote the specific nav labels, headlines, or buttons you saw as your evidence.
+
+THREE ANSWERS, NOT TWO. This matters more than anything else here:
+- true  — you fetched the page and the thing IS there
+- false — you fetched the page and the thing is NOT there
+- null  — you could NOT read the page, or could not get far enough to tell
+
+Use null whenever the fetch failed, returned a block or challenge page, or gave
+you something that was plainly not the site. NEVER answer false because you
+could not look. "false" is a finding reported to the client as something their
+firm is doing wrong; "null" says nobody could check. Reporting a failure for a
+page you never saw is the one mistake this audit must not make.
+
+Set "fetched": false if you could not load the site at all, and null every item.
 
 Write a brief summary of specific things you found on the site, then end with this EXACT block:
 
 ---JSON---
 {
-  "nav": true or false,
-  "linkedContent": true or false,
-  "photos": true or false,
-  "headlines": true or false,
-  "ctas": true or false,
-  "resources": true or false,
-  "faqs": true or false,
-  "reviewCTA": true or false,
-  "awards": true or false,
-  "analytics": true or false,
-  "notes": "key findings in 2-3 sentences"
+  "fetched": true or false,
+  "nav": true or false or null,
+  "linkedContent": true or false or null,
+  "photos": true or false or null,
+  "headlines": true or false or null,
+  "ctas": true or false or null,
+  "resources": true or false or null,
+  "faqs": true or false or null,
+  "reviewCTA": true or false or null,
+  "awards": true or false or null,
+  "analytics": true or false or null,
+  "notes": "key findings in 2-3 sentences, including anything that stopped you reading the site"
 }
 ---END---
 
@@ -2658,16 +2704,27 @@ Definitions:
     const WEB_FIELDS = ['nav','linkedContent','photos','headlines','ctas',
                         'resources','faqs','reviewCTA','awards','analytics'];
     if (j) {
-      if (j.nav)          ck('c-nav');
-      if (j.linkedContent) ck('c-lnk');
-      if (j.photos)       ck('c-pho');
-      if (j.headlines)    ck('c-hdl');
-      if (j.ctas)         ck('c-cta');
-      if (j.resources)    ck('c-res');
-      if (j.faqs)         ck('c-faq');
-      if (j.reviewCTA)    ck('c-rcta');
-      if (j.awards)       ck('c-awd');
-      if (j.analytics)    ckAI('c-ga');
+      // true ticks it, false is a real finding, and anything else means the
+      // model could not establish it -- which is NOT a finding. The prompt used
+      // to say "if you did not fetch evidence, mark it false", and the form had
+      // no third answer, so a site that refused the fetch came back false ten
+      // times and the client was told their firm failed ten checks nobody had
+      // looked at. Every other source in this audit reports what it could not
+      // measure as unmeasured; this one asserted it as failure.
+      const why = j.fetched === false
+        ? 'the review could not load the site'
+        : 'the review could not establish this from the site';
+      const AI_WEB = [
+        ['nav','c-nav'], ['linkedContent','c-lnk'], ['photos','c-pho'],
+        ['headlines','c-hdl'], ['ctas','c-cta'], ['resources','c-res'],
+        ['faqs','c-faq'], ['reviewCTA','c-rcta'], ['awards','c-awd']
+      ];
+      AI_WEB.forEach(([field, id]) => {
+        if (j[field] === true)       ckAI(id);
+        else if (j[field] !== false) unk(id, why);   // null, undefined, absent
+      });
+      // Analytics is measured elsewhere now, so the AI only ever adds to it.
+      if (j.analytics === true) ckAI('c-ga');
       if (j.notes) {
         const n = document.getElementById('n-web');
         if (n && !n.value) n.value = j.notes;
@@ -4840,10 +4897,24 @@ async function fileAudit(pdfBase64, note) {
     build: BUILD, note: note || '',
     state: auditState(), pdfBase64: pdfBase64 || null
   };
+  const payload = JSON.stringify(body);
   const r = await pf('/history/save', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
+    body: payload, timeout: 90000
   });
+  // A proxy that rejects the request before any handler runs answers with an
+  // HTML error page, and parsing that as JSON threw "Unexpected token <" --
+  // which says nothing about a 413 from a body-size limit. Read the status
+  // first, and say how big the thing was that it would not take.
+  if (!r.ok) {
+    const txt = await r.text().catch(() => '');
+    const kb  = Math.round(payload.length / 1024);
+    throw new Error(r.status === 413
+      ? 'the proxy refused the upload as too large (' + kb + 'KB) — its body limit is ' +
+        'below the size of a report. Upload the current server.js to Render.'
+      : 'the proxy answered HTTP ' + r.status + ' (' + kb + 'KB sent)' +
+        (txt && !/^\s*</.test(txt) ? ': ' + txt.slice(0, 160) : ''));
+  }
   const d = await r.json();
   if (d.error) throw new Error(d.error);
   return d;
