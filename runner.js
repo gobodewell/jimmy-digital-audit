@@ -87,7 +87,15 @@ async function runAudit(opts) {
 
     await page.goto(pageUrl, { waitUntil: 'load', timeout: 60000 });
 
-    const out = await page.evaluate(async c => {
+    // page.evaluate takes (fn, arg) and nothing else -- the third argument this
+    // used to pass was silently ignored, so the run had no deadline at all. A
+    // page that hangs would have held a browser and a job for ever.
+    const out = await Promise.race([
+      new Promise((_, rej) => setTimeout(
+        () => rej(new Error('the audit did not finish within ' +
+          Math.round(deadline / 1000) + 's — the page was still working or stuck')),
+        deadline)),
+      page.evaluate(async c => {
       document.getElementById('clientName').value = c.clientName || '';
       document.getElementById('clientURL').value  = c.clientUrl;
       document.getElementById('clientCity').value = c.clientCity || '';
@@ -130,7 +138,7 @@ async function runAudit(opts) {
     }, {
       clientName: o.clientName || '', clientUrl: o.clientUrl,
       clientCity: o.clientCity || '', preparedBy: o.preparedBy || ''
-    }, { timeout: deadline });
+    })]);
 
     out.pageErrors = errs;
     // A score is worth reporting only when more of it rests on something than

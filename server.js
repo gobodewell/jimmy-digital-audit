@@ -6,7 +6,7 @@ const app  = express();
 // Bumped whenever a build is handed over. /health reports it so the app can
 // tell the user their page and their proxy are different vintages -- the
 // failure mode is a fix that silently is not there.
-const BUILD = '2026-10-05.6';
+const BUILD = '2026-10-05.7';
 // Building the report without a browser. See render.js: the scoring engine
 // stays in the page, this turns the page's report DATA into the same pages.
 const { renderReport, reportName, templateNames, templateInfo, checkReport, rendererStatus } = require('./render.js');
@@ -2499,9 +2499,29 @@ async function sbFetch(path, opts) {
 //
 // Everything else kept working and hid it: GETs have no body, and the storage
 // sign call passes no headers, so its merged Content-Type survived.
-const sbJson = async (path, opts) => (await sbFetch(path, Object.assign({}, opts, {
-  headers: Object.assign({ 'Content-Type': 'application/json' }, (opts || {}).headers || {})
-}))).json();
+// An empty body is not a failure.
+//
+// PostgREST answers `Prefer: return=minimal` with 204 and no body at all, and
+// .json() on that throws "Unexpected end of JSON input". The queue's own
+// bookkeeping uses return=minimal, so a finished audit -- seven minutes of
+// real work, filed, scored 92 -- was marked failed because the row that
+// recorded its success came back empty. The write had already succeeded; only
+// the parse failed.
+const sbJson = async (path, opts) => {
+  const r = await sbFetch(path, Object.assign({}, opts, {
+    headers: Object.assign({ 'Content-Type': 'application/json' }, (opts || {}).headers || {})
+  }));
+  if (r.status === 204) return null;
+  const text = await r.text();
+  if (!text.trim()) return null;
+  try { return JSON.parse(text); }
+  catch (e) {
+    // Named, because "Unexpected end of JSON input" says nothing about which
+    // call produced it or what came back instead.
+    throw new Error('Supabase sent a reply that is not JSON for ' +
+      path.split('?')[0] + ' (HTTP ' + r.status + '): ' + text.slice(0, 120));
+  }
+};
 
 // Where an audit can come from. Mirrors the database's check constraint; kept
 // here as well so a bad value is refused with a list of the good ones rather
