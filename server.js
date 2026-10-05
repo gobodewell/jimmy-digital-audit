@@ -6,10 +6,35 @@ const app  = express();
 // Bumped whenever a build is handed over. /health reports it so the app can
 // tell the user their page and their proxy are different vintages -- the
 // failure mode is a fix that silently is not there.
-const BUILD = '2026-10-03.3';
+const BUILD = '2026-10-05.2';
 // Building the report without a browser. See render.js: the scoring engine
 // stays in the page, this turns the page's report DATA into the same pages.
 const { renderReport, reportName, templateNames, templateInfo, checkReport, rendererStatus } = require('./render.js');
+// Running the audit without a person. See runner.js: it drives the real page
+// in a headless browser rather than reimplementing the forty checks here.
+//
+// Loaded on first use, not at boot -- the same reason render.js is. A
+// top-level require turns a deploy that forgot one file into "Cannot find
+// module" before app.listen, which takes the WHOLE proxy down rather than the
+// one capability that is missing. The test suite caught this exact mistake
+// here after it had already been fixed once for the renderer.
+let _runner = null;
+function runner() {
+  if (_runner) return _runner;
+  try { return (_runner = require('./runner.js')); }
+  catch (e) {
+    const err = new Error(
+      'the audit runner is not installed on this proxy: runner.js is missing. ' +
+      '(' + e.message.split('\n')[0] + ')');
+    err.runnerMissing = true;
+    throw err;
+  }
+}
+// Never throws: /health reports what is installed rather than failing to answer.
+async function runnerHealth() {
+  try { return await runner().runnerStatus(); }
+  catch (e) { return { ok: false, why: e.message }; }
+}
 
 const PORT = process.env.PORT || 3001;
 
@@ -571,7 +596,7 @@ function rootDomain(u) {
 // ── Health ────────────────────────────────────────────────────────────────────
 // semV3/semV4 are reported separately: they serve different reports, and
 // "sem: true" hid that the one report with no v4 route had no key to run on.
-app.get('/health', (req, res) => res.json({ ok: true, dfs: !!DFS_LOGIN,
+app.get('/health', async (req, res) => res.json({ ok: true, dfs: !!DFS_LOGIN,
   sem: !!(SEM_KEY_V3 || SEM_KEY_V4), semV3: !!SEM_KEY_V3, semV4: !!SEM_KEY_V4,
   sf: !!SF_KEY, ai: !!ANTHROPIC_KEY, at: !!AIRTABLE_TOKEN, google: !!GOOGLE_KEY,
   locked: !!AUDIT_KEY, model: AI_MODEL, build: BUILD,
@@ -580,6 +605,10 @@ app.get('/health', (req, res) => res.json({ ok: true, dfs: !!DFS_LOGIN,
   // which used to go to the web host only -- so this is the first place to
   // look after a deploy that updated server.js alone.
   report: rendererStatus(),
+  // Whether this proxy can RUN an audit as well as render one. Separate from
+  // `report` because they fail for different reasons: the renderer needs two
+  // asset files, the runner needs playwright and a browser binary.
+  runner: await runnerHealth(),
   history: !!(SUPABASE_URL && SUPABASE_KEY) }));
 
 // ── SEMrush diagnostics ───────────────────────────────────────────────────────
@@ -4185,6 +4214,53 @@ app.post('/airtable', async (req, res) => {
   } catch (e) {
     console.error('Airtable proxy error:', e.message);
     res.status(500).json({ error: e.message });
+  }
+});
+
+// Run an audit with nobody watching.
+//
+// Takes the same three things a person types -- firm, website, city -- and
+// returns what the page would have on screen: the report data, the saved
+// state, the scores and, named rather than hidden, every check that could not
+// be measured. A headless run has no browser extension behind it, so a site
+// that refuses the server leaves more of those than a hand-run audit would,
+// and the caller has to be able to see that.
+//
+// It does NOT file the audit or build a PDF. Those are separate decisions --
+// a prospect's run is not automatically a document anyone should send -- and
+// /history/save and /report/build already do them.
+app.post('/audit/run', async (req, res) => {
+  const b = req.body || {};
+  if (!b.clientUrl) return res.status(400).json({ error: 'a website URL is required' });
+
+  const started = Date.now();
+  try {
+    const out = await runner().runAudit({
+      clientName: b.clientName, clientUrl: b.clientUrl, clientCity: b.clientCity,
+      preparedBy: b.preparedBy,
+      // Back to this same process, so the page's calls do not leave the box.
+      proxy: 'http://127.0.0.1:' + PORT,
+      auditKey: AUDIT_KEY,
+      timeout: b.timeout
+    });
+    // Refused, not returned with a warning. An unattended caller that gets a
+    // 200 with a score will use the score; this is the one case where the
+    // honest answer is that there is no result.
+    if (out.ungrounded) return res.status(422).json({
+      error: 'this audit learned too little to score. ' + out.silentlyFailed.length +
+             ' of ' + (out.state.checks || []).length + ' checks would have been ' +
+             'counted against this firm without anything having been checked, ' +
+             'against only ' + out.grounded + ' that rest on something. Reporting ' +
+             'a score from that would be a guess presented as a measurement.',
+      measured: out.measured, grounded: out.grounded,
+      silentlyFailed: out.silentlyFailed, unmeasured: out.unmeasured,
+      ranMs: Date.now() - started
+    });
+    res.json(Object.assign({ ok: true, ranMs: Date.now() - started }, out));
+  } catch (e) {
+    console.error('audit run error:', e.message);
+    res.status(e.badRequest ? 400 : e.runnerMissing ? 503 : 500)
+       .json({ error: e.message, ranMs: Date.now() - started });
   }
 });
 

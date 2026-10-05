@@ -3,16 +3,29 @@ services:
     name: jimmy-digital-audit
     runtime: node
     plan: free
-    # --omit=dev on purpose. playwright is a devDependency (the test suite drives
-    # a real browser), and a plain `npm install` installs it here and runs its
-    # postinstall, which downloads browser binaries -- hundreds of MB this
-    # service never uses, on a free instance with a small disk. Render usually
-    # sets NODE_ENV=production, which would skip devDependencies anyway, but a
-    # build should not depend on an environment variable it does not set
-    # itself. Measured: 32MB, express + cors + pdfmake and nothing else.
-    buildCommand: npm install --omit=dev
+    # playwright is a runtime dependency now: /audit/run drives the real app in
+    # a headless browser rather than reimplementing the forty checks on the
+    # server. The browser is a separate download from the npm package, so it
+    # needs its own step -- without it playwright installs fine and every run
+    # fails with "Executable doesn't exist".
+    #
+    # No --with-deps: that shells out to apt for Chromium's system libraries,
+    # and this runtime cannot install packages. If the base image is missing
+    # any of them the browser will not launch, and /health reports the reason
+    # under `runner`. That is the thing this build is testing; the fallback is
+    # a Dockerfile, where the libraries can be installed properly.
+    #
+    # --omit=dev stays: it costs nothing and keeps any future test-only
+    # dependency out of the deployed tree.
+    buildCommand: npm install --omit=dev && npx playwright install chromium
     startCommand: node server.js
     envVars:
+      # Browsers land in the project directory rather than the home cache,
+      # which the build and the running service do not necessarily share. A
+      # browser installed where the server cannot find it fails exactly like
+      # one that was never installed.
+      - key: PLAYWRIGHT_BROWSERS_PATH
+        value: /opt/render/project/playwright
       # Secret that the app must send (set the same value as the app's
       # Settings → "Proxy access key"). Locks the proxy so randoms who find
       # the URL can't spend your DataForSEO / Anthropic credits.
