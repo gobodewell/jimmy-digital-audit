@@ -133,7 +133,8 @@ function makeQueue(deps) {
         catch (e) { results.push({ id: job.id, status: 'failed', error: e.message }); }
       }
     };
-    await Promise.all(Array.from({ length: Math.min(concurrency, jobs.length) }, lane));
+    const lanes = Math.max(1, Math.min(concurrency, jobs.length));
+    await Promise.all(Array.from({ length: lanes }, lane));
     return results;
   }
 
@@ -145,12 +146,40 @@ function makeQueue(deps) {
   // One pass: take a batch, run it in phases, pause, repeat until the queue is
   // empty or `maxJobs` have run. Returns what happened rather than logging into
   // the void, so a caller can report it.
+  // Object.assign treats an explicit `undefined` as a value and overwrites the
+  // default with it. The route builds { concurrency: b.concurrency, ... } from
+  // the request body, so an empty body sent undefined for every one of them:
+  //
+  //   batchSize  undefined -> limit=NaN on the query
+  //   concurrency undefined -> Array.from({length: NaN}) -> ZERO lanes, so no
+  //                            job was ever claimed
+  //   pauseMs    undefined -> no pause
+  //
+  // which is a hot loop that reads the queue ten times a second, claims
+  // nothing, and never ends. It ran against production and was almost
+  // certainly what provoked the gateway 502 blamed on Supabase.
+  function settings(opts) {
+    const o = Object.assign({}, DEFAULTS);
+    Object.entries(opts || {}).forEach(([k, v]) => { if (v != null) o[k] = v; });
+    // Still guarded after that: a caller passing 0, a string or a negative
+    // would produce the same shape of bug by a different route.
+    const num = (v, d, min) => {
+      const n = Number(v);
+      return Number.isFinite(n) && n >= (min == null ? 1 : min) ? n : d;
+    };
+    o.concurrency = num(o.concurrency, DEFAULTS.concurrency);
+    o.batchSize   = num(o.batchSize,   DEFAULTS.batchSize);
+    o.pauseMs     = num(o.pauseMs,     DEFAULTS.pauseMs, 0);
+    if (o.maxJobs != null) o.maxJobs = num(o.maxJobs, null);
+    return o;
+  }
+
   async function drain(opts) {
-    const o = Object.assign({}, DEFAULTS, opts || {});
+    const o = settings(opts);
     if (running) return { skipped: 'a drain is already in progress' };
     running = true; stopping = false;
     const all = [];
-    let gaveUp = null;
+    let gaveUp = null;   // assigned inside the loop as well as the catch
     try {
       while (!stopping) {
         const left = o.maxJobs ? o.maxJobs - all.length : o.batchSize;
@@ -158,7 +187,17 @@ function makeQueue(deps) {
         const jobs = await take(Math.min(o.batchSize, left));
         if (!jobs.length) break;
         say('queue: phase of ' + jobs.length + ' (' + o.concurrency + ' at a time)');
+        const before = all.length;
         all.push(...await phase(jobs, o.concurrency));
+        // A pass that took jobs and did nothing with them is a bug, not an
+        // empty queue. Spinning on it reads the database for ever and claims
+        // nothing, which is exactly what happened in production.
+        if (all.length === before) {
+          gaveUp = 'a phase of ' + jobs.length + ' produced no results — stopping ' +
+                   'rather than retrying for ever';
+          say('queue: ' + gaveUp);
+          break;
+        }
         if (o.pauseMs && !stopping) await new Promise(r => setTimeout(r, o.pauseMs));
       }
     } catch (e) {
