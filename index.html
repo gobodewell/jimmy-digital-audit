@@ -951,7 +951,7 @@ input.masked{-webkit-text-security:disc;text-security:disc}
 // different vintages. Both carry the same stamp and the app compares them,
 // because "did you upload both files?" is not something anyone should have
 // to remember -- and a half-upload looks exactly like a fix that did not work.
-const BUILD = '2026-10-05.4';
+const BUILD = '2026-10-05.5';
 const DEFAULT_PROXY = 'https://jimmy-digital-audit.onrender.com';
 let AD = {}; // audit data store
 
@@ -4747,9 +4747,14 @@ async function queueLoad() {
     if (rmsg && !live && d.lastDrain && !rmsg.textContent.startsWith('Starting')) {
       const L = d.lastDrain;
       rmsg.style.color = L.error ? 'var(--red)' : L.failed ? '#b45309' : 'var(--green)';
+      // gaveUp is the queue stopping early -- the database refused, or
+      // something outside any one job. Named separately from a job failing,
+      // because the fix is different and "0 ran" alone explains nothing.
       rmsg.textContent = L.error ? L.error
+        : L.gaveUp ? 'The queue stopped: ' + L.gaveUp
         : L.ran + ' ran \u00b7 ' + L.needsReview + ' waiting for review' +
           (L.failed ? ' \u00b7 ' + L.failed + ' failed' : '');
+      if (L.gaveUp) rmsg.style.color = 'var(--red)';
     }
 
     if (!d.jobs.length) {
@@ -4789,8 +4794,11 @@ async function queueLoad() {
               'onclick="queueSet(\'' + j.id + '\',\'cancelled\')">Drop</button>' : '') +
         '</div></div>';
     }).join('');
-    // Whether anything is still moving, so the poller knows to keep going.
-    return !!d.running || d.counts.running > 0 || d.counts.queued > 0;
+    // Whether anything is still MOVING. A job sitting queued with no drain
+    // running is not movement: polling on that alone kept a tab asking every
+    // ten seconds for ever, for a number that only changes when someone
+    // presses a button.
+    return !!d.running || d.counts.running > 0;
   } catch (e) {
     list.innerHTML = '<div style="padding:16px;color:var(--red)">Could not read the queue: ' +
       escHtml(e.message) + '</div>';

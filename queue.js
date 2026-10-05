@@ -24,6 +24,28 @@ const DEFAULTS = {
 function makeQueue(deps) {
   const { sbJson, runAudit, saveAudit, log } = deps;
   const say = log || (() => {});
+
+  // One transient 5xx should not cost a whole phase.
+  //
+  // Supabase's gateway returned a single 502 ("Network connection lost") and
+  // everything downstream of it died: the phase aborted, the job stayed
+  // queued, and the page reported a database error for something that was
+  // momentary. Reads and claims are cheap and idempotent, so retry them twice
+  // before giving up.
+  async function sbTry(path, opts, tries) {
+    let last;
+    for (let i = 0; i < (tries || 3); i++) {
+      try { return await sbJson(path, opts); }
+      catch (e) {
+        last = e;
+        const transient = /\b50[0234]\b|network|socket|ECONN|timeout|aborted/i.test(e.message);
+        if (!transient) throw e;
+        say('queue: ' + e.message.slice(0, 80) + ' — retrying');
+        await new Promise(r => setTimeout(r, 400 * (i + 1)));
+      }
+    }
+    throw last;
+  }
   let running = false;
   let stopping = false;
 
@@ -33,7 +55,7 @@ function makeQueue(deps) {
   // one worker and a retry) would otherwise both pick up the same row and
   // spend the API budget on it twice.
   async function claim(job) {
-    const rows = await sbJson(
+    const rows = await sbTry(
       '/rest/v1/audit_jobs?id=eq.' + esc(job.id) + '&status=eq.queued',
       { method: 'PATCH', headers: { Prefer: 'return=representation' },
         body: JSON.stringify({
@@ -43,17 +65,20 @@ function makeQueue(deps) {
   }
 
   async function finish(id, fields) {
-    await sbJson('/rest/v1/audit_jobs?id=eq.' + esc(id),
+    await sbTry('/rest/v1/audit_jobs?id=eq.' + esc(id),
       { method: 'PATCH', headers: { Prefer: 'return=minimal' },
         body: JSON.stringify(Object.assign(
           { finished_at: new Date().toISOString() }, fields)) });
   }
 
   async function runOne(job) {
-    const claimed = await claim(job);
-    if (!claimed) return { id: job.id, skipped: 'claimed by another worker' };
-
+    // Claiming is INSIDE the try. It used to sit outside it, so a database
+    // hiccup while claiming threw straight past runOne, past the phase, and
+    // out of drain -- one job's bad luck killing every other job in the batch.
     try {
+      const claimed = await claim(job);
+      if (!claimed) return { id: job.id, skipped: 'claimed by another worker' };
+
       const out = await runAudit({
         clientName: job.client_name, clientUrl: job.client_url,
         clientCity: job.client_city
@@ -102,7 +127,10 @@ function makeQueue(deps) {
     const lane = async () => {
       while (next < jobs.length && !stopping) {
         const job = jobs[next++];
-        results.push(await runOne(job));
+        // runOne catches its own failures; this is the belt for anything it
+        // cannot, so one lane dying never takes the other lane with it.
+        try { results.push(await runOne(job)); }
+        catch (e) { results.push({ id: job.id, status: 'failed', error: e.message }); }
       }
     };
     await Promise.all(Array.from({ length: Math.min(concurrency, jobs.length) }, lane));
@@ -110,7 +138,7 @@ function makeQueue(deps) {
   }
 
   async function take(limit) {
-    return await sbJson('/rest/v1/audit_jobs?status=eq.queued' +
+    return await sbTry('/rest/v1/audit_jobs?status=eq.queued' +
       '&order=priority.desc,created_at.asc&limit=' + limit) || [];
   }
 
@@ -122,6 +150,7 @@ function makeQueue(deps) {
     if (running) return { skipped: 'a drain is already in progress' };
     running = true; stopping = false;
     const all = [];
+    let gaveUp = null;
     try {
       while (!stopping) {
         const left = o.maxJobs ? o.maxJobs - all.length : o.batchSize;
@@ -132,8 +161,15 @@ function makeQueue(deps) {
         all.push(...await phase(jobs, o.concurrency));
         if (o.pauseMs && !stopping) await new Promise(r => setTimeout(r, o.pauseMs));
       }
+    } catch (e) {
+      // Reported, not thrown. This runs detached from any request, so an
+      // exception here would vanish into an unhandled rejection and the page
+      // would show a queue that simply stopped for no stated reason.
+      gaveUp = e.message;
+      say('queue: gave up — ' + e.message);
     } finally { running = false; }
     return {
+      gaveUp,
       ran: all.length,
       needsReview: all.filter(r => r.status === 'needs_review').length,
       failed: all.filter(r => r.status === 'failed').length,
