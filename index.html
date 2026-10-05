@@ -951,7 +951,7 @@ input.masked{-webkit-text-security:disc;text-security:disc}
 // different vintages. Both carry the same stamp and the app compares them,
 // because "did you upload both files?" is not something anyone should have
 // to remember -- and a half-upload looks exactly like a fix that did not work.
-const BUILD = '2026-10-05.3';
+const BUILD = '2026-10-05.4';
 const DEFAULT_PROXY = 'https://jimmy-digital-audit.onrender.com';
 let AD = {}; // audit data store
 
@@ -1074,7 +1074,8 @@ function showPage(n) {
   document.querySelectorAll('.nb').forEach(b =>
     b.classList.toggle('active', b.dataset.page === n));
   if (n==='history') renderHist();
-  if (n==='queue') queueLoad();
+  if (n==='queue') queueWatch();
+  else if (Q_POLL) { clearInterval(Q_POLL); Q_POLL = null; }
   if (n==='settings') testHistory();
 }
 
@@ -4649,32 +4650,59 @@ async function queueAdd() {
   }
 }
 
+// Start the queue, then watch it.
+//
+// The first version held the request open for the whole phase and the platform
+// cut it as dead: ten minutes of silence looks identical to a hung connection.
+// The proxy now answers immediately and the work carries on without us, so
+// this starts it and polls.
+let Q_POLL = null;
 async function queueRun() {
   const btn = document.getElementById('q-run-btn');
   const msg = document.getElementById('q-run-msg');
-  btn.disabled = true; btn.innerHTML = '<span class="spin">\u27f3</span> Running\u2026';
-  // Named rather than left to a spinner: a phase is minutes long, and a page
-  // that looks frozen is indistinguishable from one that is.
-  msg.style.color = 'var(--text3)';
-  msg.textContent = 'Two at a time, a few minutes each \u2014 this page can be left open.';
+  msg.style.color = 'var(--text3)'; msg.textContent = 'Starting\u2026';
   try {
-    // Long: six audits at two at a time is roughly ten minutes.
     const r = await pf('/queue/run', { method: 'POST',
-      headers: { 'Content-Type': 'application/json' }, body: '{}', timeout: 1800000 });
+      headers: { 'Content-Type': 'application/json' }, body: '{}', timeout: 60000 });
     const d = await r.json();
-    if (!r.ok) throw new Error(d.error || ('proxy ' + r.status));
-    if (d.skipped) { msg.textContent = d.skipped; }
-    else {
-      msg.style.color = d.failed ? '#b45309' : 'var(--green)';
-      msg.textContent = d.ran
-        ? d.ran + ' ran \u00b7 ' + d.needsReview + ' waiting for review' +
-          (d.failed ? ' \u00b7 ' + d.failed + ' failed' : '')
-        : 'Nothing was waiting.';
-    }
+    if (!r.ok && r.status !== 409) throw new Error(d.error || ('proxy ' + r.status));
+    msg.style.color = 'var(--text3)';
+    msg.textContent = r.status === 409
+      ? 'Already running \u2014 watching it.'
+      : 'Running. Two at a time, a few minutes each.';
+    queueWatch();
   } catch (e) {
     msg.style.color = 'var(--red)'; msg.textContent = e.message;
+    queueLoad();
   }
-  btn.disabled = false; btn.textContent = 'Run the next phase';
+}
+
+// Poll while there is anything to watch. Stops itself when the queue goes
+// quiet, so a tab left open overnight is not asking every ten seconds for ever.
+function queueWatch() {
+  if (Q_POLL) clearInterval(Q_POLL);
+  queueLoad();
+  Q_POLL = setInterval(async () => {
+    const live = await queueLoad();
+    if (!live) { clearInterval(Q_POLL); Q_POLL = null; }
+  }, 10000);
+}
+
+// `let` at the top of a script does not become a window property, so the
+// polling state is otherwise invisible from outside -- including to the test
+// that checks the page starts watching after a phase begins.
+function queueWatching() { return Q_POLL !== null; }
+
+async function queueStop() {
+  try {
+    await pf('/queue/stop', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    const msg = document.getElementById('q-run-msg');
+    // Not a kill: the runs already going finish. A half-written audit is worse
+    // than a slow one.
+    msg.style.color = 'var(--text3)';
+    msg.textContent = 'Stopping after the audits already running finish\u2026';
+  } catch (e) { toast('Could not stop: ' + e.message); }
   queueLoad();
 }
 
@@ -4701,10 +4729,33 @@ async function queueLoad() {
                       : 'nothing waiting';
     }
 
+    // The button follows the server, not this page's memory of it: a drain
+    // started in another tab, or before a refresh, is still a drain.
+    const btn = document.getElementById('q-run-btn');
+    const live = !!d.running || d.counts.running > 0;
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = live
+        ? '<span class="spin">\u27f3</span> Running \u2014 stop after these'
+        : 'Run the next phase';
+      btn.onclick = live ? queueStop : queueRun;
+      btn.className = live ? 'btn btn-ghost' : 'btn btn-green';
+    }
+    // The last finished phase, so a page opened after the fact still says what
+    // happened rather than looking like nothing ever ran.
+    const rmsg = document.getElementById('q-run-msg');
+    if (rmsg && !live && d.lastDrain && !rmsg.textContent.startsWith('Starting')) {
+      const L = d.lastDrain;
+      rmsg.style.color = L.error ? 'var(--red)' : L.failed ? '#b45309' : 'var(--green)';
+      rmsg.textContent = L.error ? L.error
+        : L.ran + ' ran \u00b7 ' + L.needsReview + ' waiting for review' +
+          (L.failed ? ' \u00b7 ' + L.failed + ' failed' : '');
+    }
+
     if (!d.jobs.length) {
       list.innerHTML = '<div style="padding:16px;color:var(--text3)">' +
         'Nothing queued. Add a firm above.</div>';
-      return;
+      return false;
     }
 
     list.innerHTML = d.jobs.map(j => {
@@ -4738,9 +4789,12 @@ async function queueLoad() {
               'onclick="queueSet(\'' + j.id + '\',\'cancelled\')">Drop</button>' : '') +
         '</div></div>';
     }).join('');
+    // Whether anything is still moving, so the poller knows to keep going.
+    return !!d.running || d.counts.running > 0 || d.counts.queued > 0;
   } catch (e) {
     list.innerHTML = '<div style="padding:16px;color:var(--red)">Could not read the queue: ' +
       escHtml(e.message) + '</div>';
+    return false;
   }
 }
 

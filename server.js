@@ -6,7 +6,7 @@ const app  = express();
 // Bumped whenever a build is handed over. /health reports it so the app can
 // tell the user their page and their proxy are different vintages -- the
 // failure mode is a fix that silently is not there.
-const BUILD = '2026-10-05.3';
+const BUILD = '2026-10-05.4';
 // Building the report without a browser. See render.js: the scoring engine
 // stays in the page, this turns the page's report DATA into the same pages.
 const { renderReport, reportName, templateNames, templateInfo, checkReport, rendererStatus } = require('./render.js');
@@ -4293,26 +4293,54 @@ app.get('/queue', async (req, res) => {
     const jobs = await sbJson('/rest/v1/audit_jobs?select=' + sel +
       '&order=created_at.desc&limit=' + Math.min(+req.query.limit || 100, 200));
     const by = st => (jobs || []).filter(j => j.status === st).length;
-    res.json({ jobs: jobs || [], running: queue().isRunning(),
+    let running = false;
+    try { running = queue().isRunning(); } catch (e) {}
+    res.json({ jobs: jobs || [], running, lastDrain: _lastDrain,
       counts: { queued: by('queued'), running: by('running'),
                 needsReview: by('needs_review'), failed: by('failed'),
                 approved: by('approved') } });
   } catch (e) { res.status(502).json({ error: e.message }); }
 });
 
-// Work the queue. Returns when the phase is done -- a caller that does not
-// want to wait can fire and poll /queue instead.
-app.post('/queue/run', async (req, res) => {
+// Start the queue and answer immediately.
+//
+// This used to hold the connection open until the whole phase finished, and
+// that cannot work: a phase is six audits at two at a time, so the request
+// sends nothing for ten minutes and the platform cuts it as dead. The first
+// real attempt died before a single job was even claimed, with the page
+// reporting a dropped connection and the queue untouched.
+//
+// So the drain runs in the background and this says "started". Progress is
+// read from /queue, which is where it was always visible anyway.
+let _lastDrain = null;
+app.post('/queue/run', (req, res) => {
   const b = req.body || {};
-  try {
-    const r = await queue().drain({
-      concurrency: b.concurrency, batchSize: b.batchSize,
-      pauseMs: b.pauseMs, maxJobs: b.maxJobs });
-    res.json(r);
-  } catch (e) {
-    console.error('queue run error:', e.message);
-    res.status(e.runnerMissing ? 503 : 500).json({ error: e.message });
-  }
+  let q;
+  try { q = queue(); }
+  catch (e) { return res.status(e.runnerMissing ? 503 : 500).json({ error: e.message }); }
+  if (q.isRunning()) return res.status(409).json({
+    error: 'the queue is already running', running: true, last: _lastDrain });
+
+  // Nothing awaits this: the response goes out first, and the work outlives
+  // the request. Errors are kept for /queue rather than thrown into a handler
+  // that has already answered.
+  q.drain({ concurrency: b.concurrency, batchSize: b.batchSize,
+            pauseMs: b.pauseMs, maxJobs: b.maxJobs })
+    .then(r => { _lastDrain = Object.assign({ at: new Date().toISOString() }, r);
+                 console.log('queue: finished — ' + r.ran + ' ran, ' +
+                             r.needsReview + ' waiting, ' + r.failed + ' failed'); })
+    .catch(e => { _lastDrain = { at: new Date().toISOString(), error: e.message };
+                  console.error('queue drain error:', e.message); });
+
+  res.status(202).json({ ok: true, started: true,
+    note: 'running in the background — watch the queue for progress' });
+});
+
+// Stop after the runs already in flight finish. Not a kill: a half-written
+// audit is worse than a slow one.
+app.post('/queue/stop', (req, res) => {
+  try { queue().stop(); res.json({ ok: true, stopping: true }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // A reviewer finishing with one, or dropping it.
