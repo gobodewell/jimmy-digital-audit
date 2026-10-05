@@ -246,6 +246,10 @@ input.masked{-webkit-text-security:disc;text-security:disc}
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
       <span class="nb-cur">Current audit<em id="nav-current">nothing in progress</em></span>
     </button>
+    <button class="nb" data-page="queue" onclick="showPage('queue')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="3" y="4" width="18" height="4" rx="1"/><rect x="3" y="11" width="18" height="4" rx="1"/><rect x="3" y="18" width="18" height="3" rx="1"/></svg>
+      <span class="nb-cur">Queue<em id="nav-queue">nothing waiting</em></span>
+    </button>
     <button class="nb" data-page="history" onclick="showPage('history')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 9h6M9 12h6M9 15h4"/></svg>History
     </button>
@@ -669,7 +673,7 @@ input.masked{-webkit-text-security:disc;text-security:disc}
         </div>
         <div id="appr-unmeasured" class="cl" style="display:none"></div>
         <div class="cl" style="margin-top:2px">
-          <label class="ci"><input type="checkbox" id="save-hist" checked/><span class="ci-l">File this audit to history when I download it \u2014 the answers and the exact PDF the client receives.</span></label>
+          <label class="ci"><input type="checkbox" id="save-hist" checked/><span class="ci-l">File this audit to history when I download it — the answers and the exact PDF the client receives.</span></label>
         </div>
         <div id="appr-msg" style="font-size:12px;color:var(--text3);margin-top:10px;line-height:1.5"></div>
         <div class="btn-row" style="margin-top:12px">
@@ -699,6 +703,60 @@ input.masked{-webkit-text-security:disc;text-security:disc}
 
   </div>
 </div><!-- audit page -->
+
+<!-- ═══ QUEUE PAGE ═══════════════════════════════════════════════════════════ -->
+<!-- Audits stack here and run a phase at a time. The resting state is "needs
+     review", not done: a run is not an audit until a person has filled what it
+     could not reach and corrected what it got wrong. -->
+<div class="page" id="page-queue">
+  <div class="ph">
+    <div class="ph-t">Queue</div>
+    <div class="ph-s">Audits run on the server, then wait for a person</div>
+  </div>
+  <div class="pb">
+
+    <div class="card">
+      <div class="ct"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M12 5v14M5 12h14"/></svg>Add to the queue</div>
+      <div class="fr fr2">
+        <div class="fg"><label>Firm name</label>
+          <input type="text" id="q-name" placeholder="e.g. Archstone Financial"/></div>
+        <div class="fg"><label>Website URL</label>
+          <input type="url" id="q-url" placeholder="https://www.example.com"/></div>
+        <div class="fg" style="grid-column:1/-1"><label>City, State (helps find the Google Business Profile)</label>
+          <input type="text" id="q-city" placeholder="e.g. Worcester, MA"/></div>
+      </div>
+      <div class="btn-row" style="margin-top:4px">
+        <button class="btn btn-primary" onclick="queueAdd()">Add</button>
+        <span id="q-add-msg" style="font-size:12px;color:var(--text3);align-self:center"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="ct">Run the queue</div>
+      <div style="font-size:12px;color:var(--text2);line-height:1.55;margin-bottom:12px">
+        Audits run <b>two at a time, six to a phase</b>, with a pause between. These are
+        browsers, not web requests — six at once is six of them, and each audit is
+        about thirteen calls to the data providers. Running the lot at once would
+        exhaust the rate limits and the server together.
+        <br><br>A run takes two to four minutes each, so a full phase is roughly ten.
+        Nothing is delivered at the end: each finished audit waits below for a person.
+      </div>
+      <div class="btn-row">
+        <button class="btn btn-green" id="q-run-btn" onclick="queueRun()">Run the next phase</button>
+        <button class="btn btn-ghost" onclick="queueLoad()">Refresh</button>
+        <span id="q-run-msg" style="font-size:12px;color:var(--text3);align-self:center"></span>
+      </div>
+      <div id="q-runner-warn" style="display:none;font-size:12px;color:#b45309;margin-top:10px;line-height:1.5"></div>
+    </div>
+
+    <div class="sl">The queue</div>
+    <div id="q-counts" style="display:flex;gap:18px;flex-wrap:wrap;font-size:12px;color:var(--text3);margin-bottom:10px"></div>
+    <div class="card" style="padding:0;overflow:hidden">
+      <div id="q-list" style="font-size:13px">Loading…</div>
+    </div>
+
+  </div>
+</div><!-- queue page -->
 
 <!-- ═══ HISTORY PAGE ═════════════════════════════════════════════════════════ -->
 <div class="page" id="page-history">
@@ -893,7 +951,7 @@ input.masked{-webkit-text-security:disc;text-security:disc}
 // different vintages. Both carry the same stamp and the app compares them,
 // because "did you upload both files?" is not something anyone should have
 // to remember -- and a half-upload looks exactly like a fix that did not work.
-const BUILD = '2026-10-05.2';
+const BUILD = '2026-10-05.3';
 const DEFAULT_PROXY = 'https://jimmy-digital-audit.onrender.com';
 let AD = {}; // audit data store
 
@@ -1016,6 +1074,7 @@ function showPage(n) {
   document.querySelectorAll('.nb').forEach(b =>
     b.classList.toggle('active', b.dataset.page === n));
   if (n==='history') renderHist();
+  if (n==='queue') queueLoad();
   if (n==='settings') testHistory();
 }
 
@@ -4553,6 +4612,155 @@ async function histPdf(path) {
     window.open(d.url, '_blank');
   } catch (e) { msg.innerHTML = '<span style="color:var(--red)">Could not fetch that report: ' +
                                 escHtml(e.message) + '</span>'; }
+}
+
+// ── The queue ───────────────────────────────────────────────────────────────
+// Audits run on the server and stop at "needs review". A run is not an audit
+// until a person has filled what it could not reach -- a Cloudflare-fronted
+// site is invisible to the server and needs the browser extension -- and
+// corrected anything it got wrong. Opening one here lands it on the audit tabs
+// in exactly that half-finished state.
+const Q_STATE = {
+  queued:       { label: 'Waiting',      color: 'var(--text3)' },
+  running:      { label: 'Running',      color: 'var(--purple)' },
+  needs_review: { label: 'Needs review', color: '#b45309' },
+  approved:     { label: 'Approved',     color: 'var(--green)' },
+  failed:       { label: 'Failed',       color: 'var(--red)' },
+  cancelled:    { label: 'Cancelled',    color: 'var(--text3)' }
+};
+
+async function queueAdd() {
+  const msg = document.getElementById('q-add-msg');
+  const url = getVal('q-url');
+  if (!url) { msg.style.color = 'var(--red)'; msg.textContent = 'A website URL is needed.'; return; }
+  msg.style.color = 'var(--text3)'; msg.textContent = 'Adding\u2026';
+  try {
+    const r = await pf('/queue/add', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clientName: getVal('q-name'), clientUrl: url,
+                             clientCity: getVal('q-city'), source: 'internal' }) });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || ('proxy ' + r.status));
+    ['q-name','q-url','q-city'].forEach(id => sv(id, ''));
+    msg.style.color = 'var(--green)'; msg.textContent = 'Added.';
+    queueLoad();
+  } catch (e) {
+    msg.style.color = 'var(--red)'; msg.textContent = e.message;
+  }
+}
+
+async function queueRun() {
+  const btn = document.getElementById('q-run-btn');
+  const msg = document.getElementById('q-run-msg');
+  btn.disabled = true; btn.innerHTML = '<span class="spin">\u27f3</span> Running\u2026';
+  // Named rather than left to a spinner: a phase is minutes long, and a page
+  // that looks frozen is indistinguishable from one that is.
+  msg.style.color = 'var(--text3)';
+  msg.textContent = 'Two at a time, a few minutes each \u2014 this page can be left open.';
+  try {
+    // Long: six audits at two at a time is roughly ten minutes.
+    const r = await pf('/queue/run', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' }, body: '{}', timeout: 1800000 });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || ('proxy ' + r.status));
+    if (d.skipped) { msg.textContent = d.skipped; }
+    else {
+      msg.style.color = d.failed ? '#b45309' : 'var(--green)';
+      msg.textContent = d.ran
+        ? d.ran + ' ran \u00b7 ' + d.needsReview + ' waiting for review' +
+          (d.failed ? ' \u00b7 ' + d.failed + ' failed' : '')
+        : 'Nothing was waiting.';
+    }
+  } catch (e) {
+    msg.style.color = 'var(--red)'; msg.textContent = e.message;
+  }
+  btn.disabled = false; btn.textContent = 'Run the next phase';
+  queueLoad();
+}
+
+async function queueLoad() {
+  const list = document.getElementById('q-list');
+  const counts = document.getElementById('q-counts');
+  if (!list) return;
+  try {
+    const r = await pf('/queue');
+    const d = await r.json();
+    if (d.error) throw new Error(d.error);
+
+    counts.innerHTML = Object.entries(Q_STATE)
+      .filter(([k]) => d.counts[k === 'needs_review' ? 'needsReview' : k])
+      .map(([k, v]) => '<span><b style="color:' + v.color + '">' +
+        d.counts[k === 'needs_review' ? 'needsReview' : k] + '</b> ' + v.label + '</span>')
+      .join('') || '<span>Nothing in the queue yet.</span>';
+
+    const nav = document.getElementById('nav-queue');
+    if (nav) {
+      const w = d.counts.needsReview, q = d.counts.queued;
+      nav.textContent = w ? w + ' waiting for review'
+                      : q ? q + ' queued'
+                      : 'nothing waiting';
+    }
+
+    if (!d.jobs.length) {
+      list.innerHTML = '<div style="padding:16px;color:var(--text3)">' +
+        'Nothing queued. Add a firm above.</div>';
+      return;
+    }
+
+    list.innerHTML = d.jobs.map(j => {
+      const st = Q_STATE[j.status] || { label: j.status, color: 'var(--text3)' };
+      const when = j.finished_at || j.started_at || j.created_at;
+      return '<div style="display:flex;gap:14px;align-items:flex-start;padding:11px 14px;border-bottom:1px solid var(--line)">' +
+        '<div style="min-width:92px;font-size:11px;font-weight:600;color:' + st.color + '">' +
+          escHtml(st.label) + '</div>' +
+        '<div style="flex:1;min-width:0">' +
+          '<div style="font-weight:600">' + escHtml(j.client_name || j.client_url) + '</div>' +
+          '<div style="font-size:11px;color:var(--text3);margin-top:2px">' +
+            escHtml((j.client_url || '').replace(/^https?:\/\/(www\.)?/, '')) +
+            (j.client_city ? '  \u00b7  ' + escHtml(j.client_city) : '') +
+            '  \u00b7  ' + new Date(when).toLocaleString() +
+            // How much of the run rested on a measurement. A reviewer wants to
+            // know which ones need the most filling in before opening them.
+            (j.measured != null ? '  \u00b7  ' + j.measured + ' measured' : '') +
+          '</div>' +
+          (j.error ? '<div style="font-size:11px;color:var(--red);margin-top:4px;line-height:1.45">' +
+            escHtml(j.error) + '</div>' : '') +
+        '</div>' +
+        '<div style="display:flex;gap:6px;align-items:center">' +
+          (j.status === 'needs_review' && j.audit_id
+            ? '<button class="btn btn-primary" style="padding:4px 11px;font-size:11px" ' +
+              'onclick="queueOpen(\'' + j.audit_id + '\',\'' + j.id + '\')">Review</button>' : '') +
+          (j.status === 'failed'
+            ? '<button class="btn btn-ghost" style="padding:4px 11px;font-size:11px" ' +
+              'onclick="queueSet(\'' + j.id + '\',\'queued\')">Try again</button>' : '') +
+          (['queued','needs_review','failed'].includes(j.status)
+            ? '<button class="btn btn-ghost" style="padding:4px 9px;font-size:11px" ' +
+              'onclick="queueSet(\'' + j.id + '\',\'cancelled\')">Drop</button>' : '') +
+        '</div></div>';
+    }).join('');
+  } catch (e) {
+    list.innerHTML = '<div style="padding:16px;color:var(--red)">Could not read the queue: ' +
+      escHtml(e.message) + '</div>';
+  }
+}
+
+async function queueSet(id, status) {
+  try {
+    const r = await pf('/queue/status', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, status }) });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || ('proxy ' + r.status));
+  } catch (e) { toast('Could not update: ' + e.message); }
+  queueLoad();
+}
+
+// Open a finished run on the audit tabs. This is the whole point of the queue
+// stopping where it does: the run got what it could reach, and the rest is a
+// person with the extension and a pair of eyes.
+async function queueOpen(auditId, jobId) {
+  await histOpen(auditId);
+  toast('Fill anything the run could not reach, then approve and download');
 }
 
 // Loads a past audit back into the tabs, so it can be corrected and re-run.

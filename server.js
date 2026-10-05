@@ -6,7 +6,7 @@ const app  = express();
 // Bumped whenever a build is handed over. /health reports it so the app can
 // tell the user their page and their proxy are different vintages -- the
 // failure mode is a fix that silently is not there.
-const BUILD = '2026-10-05.2';
+const BUILD = '2026-10-05.3';
 // Building the report without a browser. See render.js: the scoring engine
 // stays in the page, this turns the page's report DATA into the same pages.
 const { renderReport, reportName, templateNames, templateInfo, checkReport, rendererStatus } = require('./render.js');
@@ -4215,6 +4215,123 @@ app.post('/airtable', async (req, res) => {
     console.error('Airtable proxy error:', e.message);
     res.status(500).json({ error: e.message });
   }
+});
+
+// ── The queue ───────────────────────────────────────────────────────────────
+// Audits stack here and run a phase at a time. See queue.js for why the pacing
+// matters; these routes are the thin part.
+//
+// Built lazily for the same reason as the runner: a deploy missing queue.js
+// should lose the queue, not the proxy.
+let _q = null;
+function queue() {
+  if (_q) return _q;
+  const { makeQueue } = require('./queue.js');
+  return (_q = makeQueue({
+    sbJson,
+    log: m => console.log(m),
+    runAudit: j => runner().runAudit(Object.assign(
+      { proxy: 'http://127.0.0.1:' + PORT, auditKey: AUDIT_KEY }, j)),
+    // Files the finished run. No PDF: the document is the reviewer's to
+    // approve, and a report nobody has looked at is not one to produce.
+    saveAudit: async a => {
+      const domain = auditDomain(a.clientUrl);
+      const rows = await sbJson('/rest/v1/audits', {
+        method: 'POST', headers: { Prefer: 'return=representation' },
+        body: JSON.stringify({
+          client_domain: domain,
+          client_name: String(a.clientName || '').slice(0, 300),
+          client_url:  String(a.clientUrl  || '').slice(0, 600),
+          client_city: String(a.clientCity || '').slice(0, 300),
+          score_overall: a.scores && a.scores.overall,
+          score_v: a.scores && a.scores.v, score_w: a.scores && a.scores.w,
+          score_s: a.scores && a.scores.s,
+          kpis_passed: a.kpisPassed ?? null, kpis_total: a.kpisTotal ?? null,
+          state: a.state, report: a.report || null,
+          source: a.source || 'airtable', template: a.template || 'growthline',
+          build: BUILD, prepared_by: '', note: 'run automatically — not yet reviewed'
+        })
+      });
+      return (rows || [])[0] || null;
+    }
+  }));
+}
+
+// Stack one. Deliberately minimal: the three fields an audit needs, plus a
+// reference back to wherever it came from.
+app.post('/queue/add', async (req, res) => {
+  const b = req.body || {};
+  const urls = Array.isArray(b.items) ? b.items : [b];
+  const rows = urls.filter(x => x && x.clientUrl).map(x => ({
+    client_name: String(x.clientName || '').slice(0, 300),
+    client_url:  String(x.clientUrl).slice(0, 600),
+    client_city: String(x.clientCity || '').slice(0, 300),
+    source: x.source || 'airtable', template: x.template || 'growthline',
+    external_ref: x.externalRef || null, assigned_to: x.assignedTo || null,
+    priority: x.priority || 0
+  }));
+  if (!rows.length) return res.status(400).json({ error: 'a website URL is required' });
+  try {
+    const out = await sbJson('/rest/v1/audit_jobs', {
+      method: 'POST', headers: { Prefer: 'return=representation' },
+      body: JSON.stringify(rows) });
+    res.json({ ok: true, added: (out || []).length, jobs: out });
+  } catch (e) {
+    // One live job per site is a database constraint, so a double-add comes
+    // back as a conflict rather than quietly spending the API budget twice.
+    const dup = /duplicate key|already exists/i.test(e.message);
+    res.status(dup ? 409 : 502).json({ error: dup
+      ? 'that site is already queued or running' : e.message });
+  }
+});
+
+// What is waiting, running, or wants a person.
+app.get('/queue', async (req, res) => {
+  try {
+    const sel = 'id,created_at,client_name,client_url,client_city,status,attempts,' +
+                'started_at,finished_at,audit_id,error,measured,assigned_to,source';
+    const jobs = await sbJson('/rest/v1/audit_jobs?select=' + sel +
+      '&order=created_at.desc&limit=' + Math.min(+req.query.limit || 100, 200));
+    const by = st => (jobs || []).filter(j => j.status === st).length;
+    res.json({ jobs: jobs || [], running: queue().isRunning(),
+      counts: { queued: by('queued'), running: by('running'),
+                needsReview: by('needs_review'), failed: by('failed'),
+                approved: by('approved') } });
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
+
+// Work the queue. Returns when the phase is done -- a caller that does not
+// want to wait can fire and poll /queue instead.
+app.post('/queue/run', async (req, res) => {
+  const b = req.body || {};
+  try {
+    const r = await queue().drain({
+      concurrency: b.concurrency, batchSize: b.batchSize,
+      pauseMs: b.pauseMs, maxJobs: b.maxJobs });
+    res.json(r);
+  } catch (e) {
+    console.error('queue run error:', e.message);
+    res.status(e.runnerMissing ? 503 : 500).json({ error: e.message });
+  }
+});
+
+// A reviewer finishing with one, or dropping it.
+app.post('/queue/status', async (req, res) => {
+  const b = req.body || {};
+  const ALLOWED = ['approved', 'cancelled', 'queued'];
+  if (!b.id) return res.status(400).json({ error: 'which job?' });
+  if (!ALLOWED.includes(b.status)) return res.status(400).json({
+    error: 'a reviewer can set: ' + ALLOWED.join(', ') });
+  try {
+    const rows = await sbJson('/rest/v1/audit_jobs?id=eq.' + encodeURIComponent(b.id), {
+      method: 'PATCH', headers: { Prefer: 'return=representation' },
+      body: JSON.stringify({ status: b.status,
+        // Re-queueing clears the last run's verdict, so a retry is not read
+        // through the failure that prompted it.
+        error: b.status === 'queued' ? null : undefined,
+        finished_at: b.status === 'queued' ? null : new Date().toISOString() }) });
+    res.json({ ok: true, job: (rows || [])[0] || null });
+  } catch (e) { res.status(502).json({ error: e.message }); }
 });
 
 // Run an audit with nobody watching.
