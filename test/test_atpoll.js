@@ -293,6 +293,25 @@ setTimeout(async () => {
         'so a restart cannot strand a job',
         /status=eq\.queued&select=id&limit=1/.test(srv));
 
+  // ── E5. the button on the Queue page ─────────────────────────────────────
+  console.log('\nE5. checking Airtable by hand');
+  const page = require('fs').readFileSync(
+    require('path').join(__dirname, '..', 'index.html'), 'utf8');
+  check('the Queue page has a control that asks Airtable now',
+        /onclick="queueCheckAT\(\)"/.test(page));
+  check('and it calls the same route the timer does',
+        /queueCheckAT[\s\S]{0,900}\/airtable\/poll/.test(page));
+  // Nothing skipped silently -- the rule the whole audit is built on, applied
+  // to the thing that decides which firms get audited at all.
+  check('it names the rows it refused rather than only counting them',
+        /Skipped ' \+ \(x\.company \|\| x\.recordId\) \+ ' — ' \+ x\.why/.test(page));
+  check('and it reports problems separately from refusals',
+        /Problem with ' \+ \(x\.company \|\| x\.recordId\)/.test(page));
+  check('the first check explains that it takes nothing on purpose',
+        /the cutoff is set to now/.test(page));
+  check('and the page no longer claims a run takes two to four minutes',
+        !/two to four minutes/.test(page) && /seven minutes/.test(page));
+
   // ── F. moving the mark backwards is capped ───────────────────────────────
   console.log('\nF. the watermark cannot be moved carelessly into the past');
   sbHandler = sbNormal();

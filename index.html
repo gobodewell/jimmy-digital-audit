@@ -738,11 +738,14 @@ input.masked{-webkit-text-security:disc;text-security:disc}
         browsers, not web requests — six at once is six of them, and each audit is
         about thirteen calls to the data providers. Running the lot at once would
         exhaust the rate limits and the server together.
-        <br><br>A run takes two to four minutes each, so a full phase is roughly ten.
-        Nothing is delivered at the end: each finished audit waits below for a person.
+        <br><br>A real unattended run has taken seven minutes, and one is allowed
+        fifteen before it is treated as stuck, so a full phase of six can be most of
+        an hour. Nothing is delivered at the end: each finished audit waits below
+        for a person.
       </div>
       <div class="btn-row">
         <button class="btn btn-green" id="q-run-btn" onclick="queueRun()">Run the next phase</button>
+        <button class="btn btn-ghost" id="q-at-btn" onclick="queueCheckAT()">Check Airtable now</button>
         <button class="btn btn-ghost" onclick="queueLoad()">Refresh</button>
         <span id="q-run-msg" style="font-size:12px;color:var(--text3);align-self:center"></span>
       </div>
@@ -951,7 +954,7 @@ input.masked{-webkit-text-security:disc;text-security:disc}
 // different vintages. Both carry the same stamp and the app compares them,
 // because "did you upload both files?" is not something anyone should have
 // to remember -- and a half-upload looks exactly like a fix that did not work.
-const BUILD = '2026-10-06.6';
+const BUILD = '2026-10-06.7';
 const DEFAULT_PROXY = 'https://jimmy-digital-audit.onrender.com';
 let AD = {}; // audit data store
 
@@ -4679,6 +4682,51 @@ async function queueRun() {
     msg.style.color = 'var(--red)'; msg.textContent = e.message;
     queueLoad();
   }
+}
+
+// Ask Airtable for new rows now rather than waiting for the timer.
+//
+// The poller already runs every couple of minutes and starts the queue itself.
+// This is for when you have just ticked a row and do not want to wonder whether
+// it worked -- and it answers in the terms the queue cares about: what it took,
+// what it refused and why, not "done".
+async function queueCheckAT() {
+  const btn = document.getElementById('q-at-btn');
+  const msg = document.getElementById('q-run-msg');
+  const was = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Checking\u2026';
+  msg.style.color = 'var(--text3)'; msg.textContent = 'Asking Airtable\u2026';
+  try {
+    const r = await pf('/airtable/poll', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' }, body: '{}', timeout: 60000 });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || ('proxy ' + r.status));
+
+    const bits = [];
+    if (d.seeded) bits.push('First check — the cutoff is set to now, so only rows ' +
+                            'added from here are picked up');
+    else if (d.taken) bits.push('Queued ' + d.taken + ': ' +
+      d.queued.map(q => q.company || q.url).join(', '));
+    else bits.push('Nothing new in Airtable');
+    // Refusals are named, never counted. A row that will not be audited is the
+    // thing somebody needs to see.
+    (d.rejected || []).slice(0, 3).forEach(x =>
+      bits.push('Skipped ' + (x.company || x.recordId) + ' — ' + x.why));
+    if ((d.rejected || []).length > 3)
+      bits.push('and ' + (d.rejected.length - 3) + ' more skipped');
+    (d.problems || []).forEach(x =>
+      bits.push('Problem with ' + (x.company || x.recordId) + ' — ' + x.error));
+    if (d.stopped) bits.push(d.stopped);
+    if (d.autorun && d.autorun.started) bits.push('the queue is running');
+    else if (d.autorun && d.autorun.error) bits.push('could not start the queue — ' +
+                                                     d.autorun.error);
+
+    msg.style.color = (d.problems || []).length || d.stopped ? '#b45309' : 'var(--text3)';
+    msg.textContent = bits.join('  ·  ');
+    if (d.taken || (d.autorun && d.autorun.started)) queueWatch(); else queueLoad();
+  } catch (e) {
+    msg.style.color = 'var(--red)'; msg.textContent = 'Could not reach Airtable: ' + e.message;
+  } finally { btn.disabled = false; btn.textContent = was; }
 }
 
 // Poll while there is anything to watch. Stops itself when the queue goes
