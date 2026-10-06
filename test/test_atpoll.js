@@ -242,6 +242,57 @@ setTimeout(async () => {
         !calls.some(c => c.who === 'airtable'),
         JSON.stringify(calls.map(c => c.who)));
 
+  // ── E2. the queue starts itself ──────────────────────────────────────────
+  // The empty case goes FIRST. The next check starts a real drain, and a drain
+  // outlives the request that began it -- so asking "did it decline to start?"
+  // afterwards gets "already running" and tests nothing.
+  console.log('\nE2. nothing waiting means nothing is started');
+  calls = [];
+  airtableGet = () => json({ records: [] });
+  sbHandler = sbNormal((p2, m) => {
+    if (p2.includes('audit_jobs') && p2.includes('status=eq.queued') && m === 'GET')
+      return json([]);          // empty queue
+  });
+  let r2 = await post('/airtable/poll');
+  check('it says there was nothing queued rather than starting a drain',
+        r2.json.autorun && /nothing queued/.test(r2.json.autorun.skipped || ''),
+        JSON.stringify(r2.json.autorun));
+
+  console.log('\nE3. a queued job runs without anybody pressing Run');
+  calls = [];
+  airtableGet = () => json({ records: [rec('recAR', '2026-10-06T13:00:00.000Z')] });
+  airtablePatch = () => json({ id: 'ok' });
+  sbHandler = sbNormal((p2, m) => {
+    if (p2.includes('audit_jobs') && p2.includes('status=eq.queued') && m === 'GET')
+      return json([{ id: 'job-waiting' }]);
+  });
+  r2 = await post('/airtable/poll');
+  check('the poll starts the drain itself', r2.json.autorun &&
+        r2.json.autorun.started === true, JSON.stringify(r2.json.autorun));
+  check('and says what started it, so an unattended run is attributable',
+        r2.json.autorun.why === 'queue autorun', r2.json.autorun.why);
+
+  // A second pass while that drain is still going must not start another.
+  r2 = await post('/airtable/poll');
+  check('a second pass does not start a competing drain',
+        /already running/.test((r2.json.autorun || {}).skipped || ''),
+        JSON.stringify(r2.json.autorun));
+  await post('/queue/stop');
+
+  console.log('\nE4. the decision is visible and can be switched off');
+  const srv = require('fs').readFileSync(
+    require('path').join(__dirname, '..', 'server.js'), 'utf8');
+  check('QUEUE_AUTORUN turns it off without a code change',
+        /QUEUE_AUTORUN\s*=\s*env\('QUEUE_AUTORUN'\)\s*!==\s*'off'/.test(srv));
+  check('health reports whether the queue starts itself',
+        /autorun: QUEUE_AUTORUN/.test(srv));
+  check('autorun runs even when the Airtable poll threw — queued work does ' +
+        'not depend on Airtable being up',
+        /Deliberately outside that catch/.test(srv));
+  check('and it starts on anything waiting, not only on what this pass added, ' +
+        'so a restart cannot strand a job',
+        /status=eq\.queued&select=id&limit=1/.test(srv));
+
   // ── F. moving the mark backwards is capped ───────────────────────────────
   console.log('\nF. the watermark cannot be moved carelessly into the past');
   sbHandler = sbNormal();

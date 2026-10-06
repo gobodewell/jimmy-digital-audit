@@ -6,7 +6,7 @@ const app  = express();
 // Bumped whenever a build is handed over. /health reports it so the app can
 // tell the user their page and their proxy are different vintages -- the
 // failure mode is a fix that silently is not there.
-const BUILD = '2026-10-06.5';
+const BUILD = '2026-10-06.6';
 // Building the report without a browser. See render.js: the scoring engine
 // stays in the page, this turns the page's report DATA into the same pages.
 const { renderReport, reportName, templateNames, templateInfo, checkReport, rendererStatus } = require('./render.js');
@@ -135,6 +135,10 @@ const AIRTABLE_POLL_MS  = Math.max(+env('AIRTABLE_POLL_MS') || 120000, 30000);
 const AIRTABLE_POLL_ON  = env('AIRTABLE_POLL') !== 'off';
 const AIRTABLE_URL_DAYS = +env('AIRTABLE_REPORT_URL_DAYS') || 3650;
 const AIRTABLE_PUSH_URL = env('AIRTABLE_PUSH_URL') !== 'off';
+// Whether the queue starts itself. Without this the poller turns a row into a
+// queued job and then waits for somebody to press Run, which is not what "a
+// row appears and the audit runs" means.
+const QUEUE_AUTORUN = env('QUEUE_AUTORUN') !== 'off';
 
 // Audit history. The SERVICE key lives here and never reaches the browser: the
 // app talks to this proxy, which is already gated by AUDIT_KEY, and the proxy
@@ -4377,6 +4381,8 @@ function airtableHealth() {
   const out = { configured: !!(AIRTABLE_TOKEN && AIRTABLE_BASE && AIRTABLE_TABLE),
                 polling: AIRTABLE_POLL_ON, everyMs: AIRTABLE_POLL_MS,
                 scoreFormat: AIRTABLE_SCORE_FORMAT, pushesReportUrl: AIRTABLE_PUSH_URL,
+                // Whether a queued job runs without anybody pressing anything.
+                autorun: QUEUE_AUTORUN,
                 last: _lastPoll };
   // A misconfigured score format is a startup problem, not a per-record one,
   // and it should be visible here rather than at the first approval.
@@ -4509,8 +4515,13 @@ app.get('/airtable/preview', async (req, res) => {
 
 // Run a pass now rather than waiting for the timer.
 app.post('/airtable/poll', async (req, res) => {
-  try { res.json(await pollAirtable({ limit: (req.body || {}).limit })); }
-  catch (e) { res.status(502).json({ error: e.message }); }
+  try {
+    const out = await pollAirtable({ limit: (req.body || {}).limit });
+    // Same as the timer: polling and running are one action, so a hand-run
+    // pass behaves exactly like an automatic one.
+    out.autorun = await autoRunQueue();
+    res.json(out);
+  } catch (e) { res.status(502).json({ error: e.message }); }
 });
 
 // Move the watermark. Needed to test with a row that already exists, and
@@ -4644,24 +4655,54 @@ app.get('/queue', async (req, res) => {
 // So the drain runs in the background and this says "started". Progress is
 // read from /queue, which is where it was always visible anyway.
 let _lastDrain = null;
-app.post('/queue/run', (req, res) => {
-  const b = req.body || {};
-  let q;
-  try { q = queue(); }
-  catch (e) { return res.status(e.runnerMissing ? 503 : 500).json({ error: e.message }); }
-  if (q.isRunning()) return res.status(409).json({
-    error: 'the queue is already running', running: true, last: _lastDrain });
 
-  // Nothing awaits this: the response goes out first, and the work outlives
-  // the request. Errors are kept for /queue rather than thrown into a handler
-  // that has already answered.
-  q.drain({ concurrency: b.concurrency, batchSize: b.batchSize,
-            pauseMs: b.pauseMs, maxJobs: b.maxJobs })
-    .then(r => { _lastDrain = Object.assign({ at: new Date().toISOString() }, r);
+// Starting a drain, from wherever. The route and the poller both end up here
+// so a background run is recorded the same way whoever began it.
+function startDrain(opts, why) {
+  const q = queue();                       // throws if the runner is missing
+  if (q.isRunning()) return { skipped: 'already running', last: _lastDrain };
+  q.drain(opts || {})
+    .then(r => { _lastDrain = Object.assign({ at: new Date().toISOString(), why }, r);
                  console.log('queue: finished — ' + r.ran + ' ran, ' +
                              r.needsReview + ' waiting, ' + r.failed + ' failed'); })
-    .catch(e => { _lastDrain = { at: new Date().toISOString(), error: e.message };
+    .catch(e => { _lastDrain = { at: new Date().toISOString(), why, error: e.message };
                   console.error('queue drain error:', e.message); });
+  return { started: true, why };
+}
+
+// ── The queue starting itself ───────────────────────────────────────────────
+// Called after every poll. Deliberately NOT "start a drain because this pass
+// queued something": it starts one whenever anything is waiting and nothing is
+// draining. That covers the case a narrower version would miss -- jobs left
+// queued by a restart, or by a drain that died -- which would otherwise sit
+// there for ever with the poller cheerfully adding more beside them.
+async function autoRunQueue() {
+  if (!QUEUE_AUTORUN) return { skipped: 'autorun is off' };
+  let q;
+  try { q = queue(); }
+  catch (e) { return { error: e.message }; }   // no runner on this deploy
+  if (q.isRunning()) return { skipped: 'already running' };
+  let waiting;
+  try {
+    waiting = await sbJson('/rest/v1/audit_jobs?status=eq.queued&select=id&limit=1');
+  } catch (e) { return { error: e.message }; }
+  if (!waiting || !waiting.length) return { skipped: 'nothing queued' };
+  try { return startDrain({}, 'queue autorun'); }
+  catch (e) { return { error: e.message }; }
+}
+
+app.post('/queue/run', (req, res) => {
+  const b = req.body || {};
+  let out;
+  // Nothing awaits the drain: the response goes out first and the work
+  // outlives the request. Errors are kept for /queue rather than thrown into a
+  // handler that has already answered.
+  try {
+    out = startDrain({ concurrency: b.concurrency, batchSize: b.batchSize,
+                       pauseMs: b.pauseMs, maxJobs: b.maxJobs }, 'pressed Run');
+  } catch (e) { return res.status(e.runnerMissing ? 503 : 500).json({ error: e.message }); }
+  if (out.skipped) return res.status(409).json({
+    error: 'the queue is already running', running: true, last: _lastDrain });
 
   res.status(202).json({ ok: true, started: true,
     note: 'running in the background — watch the queue for progress' });
@@ -4815,12 +4856,23 @@ app.get('/report/templates', (req, res) =>
 // throw here would surface as an unhandled rejection and the loop would simply
 // stop with nothing said -- /health reports the last pass instead.
 if (AIRTABLE_POLL_ON) {
-  const tick = () => pollAirtable({}).catch(e => {
-    // Recorded in the database as well, because an error only visible on a
-    // host nobody can reach is an error nobody can read.
-    notePoll({ at: new Date().toISOString(), error: e.message });
-    console.error('airtable poll: ' + e.message);
-  });
+  const tick = async () => {
+    try { await pollAirtable({}); }
+    catch (e) {
+      // Recorded in the database as well, because an error only visible on a
+      // host nobody can reach is an error nobody can read.
+      notePoll({ at: new Date().toISOString(), error: e.message });
+      console.error('airtable poll: ' + e.message);
+    }
+    // Deliberately outside that catch. Airtable being unreachable is no reason
+    // to stop auditing what is already queued -- those jobs are here, paid for
+    // and waiting, and the poll failing says nothing about them.
+    try {
+      const r = await autoRunQueue();
+      if (r && r.started) console.log('queue: started automatically');
+      else if (r && r.error) console.error('queue autorun: ' + r.error);
+    } catch (e) { console.error('queue autorun: ' + e.message); }
+  };
   const t = setInterval(tick, AIRTABLE_POLL_MS);
   if (t.unref) t.unref();
   // Not on the first tick of the clock: let the process finish booting, and
