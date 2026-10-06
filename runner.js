@@ -65,7 +65,21 @@ async function runAudit(opts) {
   const pw = playwright();
   const exe = browserPath();
   const pageUrl = 'file://' + path.join(__dirname, 'index.html');
-  const deadline = o.timeout || 420000;        // a real run is 2-4 minutes
+  // ── How long a run is allowed to take ─────────────────────────────────────
+  // This was 420s, next to a comment claiming "a real run is 2-4 minutes".
+  // Both were wrong, and the evidence was already on the table: the only
+  // successful unattended run at the time -- Archstone, scored 92 on 32 of 40
+  // KPIs -- took 421 SECONDS. The ceiling was set one second under the one
+  // measurement there was, and the next real audit died on it at 425s with
+  // everything it had found thrown away.
+  //
+  // A headless run is slower than a hand-run one by design: there is no
+  // extension feeding it, so it waits out every request a person's browser
+  // would have short-circuited. 900s is a little over twice the known-good
+  // run. The deadline exists to stop a genuinely hung page holding a browser
+  // and a lane for ever -- not to express an opinion about how fast a site
+  // ought to be.
+  const deadline = o.timeout || +process.env.AUDIT_RUN_TIMEOUT_MS || 900000;
 
   let browser;
   try {
@@ -93,7 +107,9 @@ async function runAudit(opts) {
     const out = await Promise.race([
       new Promise((_, rej) => setTimeout(
         () => rej(new Error('the audit did not finish within ' +
-          Math.round(deadline / 1000) + 's — the page was still working or stuck')),
+          Math.round(deadline / 1000) + 's — the page was still working or stuck. ' +
+          'For reference a healthy unattended run has taken 421s; raise ' +
+          'AUDIT_RUN_TIMEOUT_MS if real audits are being cut off.')),
         deadline)),
       page.evaluate(async c => {
       document.getElementById('clientName').value = c.clientName || '';
