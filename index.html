@@ -951,7 +951,7 @@ input.masked{-webkit-text-security:disc;text-security:disc}
 // different vintages. Both carry the same stamp and the app compares them,
 // because "did you upload both files?" is not something anyone should have
 // to remember -- and a half-upload looks exactly like a fix that did not work.
-const BUILD = '2026-10-06.4';
+const BUILD = '2026-10-06.5';
 const DEFAULT_PROXY = 'https://jimmy-digital-audit.onrender.com';
 let AD = {}; // audit data store
 
@@ -4802,8 +4802,16 @@ async function queueLoad() {
         '</div>' +
         '<div style="display:flex;gap:6px;align-items:center">' +
           (j.status === 'needs_review' && j.audit_id
-            ? '<button class="btn btn-primary" style="padding:4px 11px;font-size:11px" ' +
+            ? '<button class="btn btn-ghost" style="padding:4px 11px;font-size:11px" ' +
               'onclick="queueOpen(\'' + j.audit_id + '\',\'' + j.id + '\')">Review</button>' : '') +
+          // Approving is the whole point of the queue stopping here, and until
+          // now it had no control at all: /queue/status accepted `approved` and
+          // did the push, and nothing in the page could reach it. The run ends
+          // at needs_review on purpose; this is the person saying it is right.
+          (j.status === 'needs_review' && j.audit_id
+            ? '<button class="btn btn-primary" style="padding:4px 11px;font-size:11px" ' +
+              'onclick="queueSet(\'' + j.id + '\',\'approved\')">' +
+              (j.external_ref ? 'Approve &amp; push' : 'Approve') + '</button>' : '') +
           (j.status === 'failed'
             ? '<button class="btn btn-ghost" style="padding:4px 11px;font-size:11px" ' +
               'onclick="queueSet(\'' + j.id + '\',\'queued\')">Try again</button>' : '') +

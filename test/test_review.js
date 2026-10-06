@@ -75,6 +75,16 @@ setTimeout(async () => {
         'be attributed to a queued job',
         /REVIEW_JOB\s*=\s*null;\s*\/\/ plain history open/.test(html));
 
+  // The queue stops at needs_review so a person can say yes. For a while
+  // nothing in the page could say it: /queue/status accepted `approved` and
+  // did the Airtable push, and the only buttons on a row were Review, Try
+  // again and Drop. The one action the whole design exists to collect had no
+  // control at all.
+  check('a row waiting for review offers Approve, not just Review and Drop',
+        /queueSet\([^)]*approved/.test(html));
+  check('and it says that approving pushes, when the job came from Airtable',
+        /external_ref \? 'Approve &amp; push'/.test(html));
+
   // ── B. the save re-points the job ─────────────────────────────────────────
   console.log('\nB. a reviewed save becomes what the job means');
   calls = [];
