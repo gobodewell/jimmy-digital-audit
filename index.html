@@ -951,7 +951,7 @@ input.masked{-webkit-text-security:disc;text-security:disc}
 // different vintages. Both carry the same stamp and the app compares them,
 // because "did you upload both files?" is not something anyone should have
 // to remember -- and a half-upload looks exactly like a fix that did not work.
-const BUILD = '2026-10-05.7';
+const BUILD = '2026-10-06.1';
 const DEFAULT_PROXY = 'https://jimmy-digital-audit.onrender.com';
 let AD = {}; // audit data store
 
@@ -4778,9 +4778,23 @@ async function queueLoad() {
             // How much of the run rested on a measurement. A reviewer wants to
             // know which ones need the most filling in before opening them.
             (j.measured != null ? '  \u00b7  ' + j.measured + ' measured' : '') +
+            (j.external_ref ? '  \u00b7  from Airtable' : '') +
           '</div>' +
           (j.error ? '<div style="font-size:11px;color:var(--red);margin-top:4px;line-height:1.45">' +
             escHtml(j.error) + '</div>' : '') +
+          // Whether the approved result actually reached Airtable. A push can
+          // fail while the approval stands -- the audit is still approved, the
+          // row just does not know yet -- so this has to be visible or the
+          // record silently stays blank.
+          (j.push_error
+            ? '<div style="font-size:11px;color:var(--red);margin-top:4px;line-height:1.45">' +
+              'Not written back to Airtable: ' + escHtml(j.push_error) +
+              ' <button class="btn btn-ghost" style="padding:2px 8px;font-size:10px;margin-left:4px" ' +
+              'onclick="queuePush(\'' + j.id + '\')">Retry push</button></div>'
+            : j.pushed_at
+              ? '<div style="font-size:11px;color:var(--green,#15803d);margin-top:4px">' +
+                'Written back to Airtable ' + new Date(j.pushed_at).toLocaleString() + '</div>'
+              : '') +
         '</div>' +
         '<div style="display:flex;gap:6px;align-items:center">' +
           (j.status === 'needs_review' && j.audit_id
@@ -4813,7 +4827,27 @@ async function queueSet(id, status) {
       body: JSON.stringify({ id, status }) });
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || ('proxy ' + r.status));
+    // Say what happened to the Airtable write, rather than letting a silent
+    // failure look like a clean approval.
+    if (d.push && d.push.error) toast('Approved, but Airtable was not updated: ' +
+      d.push.error + ' — use Retry push on the row');
+    else if (d.push && d.push.ok) toast('Approved and written back to Airtable' +
+      (d.push.urlNote ? ' (' + d.push.urlNote + ')' : ''));
   } catch (e) { toast('Could not update: ' + e.message); }
+  queueLoad();
+}
+
+// Re-run just the Airtable write, for a push that failed while Airtable was
+// unreachable. The audit stays approved either way.
+async function queuePush(id) {
+  try {
+    const r = await pf('/airtable/push', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, jobId: id, force: true }) });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || ('proxy ' + r.status));
+    toast(d.skipped ? d.skipped : 'Written back to Airtable');
+  } catch (e) { toast('Still could not write to Airtable: ' + e.message); }
   queueLoad();
 }
 

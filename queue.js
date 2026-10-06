@@ -22,8 +22,23 @@ const DEFAULTS = {
 };
 
 function makeQueue(deps) {
-  const { sbJson, runAudit, saveAudit, log } = deps;
+  const { sbJson, runAudit, saveAudit, log, onStatus } = deps;
   const say = log || (() => {});
+
+  // Telling Airtable where a job got to.
+  //
+  // Wrapped, always. A bookkeeping write must never decide an audit's fate:
+  // that is exactly what cost us the first unattended run, where a PATCH that
+  // had already landed threw while parsing an empty 204 body and the catch
+  // wrote `failed` over a `needs_review`. So this reports and returns -- a
+  // mirror that is out of date is a nuisance, a mirror that can fail a good
+  // audit is a bug.
+  async function mirror(job, status) {
+    if (!onStatus) return;
+    try { await onStatus(job, status); }
+    catch (e) { say('queue: could not mirror ' + status + ' to Airtable — ' +
+                    e.message.slice(0, 120)); }
+  }
 
   // One transient 5xx should not cost a whole phase.
   //
@@ -78,6 +93,7 @@ function makeQueue(deps) {
     try {
       const claimed = await claim(job);
       if (!claimed) return { id: job.id, skipped: 'claimed by another worker' };
+      await mirror(job, 'running');
 
       const out = await runAudit({
         clientName: job.client_name, clientUrl: job.client_url,
@@ -94,6 +110,7 @@ function makeQueue(deps) {
                  out.silentlyFailed.length + ' checks would have counted ' +
                  'against this firm with nothing checked, against ' +
                  out.grounded + ' resting on something.' });
+        await mirror(job, 'failed');
         return { id: job.id, status: 'failed', reason: 'ungrounded' };
       }
 
@@ -111,11 +128,13 @@ function makeQueue(deps) {
       await finish(job.id, {
         status: 'needs_review', audit_id: saved && saved.id,
         measured: out.measured, ungrounded: false, error: null });
+      await mirror(job, 'needs_review');
       return { id: job.id, status: 'needs_review', auditId: saved && saved.id,
                measured: out.measured, unmeasured: (out.unmeasured || []).length };
 
     } catch (e) {
       await finish(job.id, { status: 'failed', error: e.message.slice(0, 900) });
+      await mirror(job, 'failed');
       return { id: job.id, status: 'failed', error: e.message };
     }
   }

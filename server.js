@@ -6,7 +6,7 @@ const app  = express();
 // Bumped whenever a build is handed over. /health reports it so the app can
 // tell the user their page and their proxy are different vintages -- the
 // failure mode is a fix that silently is not there.
-const BUILD = '2026-10-05.7';
+const BUILD = '2026-10-06.1';
 // Building the report without a browser. See render.js: the scoring engine
 // stays in the page, this turns the page's report DATA into the same pages.
 const { renderReport, reportName, templateNames, templateInfo, checkReport, rendererStatus } = require('./render.js');
@@ -118,6 +118,23 @@ function pickModel(requested) {
 const AUDIT_KEY     = (process.env.AUDIT_KEY   || '').trim();   // shared secret the app must send
 const ANTHROPIC_KEY = env('ANTHROPIC_KEY');    // AI reviews, server-side
 const AIRTABLE_TOKEN= env('AIRTABLE_TOKEN');   // Airtable push, server-side
+
+// Which table the audits come from and go back to. Defaulted to the live
+// GrowthLine base so a deploy that forgets them still works, but overridable
+// because a test run against production data is not a test.
+const AIRTABLE_BASE  = env('AIRTABLE_BASE')  || 'appIDKRHUlIMSTgGK';
+const AIRTABLE_TABLE = env('AIRTABLE_TABLE') || 'tblrInJH3HvhgMZDX';
+// number | grade | number+grade. The four Index Score fields are text and the
+// base holds both conventions; see airtable.js. Grades refuse to guess their
+// own boundaries, so `grade` without AIRTABLE_GRADE_BANDS is a startup error
+// rather than a confident B written over something nobody agreed.
+const AIRTABLE_SCORE_FORMAT = env('AIRTABLE_SCORE_FORMAT') || 'number';
+const AIRTABLE_GRADE_BANDS  = env('AIRTABLE_GRADE_BANDS');
+// How often to look for new rows, and how long a pushed report link lives.
+const AIRTABLE_POLL_MS  = Math.max(+env('AIRTABLE_POLL_MS') || 120000, 30000);
+const AIRTABLE_POLL_ON  = env('AIRTABLE_POLL') !== 'off';
+const AIRTABLE_URL_DAYS = +env('AIRTABLE_REPORT_URL_DAYS') || 3650;
+const AIRTABLE_PUSH_URL = env('AIRTABLE_PUSH_URL') !== 'off';
 
 // Audit history. The SERVICE key lives here and never reaches the browser: the
 // app talks to this proxy, which is already gated by AUDIT_KEY, and the proxy
@@ -609,7 +626,11 @@ app.get('/health', async (req, res) => res.json({ ok: true, dfs: !!DFS_LOGIN,
   // `report` because they fail for different reasons: the renderer needs two
   // asset files, the runner needs playwright and a browser binary.
   runner: await runnerHealth(),
-  history: !!(SUPABASE_URL && SUPABASE_KEY) }));
+  history: !!(SUPABASE_URL && SUPABASE_KEY),
+  // The Airtable loop: whether it is configured, whether the poller is on, and
+  // what the last pass actually did. A poller that is quietly off looks exactly
+  // like a poller finding nothing, so it says which.
+  airtable: airtableHealth() }));
 
 // ── SEMrush diagnostics ───────────────────────────────────────────────────────
 // Probes every candidate v4 route and reports what each one answered. v4 is
@@ -4250,6 +4271,13 @@ function queue() {
   return (_q = makeQueue({
     sbJson,
     log: m => console.log(m),
+    // Mirror each transition onto the Airtable row the job came from, so the
+    // grid shows Queued -> Running -> Needs review without anybody asking.
+    // queue.js wraps this: if Airtable is down the audit still completes.
+    onStatus: async (job, status) => {
+      if (!job.external_ref) return;          // added by hand, not from Airtable
+      await airtable().setStatus(job.external_ref, status);
+    },
     runAudit: j => runner().runAudit(Object.assign(
       { proxy: 'http://127.0.0.1:' + PORT, auditKey: AUDIT_KEY }, j)),
     // Files the finished run. No PDF: the document is the reviewer's to
@@ -4275,6 +4303,219 @@ function queue() {
       return (rows || [])[0] || null;
     }
   }));
+}
+
+// ── The Airtable loop ───────────────────────────────────────────────────────
+// A row appears with Catelogue = Audit; the poller turns it into a queued job
+// and stamps AUDIT STATUS so the grid shows where it got to. When a reviewer
+// approves the finished audit, the four scores, the report link and the date go
+// back to the same row.
+//
+// Lazy like the runner and the renderer: a deploy missing airtable.js should
+// lose the Airtable loop, not the proxy.
+let _at = null;
+function airtable() {
+  if (_at) return _at;
+  const { makeAirtable } = require('./airtable.js');
+  return (_at = makeAirtable({
+    token: AIRTABLE_TOKEN, baseId: AIRTABLE_BASE, tableId: AIRTABLE_TABLE,
+    sbJson, log: m => console.log(m),
+    scoreFormat: AIRTABLE_SCORE_FORMAT, gradeBands: AIRTABLE_GRADE_BANDS,
+    reportUrlDays: AIRTABLE_URL_DAYS, pushReportUrl: AIRTABLE_PUSH_URL
+  }));
+}
+
+let _lastPoll = null;
+function airtableHealth() {
+  const out = { configured: !!(AIRTABLE_TOKEN && AIRTABLE_BASE && AIRTABLE_TABLE),
+                polling: AIRTABLE_POLL_ON, everyMs: AIRTABLE_POLL_MS,
+                scoreFormat: AIRTABLE_SCORE_FORMAT, pushesReportUrl: AIRTABLE_PUSH_URL,
+                last: _lastPoll };
+  // A misconfigured score format is a startup problem, not a per-record one,
+  // and it should be visible here rather than at the first approval.
+  try { require('./airtable.js').makeFormatter(AIRTABLE_SCORE_FORMAT, AIRTABLE_GRADE_BANDS); }
+  catch (e) { out.problem = e.message; }
+  return out;
+}
+
+// One pass.
+//
+// Rows are handled oldest first, and the watermark only advances over rows that
+// were actually dealt with -- queued, or refused for a stated reason. It never
+// advances past a row we could not handle, so a bad pass costs a delay rather
+// than a lost audit.
+async function pollAirtable(opts) {
+  const o = opts || {};
+  const A = airtable();
+  const since = await A.watermark();
+  // First ever pass: the mark has just been seeded to now, so there is by
+  // definition nothing after it. Taking nothing here is the point -- it is what
+  // keeps the 2,699 existing Audit rows permanently out of reach.
+  if (!since) return { seeded: true, taken: 0, queued: [], rejected: [], problems: [] };
+
+  const recs = await A.candidates(since, o.limit || 25);
+  const { take, rejected } = A.triage(recs, since);
+  const byId = new Map();
+  take.forEach(t => byId.set(t.recordId, { kind: 'take', job: t }));
+  rejected.forEach(r => byId.set(r.recordId, { kind: 'reject', why: r.why,
+                                              company: r.company }));
+
+  const queued = [], refused = [], problems = [];
+  let mark = since, stopped = null;
+
+  for (const rec of recs) {
+    const d = byId.get(rec.id);
+    if (!d) continue;
+    if (d.kind === 'reject') {
+      refused.push({ recordId: rec.id, company: d.company, why: d.why });
+      mark = rec.createdTime;                 // a decision, so it is done with
+      continue;
+    }
+    const j = d.job;
+    try {
+      // Airtable first, deliberately. If this write fails the pass stops and
+      // nothing is queued: a row marked Queued with no job is a visible stuck
+      // cell somebody can clear, whereas a job with no mark gets picked up
+      // again next pass and the audit runs -- and is billed -- twice.
+      await A.setStatus(rec.id, 'queued');
+    } catch (e) {
+      stopped = 'could not write AUDIT STATUS on ' + (j.clientName || rec.id) +
+                ' — ' + e.message + '. Stopping this pass with the watermark ' +
+                'where it was, so nothing is skipped.';
+      break;
+    }
+    try {
+      const rows = await sbJson('/rest/v1/audit_jobs', {
+        method: 'POST', headers: { Prefer: 'return=representation' },
+        body: JSON.stringify([{
+          client_name: j.clientName.slice(0, 300),
+          client_url:  j.clientUrl.slice(0, 600),
+          client_city: j.clientCity.slice(0, 300),
+          source: 'airtable', template: 'growthline',
+          external_ref: j.recordId, priority: 0
+        }]) });
+      queued.push({ recordId: j.recordId, company: j.clientName,
+                    url: j.clientUrl, city: j.clientCity || null,
+                    jobId: (rows || [])[0] && rows[0].id });
+      mark = rec.createdTime;
+    } catch (e) {
+      // The job could not be created. The row is already marked, so mark it
+      // Failed rather than leaving it saying Queued for ever, and carry on --
+      // one bad row is not the pass's problem.
+      const dup = /duplicate key|already exists/i.test(e.message);
+      try { await A.setStatus(rec.id, dup ? 'queued' : 'failed'); } catch (e2) {}
+      problems.push({ recordId: rec.id, company: j.clientName,
+                      error: dup ? 'already queued or running' : e.message });
+      mark = rec.createdTime;
+    }
+  }
+
+  if (mark !== since) await A.setWatermark(new Date(mark).toISOString());
+  const out = { taken: queued.length, queued, rejected: refused, problems,
+                watermark: new Date(mark).toISOString(), stopped,
+                at: new Date().toISOString() };
+  _lastPoll = { at: out.at, taken: out.taken, rejected: refused.length,
+                problems: problems.length, stopped };
+  if (queued.length || problems.length || stopped)
+    console.log('airtable: ' + queued.length + ' queued, ' + refused.length +
+                ' refused, ' + problems.length + ' problems' +
+                (stopped ? ' — ' + stopped : ''));
+  return out;
+}
+
+// What the next pass WOULD take, changing nothing. The first thing to run
+// before trusting the loop with a real request.
+app.get('/airtable/preview', async (req, res) => {
+  try {
+    const A = airtable();
+    const rows = await sbJson('/rest/v1/app_settings?key=eq.airtable_watermark&select=value');
+    const v = (rows || [])[0] && (rows || [])[0].value;
+    if (!v) return res.json({ watermark: null,
+      note: 'no watermark yet — the first poll will seed it to now and take nothing' });
+    const since = new Date(v).toISOString();
+    const recs = await A.candidates(since, Math.min(+req.query.limit || 25, 100));
+    const t = A.triage(recs, since);
+    res.json({ watermark: since, candidates: recs.length,
+               wouldQueue: t.take, wouldRefuse: t.rejected });
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
+
+// Run a pass now rather than waiting for the timer.
+app.post('/airtable/poll', async (req, res) => {
+  try { res.json(await pollAirtable({ limit: (req.body || {}).limit })); }
+  catch (e) { res.status(502).json({ error: e.message }); }
+});
+
+// Move the watermark. Needed to test with a row that already exists, and
+// capped on purpose: the base holds 83 dead Audit rows with no score, so a mark
+// set carelessly into the past queues every one of them.
+app.post('/airtable/watermark', async (req, res) => {
+  const b = req.body || {};
+  if (!b.at) return res.status(400).json({ error: 'an ISO timestamp is required' });
+  const t = Date.parse(b.at);
+  if (!t) return res.status(400).json({ error: 'not a date I can read: ' + b.at });
+  const daysBack = (Date.now() - t) / 86400000;
+  if (daysBack > 30 && !b.force) return res.status(400).json({
+    error: 'that mark is ' + Math.round(daysBack) + ' days back. The base holds ' +
+           '83 Catelogue=Audit rows with no score, all of them dead records, and ' +
+           'a mark that far back queues them. Send force: true if you mean it.' });
+  try {
+    await airtable().setWatermark(new Date(t).toISOString());
+    res.json({ ok: true, watermark: new Date(t).toISOString() });
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
+
+// Push one finished audit back by hand -- a repair path for a push that failed
+// while Airtable was unreachable, and how a re-push is done.
+app.post('/airtable/push', async (req, res) => {
+  const b = req.body || {};
+  if (!b.jobId) return res.status(400).json({ error: 'which job?' });
+  try { res.json(await pushJob(b.jobId, { force: !!b.force })); }
+  catch (e) { res.status(502).json({ error: e.message }); }
+});
+
+// The push itself. Separate from the route because approval calls it too.
+async function pushJob(jobId, opts) {
+  const o = opts || {};
+  const jobs = await sbJson('/rest/v1/audit_jobs?id=eq.' +
+    encodeURIComponent(jobId) + '&select=*');
+  const job = (jobs || [])[0];
+  if (!job) throw new Error('no such job: ' + jobId);
+  if (!job.external_ref) return { skipped: 'this job did not come from Airtable' };
+  if (job.pushed_at && !o.force) return { skipped: 'already pushed at ' +
+    job.pushed_at + ' — send force: true to write it again', pushedAt: job.pushed_at };
+  if (!job.audit_id) throw new Error('that job has no saved audit to push');
+
+  const rows = await sbJson('/rest/v1/audits?id=eq.' +
+    encodeURIComponent(job.audit_id) +
+    '&select=id,score_overall,score_v,score_w,score_s,pdf_path');
+  const audit = (rows || [])[0];
+  if (!audit) throw new Error('the audit this job points at is gone: ' + job.audit_id);
+
+  const A = airtable();
+  // A link that is still alive when somebody clicks it months later.
+  // /history/pdf signs for ten minutes, which is right for a download button
+  // and useless in a database row.
+  let reportUrl = null;
+  if (AIRTABLE_PUSH_URL && audit.pdf_path) {
+    try { reportUrl = await A.reportLink(audit.pdf_path, HIST_BUCKET, SUPABASE_URL); }
+    catch (e) { console.error('airtable: could not sign the report link — ' + e.message); }
+  }
+
+  try {
+    const wrote = await A.pushApproved({ recordId: job.external_ref, audit, reportUrl });
+    await sbJson('/rest/v1/audit_jobs?id=eq.' + encodeURIComponent(jobId), {
+      method: 'PATCH', headers: { Prefer: 'return=minimal' },
+      body: JSON.stringify({ pushed_at: new Date().toISOString(), push_error: null }) });
+    return Object.assign({ ok: true, jobId, reportUrl }, wrote);
+  } catch (e) {
+    // Recorded against the job and nowhere else. A failed push is a failed
+    // push: it does not make an approved audit unapproved.
+    await sbJson('/rest/v1/audit_jobs?id=eq.' + encodeURIComponent(jobId), {
+      method: 'PATCH', headers: { Prefer: 'return=minimal' },
+      body: JSON.stringify({ push_error: e.message.slice(0, 900) }) }).catch(() => {});
+    throw e;
+  }
 }
 
 // Stack one. Deliberately minimal: the three fields an audit needs, plus a
@@ -4309,7 +4550,10 @@ app.post('/queue/add', async (req, res) => {
 app.get('/queue', async (req, res) => {
   try {
     const sel = 'id,created_at,client_name,client_url,client_city,status,attempts,' +
-                'started_at,finished_at,audit_id,error,measured,assigned_to,source';
+                'started_at,finished_at,audit_id,error,measured,assigned_to,source,' +
+                // Where it came from and whether the result got back there. An
+                // approved audit whose push failed looks finished otherwise.
+                'external_ref,pushed_at,push_error';
     const jobs = await sbJson('/rest/v1/audit_jobs?select=' + sel +
       '&order=created_at.desc&limit=' + Math.min(+req.query.limit || 100, 200));
     const by = st => (jobs || []).filter(j => j.status === st).length;
@@ -4378,7 +4622,29 @@ app.post('/queue/status', async (req, res) => {
         // through the failure that prompted it.
         error: b.status === 'queued' ? null : undefined,
         finished_at: b.status === 'queued' ? null : new Date().toISOString() }) });
-    res.json({ ok: true, job: (rows || [])[0] || null });
+    const job = (rows || [])[0] || null;
+
+    // Approval is the only thing that writes a result back to Airtable. Not the
+    // run finishing -- a run finishing means a person still has to look at it.
+    //
+    // The push is reported but never allowed to fail the approval: the reviewer
+    // approved the audit, and Airtable being unreachable does not un-approve it.
+    // A failure here is recorded on the job and retried with /airtable/push.
+    let push = null;
+    if (job && job.external_ref) {
+      if (b.status === 'approved') {
+        try { push = await pushJob(job.id, { force: !!b.force }); }
+        catch (e) { push = { error: e.message,
+          note: 'the audit is approved — only the write to Airtable failed. ' +
+                'Retry with POST /airtable/push {"jobId":"' + job.id + '"}' }; }
+      } else {
+        // Re-queued or dropped: keep the grid honest about it.
+        try { await airtable().setStatus(job.external_ref,
+          b.status === 'queued' ? 'queued' : 'cancelled'); }
+        catch (e) { push = { error: 'could not update AUDIT STATUS — ' + e.message }; }
+      }
+    }
+    res.json({ ok: true, job, push });
   } catch (e) { res.status(502).json({ error: e.message }); }
 });
 
@@ -4473,5 +4739,25 @@ app.post('/report/build', async (req, res) => {
 // hard-coding a list that drifts from the server's.
 app.get('/report/templates', (req, res) =>
   res.json({ templates: templateInfo(), sources: SOURCES, renderer: rendererStatus() }));
+
+// ── The poll timer ──────────────────────────────────────────────────────────
+// unref'd: a pending timer must not be the reason the process will not exit,
+// which matters for the tests that require this file.
+//
+// Errors are logged and swallowed. This runs detached from any request, so a
+// throw here would surface as an unhandled rejection and the loop would simply
+// stop with nothing said -- /health reports the last pass instead.
+if (AIRTABLE_POLL_ON) {
+  const tick = () => pollAirtable({}).catch(e => {
+    _lastPoll = { at: new Date().toISOString(), error: e.message };
+    console.error('airtable poll: ' + e.message);
+  });
+  const t = setInterval(tick, AIRTABLE_POLL_MS);
+  if (t.unref) t.unref();
+  // Not on the first tick of the clock: let the process finish booting, and
+  // let the watermark be seeded before anything is looked for.
+  const first = setTimeout(tick, 15000);
+  if (first.unref) first.unref();
+}
 
 app.listen(PORT, () => console.log('Proxy running on port ' + PORT));
