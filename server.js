@@ -6,7 +6,7 @@ const app  = express();
 // Bumped whenever a build is handed over. /health reports it so the app can
 // tell the user their page and their proxy are different vintages -- the
 // failure mode is a fix that silently is not there.
-const BUILD = '2026-10-06.3';
+const BUILD = '2026-10-06.4';
 // Building the report without a browser. See render.js: the scoring engine
 // stays in the page, this turns the page's report DATA into the same pages.
 const { renderReport, reportName, templateNames, templateInfo, checkReport, rendererStatus } = require('./render.js');
@@ -2610,7 +2610,32 @@ app.post('/history/save', async (req, res) => {
       headers: { Prefer: 'return=representation' },
       body: JSON.stringify(row)
     });
-    res.json({ ok: true, id: saved[0] && saved[0].id, domain, pdfPath, pdfBytes });
+    const id = saved[0] && saved[0].id;
+
+    // ── A reviewed audit replaces the run it came from ───────────────────────
+    // A save INSERTS; it never updates. So when a reviewer opens a queued job,
+    // fills what the headless run could not reach, corrects what it got wrong
+    // and saves, the result is a NEW row -- and the job still points at the
+    // run's original one. Approving then pushed the robot's numbers to
+    // Airtable with no report link, discarding the review entirely.
+    //
+    // Re-pointing the job here keeps that in one place: whatever the reviewer
+    // last saved is what the job means, and therefore what gets pushed.
+    let rePointed = null;
+    if (b.jobId && id) {
+      try {
+        await sbJson('/rest/v1/audit_jobs?id=eq.' + encodeURIComponent(b.jobId), {
+          method: 'PATCH', headers: { Prefer: 'return=minimal' },
+          body: JSON.stringify({ audit_id: id }) });
+        rePointed = b.jobId;
+      } catch (e) {
+        // Reported, not thrown. The audit is filed either way, and losing the
+        // save because the bookkeeping failed would be the worse trade.
+        console.error('history save: could not re-point job ' + b.jobId +
+                      ' at audit ' + id + ' — ' + e.message);
+      }
+    }
+    res.json({ ok: true, id, domain, pdfPath, pdfBytes, rePointed });
   } catch (e) {
     console.error('history save error:', e.message);
     res.status(e.unconfigured ? 501 : 502).json({ error: e.message });

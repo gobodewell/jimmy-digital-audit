@@ -951,7 +951,7 @@ input.masked{-webkit-text-security:disc;text-security:disc}
 // different vintages. Both carry the same stamp and the app compares them,
 // because "did you upload both files?" is not something anyone should have
 // to remember -- and a half-upload looks exactly like a fix that did not work.
-const BUILD = '2026-10-06.3';
+const BUILD = '2026-10-06.4';
 const DEFAULT_PROXY = 'https://jimmy-digital-audit.onrender.com';
 let AD = {}; // audit data store
 
@@ -4481,7 +4481,11 @@ async function fileAudit(pdfBase64, note, report) {
     // reassembled here: assembleReport reads the live page, and by the time a
     // save runs the page may have moved on.
     report: report || null,
-    state: auditState(), pdfBase64: pdfBase64 || null
+    state: auditState(), pdfBase64: pdfBase64 || null,
+    // When this audit is a queued job under review, the job is re-pointed at
+    // the row this save creates. Without it the job keeps pointing at the
+    // unreviewed run and that is what gets pushed to Airtable.
+    jobId: REVIEW_JOB
   };
   const payload = JSON.stringify(body);
   const r = await pf('/history/save', {
@@ -4854,8 +4858,20 @@ async function queuePush(id) {
 // Open a finished run on the audit tabs. This is the whole point of the queue
 // stopping where it does: the run got what it could reach, and the rest is a
 // person with the extension and a pair of eyes.
+// Which queued job the audit tabs are currently showing, if any.
+//
+// This used to be thrown away, and that quietly inverted the whole point of
+// the queue. The runner files an audit; a reviewer opens it, fills what the
+// headless run could not reach, corrects what it got wrong and saves -- and a
+// save INSERTS a new audits row rather than updating the old one. The job
+// still pointed at the run's original row, so approving pushed the robot's
+// numbers to Airtable and left the report link empty. Everything the reviewer
+// did was discarded at the moment of delivery.
+let REVIEW_JOB = null;
+
 async function queueOpen(auditId, jobId) {
-  await histOpen(auditId);
+  await histOpen(auditId);          // clears REVIEW_JOB
+  REVIEW_JOB = jobId || null;
   toast('Fill anything the run could not reach, then approve and download');
 }
 
@@ -4871,6 +4887,7 @@ async function histOpen(id) {
     const d = await r.json();
     if (d.error) throw new Error(d.error);
     applyState(d.state);
+    REVIEW_JOB = null;    // plain history open: not a review of a queued job
     showPage('audit'); st('setup');
     toast('Loaded audit from ' + new Date(d.created_at).toLocaleDateString());
     msg.textContent = '';
