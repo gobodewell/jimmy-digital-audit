@@ -6,7 +6,7 @@ const app  = express();
 // Bumped whenever a build is handed over. /health reports it so the app can
 // tell the user their page and their proxy are different vintages -- the
 // failure mode is a fix that silently is not there.
-const BUILD = '2026-10-06.1';
+const BUILD = '2026-10-06.2';
 // Building the report without a browser. See render.js: the scoring engine
 // stays in the page, this turns the page's report DATA into the same pages.
 const { renderReport, reportName, templateNames, templateInfo, checkReport, rendererStatus } = require('./render.js');
@@ -4326,6 +4326,28 @@ function airtable() {
 }
 
 let _lastPoll = null;
+
+// The last pass, kept in the database as well as in memory.
+//
+// /health reports _lastPoll, but reaching /health needs network access to this
+// host, and the first time the loop sat silent that was exactly what nobody
+// debugging it had. The row costs one write per pass and turns "it polls and
+// nothing happens" into a readable answer from the database side.
+async function notePoll(summary) {
+  _lastPoll = summary;
+  try {
+    await sbJson('/rest/v1/app_settings?on_conflict=key', {
+      method: 'POST',
+      headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
+      body: JSON.stringify({ key: 'airtable_last_poll',
+        value: JSON.stringify(summary).slice(0, 4000),
+        updated_at: new Date().toISOString() }) });
+  } catch (e) {
+    // Never allowed to fail a pass. A note about the work is not the work.
+    console.error('airtable: could not record the poll summary — ' + e.message);
+  }
+}
+
 function airtableHealth() {
   const out = { configured: !!(AIRTABLE_TOKEN && AIRTABLE_BASE && AIRTABLE_TABLE),
                 polling: AIRTABLE_POLL_ON, everyMs: AIRTABLE_POLL_MS,
@@ -4351,24 +4373,39 @@ async function pollAirtable(opts) {
   // First ever pass: the mark has just been seeded to now, so there is by
   // definition nothing after it. Taking nothing here is the point -- it is what
   // keeps the 2,699 existing Audit rows permanently out of reach.
-  if (!since) return { seeded: true, taken: 0, queued: [], rejected: [], problems: [] };
+  if (!since) {
+    await notePoll({ at: new Date().toISOString(), seeded: true, taken: 0 });
+    return { seeded: true, taken: 0, queued: [], rejected: [], problems: [] };
+  }
 
   const recs = await A.candidates(since, o.limit || 25);
   const { take, rejected } = A.triage(recs, since);
   const byId = new Map();
   take.forEach(t => byId.set(t.recordId, { kind: 'take', job: t }));
   rejected.forEach(r => byId.set(r.recordId, { kind: 'reject', why: r.why,
-                                              company: r.company }));
+                                              company: r.company, stale: r.stale }));
 
   const queued = [], refused = [], problems = [];
   let mark = since, stopped = null;
+  // The mark only ever goes forward. A stale row below is the fence working
+  // rather than a decision, and moving the mark onto one would move it
+  // BACKWARDS -- the next pass would then pull in more old rows, reject those
+  // too, move back further, and walk down into the 83 dead records. The only
+  // reason that has not happened is that the query has never returned an old
+  // row, which is not a guarantee.
+  const advance = iso => {
+    const t = Date.parse(iso || '');
+    if (t && t > Date.parse(mark)) mark = new Date(t).toISOString();
+  };
 
   for (const rec of recs) {
     const d = byId.get(rec.id);
     if (!d) continue;
     if (d.kind === 'reject') {
       refused.push({ recordId: rec.id, company: d.company, why: d.why });
-      mark = rec.createdTime;                 // a decision, so it is done with
+      // A refusal is a decision the mark may move past -- except a stale row,
+      // which is the fence itself and must never drag the mark backwards.
+      if (!d.stale) advance(rec.createdTime);
       continue;
     }
     const j = d.job;
@@ -4397,7 +4434,7 @@ async function pollAirtable(opts) {
       queued.push({ recordId: j.recordId, company: j.clientName,
                     url: j.clientUrl, city: j.clientCity || null,
                     jobId: (rows || [])[0] && rows[0].id });
-      mark = rec.createdTime;
+      advance(rec.createdTime);
     } catch (e) {
       // The job could not be created. The row is already marked, so mark it
       // Failed rather than leaving it saying Queued for ever, and carry on --
@@ -4406,7 +4443,7 @@ async function pollAirtable(opts) {
       try { await A.setStatus(rec.id, dup ? 'queued' : 'failed'); } catch (e2) {}
       problems.push({ recordId: rec.id, company: j.clientName,
                       error: dup ? 'already queued or running' : e.message });
-      mark = rec.createdTime;
+      advance(rec.createdTime);
     }
   }
 
@@ -4414,8 +4451,13 @@ async function pollAirtable(opts) {
   const out = { taken: queued.length, queued, rejected: refused, problems,
                 watermark: new Date(mark).toISOString(), stopped,
                 at: new Date().toISOString() };
-  _lastPoll = { at: out.at, taken: out.taken, rejected: refused.length,
-                problems: problems.length, stopped };
+  await notePoll({ at: out.at, taken: out.taken, rejected: refused.length,
+                   problems: problems.length, stopped,
+                   // The refusals themselves, not just how many. "0 taken,
+                   // 1 refused" says nothing; "refused: not the firm's
+                   // website" says what to fix.
+                   why: refused.slice(0, 5).map(r => r.company + ': ' + r.why),
+                   candidates: recs.length });
   if (queued.length || problems.length || stopped)
     console.log('airtable: ' + queued.length + ' queued, ' + refused.length +
                 ' refused, ' + problems.length + ' problems' +
@@ -4749,7 +4791,9 @@ app.get('/report/templates', (req, res) =>
 // stop with nothing said -- /health reports the last pass instead.
 if (AIRTABLE_POLL_ON) {
   const tick = () => pollAirtable({}).catch(e => {
-    _lastPoll = { at: new Date().toISOString(), error: e.message };
+    // Recorded in the database as well, because an error only visible on a
+    // host nobody can reach is an error nobody can read.
+    notePoll({ at: new Date().toISOString(), error: e.message });
     console.error('airtable poll: ' + e.message);
   });
   const t = setInterval(tick, AIRTABLE_POLL_MS);

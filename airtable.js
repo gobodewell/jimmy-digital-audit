@@ -244,8 +244,15 @@ function makeAirtable(deps) {
       // date parser. This is the check that is trusted.
       const made = Date.parse(rec.createdTime || '');
       if (!made || made <= Date.parse(sinceIso)) {
-        rejected.push(Object.assign({ why: 'created before the watermark — ' +
-          'not a new request' }, ref));
+        // `stale` matters to the caller. Every other refusal is a DECISION
+        // about a new row, and the watermark may move past it. This one is the
+        // fence doing its job, and moving the mark to it would move the mark
+        // BACKWARDS -- so the next pass pulls in more old rows, rejects those
+        // too, moves back further, and walks down into the 83 dead records.
+        // Nothing has gone wrong yet to cause that, but the only reason is
+        // that the query has never returned an old row.
+        rejected.push(Object.assign({ stale: true,
+          why: 'created before the watermark — not a new request' }, ref));
         continue;
       }
 

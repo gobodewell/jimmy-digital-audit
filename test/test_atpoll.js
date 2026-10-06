@@ -174,6 +174,59 @@ setTimeout(async () => {
   check('and the row stays Queued rather than being marked Failed',
         dmarks[dmarks.length - 1] === 'Queued', JSON.stringify(dmarks));
 
+  // ── D2. the watermark can never walk backwards ───────────────────────────
+  console.log('\nD2. an old row in the result does not drag the mark back');
+  calls = [];
+  // The fence is the only thing keeping 83 dead records out, and it is a stored
+  // timestamp. If a refused-as-stale row could move the mark onto its own
+  // createdTime, the next pass would return more old rows, refuse those too,
+  // move back further, and walk down into them. Nothing causes that today --
+  // the query has never returned an old row -- which is not a guarantee.
+  airtableGet = () => json({ records: [
+    rec('recOLD1', '2026-09-21T17:12:55.000Z'),   // a real dead row's timestamp
+    rec('recOLD2', '2024-05-01T00:00:00.000Z')
+  ] });
+  airtablePatch = () => json({ id: 'ok' });
+  sbHandler = sbNormal();
+  r = await post('/airtable/poll');
+  check('both old rows are refused', r.json.rejected.length === 2,
+        JSON.stringify(r.json.rejected));
+  check('and the watermark is exactly where it was',
+        r.json.watermark === SINCE, r.json.watermark);
+  check('nothing was queued and nothing was marked in Airtable',
+        r.json.taken === 0 && !calls.some(c => c.who === 'airtable' && c.method === 'PATCH'),
+        JSON.stringify(calls.filter(c => c.who === 'airtable').map(c => c.method)));
+  check('and no watermark write was sent at all',
+        !calls.some(c => c.who === 'sb' && c.path.includes('app_settings') &&
+                    c.method === 'POST' && c.body &&
+                    c.body.key === 'airtable_watermark'),
+        JSON.stringify(calls.filter(c => c.who === 'sb' && c.method === 'POST')
+          .map(c => c.body && c.body.key)));
+
+  // A new row mixed in with old ones: the mark lands on the new one only.
+  calls = [];
+  airtableGet = () => json({ records: [
+    rec('recOLD3', '2024-05-01T00:00:00.000Z'),
+    rec('recNEW1', '2026-10-06T13:00:00.000Z'),
+    rec('recOLD4', '2025-01-01T00:00:00.000Z')
+  ] });
+  r = await post('/airtable/poll');
+  check('the new row is queued and the old ones are not', r.json.taken === 1 &&
+        r.json.queued[0].recordId === 'recNEW1', JSON.stringify(r.json.queued));
+  check('the mark moves forward to the new row, not back to the old ones',
+        r.json.watermark === '2026-10-06T13:00:00.000Z', r.json.watermark);
+
+  console.log('\nD3. the pass records what it did where it can be read');
+  const note = calls.filter(c => c.who === 'sb' && c.method === 'POST' &&
+    c.path.includes('app_settings') && c.body &&
+    c.body.key === 'airtable_last_poll').pop();
+  check('a summary of the pass is written to the database',
+        !!note, JSON.stringify(calls.filter(c => c.who === 'sb' && c.method === 'POST')
+          .map(c => c.body && c.body.key)));
+  check('and it carries the refusals, not just a count',
+        !!note && /created before the watermark/.test(note.body.value),
+        note && note.body.value.slice(0, 200));
+
   // ── E. the first ever pass takes nothing ─────────────────────────────────
   console.log('\nE. the first pass on a fresh deploy');
   calls = [];
