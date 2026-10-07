@@ -134,18 +134,26 @@ async function runAudit(opts) {
       // a check that WAS measured and genuinely failed is a finding, not a
       // silence, and the first version of this counted those too -- which
       // would have flagged every healthy audit.
+      //
+      // JUDGED is the third way a check can rest on something. Nine of the
+      // forty are decided by a model reading the site rather than by a
+      // measurement, and a model that looked and said no has answered. Without
+      // it every such verdict counted as a silence.
+      const J = typeof JUDGED !== 'undefined' ? JUDGED : new Set();
       const failedSilently = ids.filter(id =>
-        !ticked(id) && !UNK.has(id) && !DIRECT.has(id));
+        !ticked(id) && !UNK.has(id) && !DIRECT.has(id) && !J.has(id));
       // What the score rests on: an answer found, a reason recorded for not
-      // finding one, or a measurement that came back negative.
+      // finding one, a measurement that came back negative, or a judgement
+      // that came back negative.
       const grounded = ids.filter(id =>
-        ticked(id) || UNK.has(id) || DIRECT.has(id));
+        ticked(id) || UNK.has(id) || DIRECT.has(id) || J.has(id));
       return {
         state: auditState(),
         report: d,
         scores: AD.scores,
         unmeasured: [...UNK.entries()].map(([id, why]) => ({ id, why })),
         measured: DIRECT.size,
+        judgedCount: J.size,
         passed: ids.filter(ticked).length,
         grounded: grounded.length,
         // Counted against the firm without anything having been checked.

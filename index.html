@@ -954,7 +954,7 @@ input.masked{-webkit-text-security:disc;text-security:disc}
 // different vintages. Both carry the same stamp and the app compares them,
 // because "did you upload both files?" is not something anyone should have
 // to remember -- and a half-upload looks exactly like a fix that did not work.
-const BUILD = '2026-10-07.1';
+const BUILD = '2026-10-07.2';
 const DEFAULT_PROXY = 'https://jimmy-digital-audit.onrender.com';
 let AD = {}; // audit data store
 
@@ -997,6 +997,44 @@ const UNK = new Map();
 // off limits to the AI passes.
 const DIRECT = new Set();
 const measured = (...ids) => ids.forEach(id => DIRECT.add(id));
+
+// Checks an AI pass answered. Nine of the forty are judgements rather than
+// measurements, and they need their own record for the same reason the others
+// do: a model that read the site and said "no, they show no awards" has
+// ANSWERED, and that is not the same as nobody having looked.
+//
+// Deliberately NOT folded into DIRECT. DIRECT is the set ckAI() refuses to
+// overwrite -- the measurements a model is not allowed to argue with -- and
+// putting judgements in it would let one model's opinion lock out another's,
+// and lock out a real measurement arriving later.
+const JUDGED = new Set();
+const judged = (...ids) => ids.forEach(id => { if (!DIRECT.has(id)) JUDGED.add(id); });
+
+// ── Deciding a check from a source that ANSWERED ─────────────────────────────
+// The missing third state. ck() records a pass and unk() records that nothing
+// could be read, and between them sat every check that was genuinely looked at
+// and genuinely came back NO: an unticked box with no reason and no record of
+// having been measured, which is byte-for-byte what a check that never ran
+// looks like.
+//
+// That gap is not a nuance. A firm three months old has no backlinks, no
+// rankings, no listing and no logo on its LinkedIn page -- every one of those a
+// real finding, and the reason they are being audited at all. Reading them as
+// "we never looked" made the grounding guard refuse to score exactly the firms
+// the audit exists to help, because they are the ones that fail the most
+// checks honestly.
+//
+// `val` of null or undefined means the source said nothing: that is unk. Any
+// other value is an answer, including false, and an answer is a measurement.
+const decide = (id, val, whyUnknown) => {
+  if (val == null) { unk(id, whyUnknown || 'not measured'); return false; }
+  const e = document.getElementById(id);
+  if (e) e.checked = !!val;
+  UNK.delete(id);
+  measured(id);
+  recalc();
+  return !!val;
+};
 // Used by the AI passes instead of ck(). Refuses anything already measured and
 // says so in the console, rather than silently disagreeing with the panel
 // above it.
@@ -1006,6 +1044,7 @@ function ckAI(id, what) {
     return false;
   }
   ck(id);
+  judged(id);
   return true;
 }
 // Read the label off the checkbox itself rather than keeping a second list
@@ -1716,7 +1755,10 @@ async function runSiteCheck(url) {
     // found. A fetch error, or every location refusing this server, leaves it
     // genuinely unmeasured — and unmeasured is not the same as absent.
     if (!d.sitemapError && !d.sitemapBlocked) measured('c-sm');
-    if (d.https)   ck('c-https');
+    // Plain http is an ANSWER. This was `if (d.https) ck(...)` with no else, so
+    // a site we read perfectly well and found unencrypted recorded nothing at
+    // all -- and "not on HTTPS" is about the most actionable finding there is.
+    decide('c-https', 'https' in d ? d.https : null, 'could not reach the site');
     // Indexability now comes from reading the page's own robots directives.
     // PageSpeed's is-crawlable audit still runs and can also tick this box,
     // but it is no longer the only thing that can, and a null from it no
@@ -1781,8 +1823,10 @@ async function runDomain(domain) {
     // source is what stops a provider change reading as a ranking change.
     AD.daSource = d.blSource || d.source || null;
     AD.backlinks = backlinks; AD.refDomains = refDomains;
-    if (da != null && da > 5) ck('c-da5');
-    else if (da == null) unk('c-da5', 'no authority score returned');
+    // An authority score of 2 is a number somebody measured. It used to fall
+    // between ck and unk and record nothing, so a new firm's real standing read
+    // as "we never looked" -- and a run full of those was refused a score.
+    decide('c-da5', da == null ? null : da > 5, 'no authority score returned');
     // d.source = 'semrush' when SEMrush fed the numbers; d.note carries the
     // provider status when no usable data came back.
     const src = d.source === 'semrush' ? 'via SEMrush' : 'via DataForSEO';
@@ -1962,6 +2006,10 @@ async function runSchema(url) {
     // organisation type without an address is rare enough not to need its own row.
     if (d.hasBusinessType && d.hasAddress) ck('c-sch');
     else if (d.found === false && d.note) unk('c-sch', d.note);
+    // The markup was read. Structured data declared, or declared incompletely,
+    // or absent -- all three are answers, and "no structured data found" is the
+    // single most common real finding on a new firm's site.
+    else if (d.found != null) measured('c-sch');
 
     if (!d.found) {
       body.innerHTML = '<div style="font-size:13px;color:#dc2626;font-weight:600">No structured data found on the homepage.</div>' +
@@ -2151,7 +2199,13 @@ async function runLighthouse(url) {
     AD.psiStrategy = d.strategy;
 
     // Auto-check boxes
+    //
+    // These three are SECOND sources -- runSiteCheck read the page directly and
+    // is primary -- so they tick on true and record that they looked, but they
+    // never un-tick. decide() would overwrite a direct read with PageSpeed's
+    // view of the same page, and the direct read is the better evidence.
     if (d.isHttps)     ck('c-https');
+    if (d.isHttps != null) measured('c-https');
     // null means PageSpeed did not return the viewport audit. The direct read
     // in runSiteCheck is the primary source, so only record the gap if that
     // did not resolve it either -- an unticked box with no reason was how a
@@ -2159,19 +2213,22 @@ async function runLighthouse(url) {
     if (d.isMobile)         ck('c-mob');
     else if (d.isMobile == null && !document.getElementById('c-mob')?.checked)
       unk('c-mob', 'PageSpeed returned no viewport audit');
+    if (d.isMobile != null) measured('c-mob');
     if (d.isIndexable) ck('c-idx');
+    if (d.isIndexable != null) measured('c-idx');
     if (d.hasMeta)     ck('c-meta');
     if (d.hasMeta != null) measured('c-meta');
     // sitemap is driven by the real /sitemap.xml fetch in runSiteCheck, not by
     // robots.txt presence — so don't set c-sm here.
-    if (!MANUAL_TECH.has('c-spd')) {
-      if (d.speedPass)   ck('c-spd');
-      else if (d.speedPass == null) unk('c-spd', 'PageSpeed returned no LCP');
-    }
-    if (!MANUAL_TECH.has('c-szp')) {
-      if (d.sizePass)    ck('c-szp');
-      else if (d.sizePass == null)  unk('c-szp', 'PageSpeed returned no page weight');
-    }
+    // Nothing else measures these, so a fail is a decision rather than a
+    // second opinion: a slow page is a measurement, and it used to record
+    // nothing at all.
+    if (!MANUAL_TECH.has('c-spd'))
+      decide('c-spd', d.speedPass == null ? null : !!d.speedPass,
+             'PageSpeed returned no LCP');
+    if (!MANUAL_TECH.has('c-szp'))
+      decide('c-szp', d.sizePass == null ? null : !!d.sizePass,
+             'PageSpeed returned no page weight');
     if (d.imagesOk)    ck('c-img');
     // Never measured is not a pass, and it was ticking this box for free.
     else if (d.imagesOk == null)
@@ -2314,15 +2371,23 @@ async function runGBP(name, url, city) {
       // A listing exists and its website matches this firm. Separate from
       // whether they have claimed it — an unclaimed listing is a real and
       // reportable state, and without this box it looked like no listing.
-      ck('c-gbp-f');
-      if (d.claimed)          ck('c-gbp-v');
-      else if (d.claimed == null) unk('c-gbp-v', 'DataForSEO did not report claim status');
-      if (d.hasDescription)   ck('c-gbp-d');
-      else if (d.hasDescription == null) unk('c-gbp-d', 'DataForSEO did not return a description field');
-      if (d.hasPhotos)        ck('c-gbp-p');
-      else if (d.hasPhotos == null) unk('c-gbp-p', 'no photo fields in the listing data');
-      if (d.hasLogo)          ck('c-gbp-l');
-      if (d.reviewCount > 0)  ck('c-gbp-r');
+      ck('c-gbp-f'); measured('c-gbp-f');
+      // Inside this branch the listing was found AND matched to this firm's
+      // own domain, so every field in it has been looked at. Unclaimed, no
+      // description, no photos, no reviews -- those are the findings, and on a
+      // firm that has just set up a listing they are most of them. They used
+      // to record nothing, which is how six real observations about a new firm
+      // became six reasons to refuse the whole audit a score.
+      decide('c-gbp-v', d.claimed         == null ? null : !!d.claimed,
+             'DataForSEO did not report claim status');
+      decide('c-gbp-d', d.hasDescription  == null ? null : !!d.hasDescription,
+             'DataForSEO did not return a description field');
+      decide('c-gbp-p', d.hasPhotos       == null ? null : !!d.hasPhotos,
+             'no photo fields in the listing data');
+      decide('c-gbp-l', d.hasLogo         == null ? null : !!d.hasLogo,
+             'no logo field in the listing data');
+      decide('c-gbp-r', d.reviewCount     == null ? null : d.reviewCount > 0,
+             'no review count in the listing data');
     }
 
     AD.gbpRating   = d.rating;
@@ -2798,6 +2863,11 @@ Write a brief summary of your findings, then end with this EXACT block:
       if (j.meta)      ckAI('c-meta');
       if (j.reviewCTA) ck('c-rcta');
       if (j.awards)    ck('c-awd');
+      // The pass returned a verdict on both, and "no awards shown" is a
+      // verdict. Recorded as judged, not measured: a later direct reading --
+      // the browser extension finding a review link on the page -- still wins.
+      if ('reviewCTA' in j) judged('c-rcta');
+      if ('awards'    in j) judged('c-awd');
     }
     reviewVerdict('ai-vis', result, j,
       ['sitemap','meta','reviewCTA','awards'].filter(k => j && j[k]).length);
@@ -3085,12 +3155,17 @@ async function runAIVisibilityScore(name, url, city) {
     if (result.namedScore > 0 || result.citationShare > 0 || result.visibilityScore > 0) ck('c-cgpt');
     else if (!result.namedRuns && !result.citationRuns && !result.visibilityRuns)
       unk('c-cgpt', 'no discovery prompts completed');
+    // The prompts ran and the firm did not come up. That is the measurement --
+    // and for a new firm it is the expected one, worth saying out loud rather
+    // than recording as a silence.
+    else measured('c-cgpt');
 
     // The by-name check is answered with search on now: the model
     // was asked about them and cited their own site rather than only
     // third-party listings.
     if (result.brandedCitation > 0) ck('c-aicite');
     else if (!result.brandedCiteRuns) unk('c-aicite', 'no by-name prompts completed');
+    else measured('c-aicite');
 
     // Show what the model said it knew. A percentage on its own is not
     // checkable; the facts behind it are.
@@ -3264,18 +3339,38 @@ function applySocialJSON(socJ) {
   // These are single shared checkboxes, not one per platform, so any verified
   // profile can satisfy them — which is how the SocialFetch path has always
   // behaved. Reading them from Facebook alone was the inconsistency.
-  if (found.some(p => p.logo))          ck('c-lgp');
-  if (found.some(p => p.brandedHeader)) ck('c-bhd');
-  if (found.some(p => p.contactInfo))   ck('c-cni');
-  if (found.some(p => p.summary))       ck('c-sum');
-  if (found.some(p => p.customURL))     ck('c-url');
-  if (found.some(p => p.tagging))       ck('c-tag');
+  // A profile we read and found has no logo is a FINDING -- "put your logo on
+  // your LinkedIn page" is advice somebody can act on this afternoon. These
+  // used to tick on true and record nothing on false, so a firm whose profiles
+  // were all read and all bare looked identical to a firm whose profiles could
+  // not be reached, and the run was called ungrounded for saying so.
+  //
+  // Measured only where a profile actually REPORTED the field: a platform that
+  // never returns `logo` has not told us there is no logo, and inventing a
+  // measurement is the mirror of the bug being fixed.
+  const sawField = k => found.some(p => p[k] !== undefined);
+  const decideSocial = (id, k, what) => decide(id,
+    found.length && sawField(k) ? found.some(p => p[k]) : null,
+    found.length ? 'no profile reported ' + what : 'no social profiles could be read');
+
+  decideSocial('c-lgp', 'logo',          'a profile picture');
+  decideSocial('c-bhd', 'brandedHeader', 'a header image');
+  decideSocial('c-cni', 'contactInfo',   'contact details');
+  decideSocial('c-sum', 'summary',       'an about or summary section');
+  decideSocial('c-url', 'customURL',     'a custom URL');
+  decideSocial('c-tag', 'tagging',       'tagging');
 
   // Cadence stays Facebook + LinkedIn on purpose: Instagram and YouTube
   // rhythms are not comparable to the 2-3x/week bar this check describes.
-  if (found.some(p => (p.key === 'facebook' || p.key === 'linkedin') && p.postingFrequently)) ck('c-pst');
+  const cadence = found.filter(p => p.key === 'facebook' || p.key === 'linkedin');
+  decide('c-pst',
+    cadence.some(p => p.postingFrequently !== undefined)
+      ? cadence.some(p => p.postingFrequently) : null,
+    cadence.length ? 'neither profile reported a posting cadence'
+                   : 'no Facebook or LinkedIn profile could be read');
 
-  if (socJ.socialLinksOnSite) ck('c-sln');
+  decide('c-sln', socJ.socialLinksOnSite === undefined ? null : !!socJ.socialLinksOnSite,
+         'the site could not be read for profile links');
 
   // Last post dates were requested for every platform and then discarded.
   const dates = found.filter(p => p.lastPost).map(p => p.key + ': ' + p.lastPost);
@@ -3332,11 +3427,25 @@ function sfProfileChecks(data) {
   const url     = p.profileUrl || p.companyUrl || '';
   const summary = (data.business && data.business.intro) || p.description || p.slogan;
 
+  // These are SHARED boxes across every platform, so this only ever ticks --
+  // a second profile without a logo must not un-tick the first one that had
+  // one. decide() would do exactly that, so it is deliberately not used here.
+  //
+  // What is added is the record that we looked. This function is only ever
+  // called with a profile that was successfully fetched, so an absent avatar
+  // or description is that profile not having one, which is the finding. The
+  // limit of that claim: a platform that simply never returns a field would be
+  // recorded as a measured absence, so only fields these profiles reliably
+  // carry are listed here.
+  const gotProfile = Object.keys(p).length > 0;
   if (logo)   ck('c-lgp');                              // logo as profile pic
   if (cover)  ck('c-bhd');                              // branded header
   if (c.email || c.phone || c.address) ck('c-cni');     // contact info complete
   if (summary && String(summary).trim()) ck('c-sum');  // profile summary written
   if (url && !/profile\.php|\/people\/|[?&]id=\d/i.test(url)) ck('c-url'); // custom branded URL
+  if (gotProfile) measured('c-lgp', 'c-bhd', 'c-cni', 'c-sum');
+  // Only when there is a URL to judge. No URL is not a plain URL.
+  if (url) measured('c-url');
 
   // Recent posts — LinkedIn returns these; Facebook does not. Drive posting
   // cadence + tagging from real post data when available.
@@ -3347,9 +3456,13 @@ function sfProfileChecks(data) {
       const weeks   = (times[0] - times[times.length - 1]) / 604800000; // ms per week
       const perWeek = weeks > 0 ? (times.length - 1) / weeks : times.length;
       if (perWeek >= 2) ck('c-pst');  // posting ~2-3x/week or more
+      // Dated posts in hand: the cadence is known, fast or slow.
+      measured('c-pst');
     }
     // tagging other pages: an @mention of another account in any recent post
     if (posts.some(x => /(^|\s)@[A-Za-z0-9._'-]{2,}/.test(x.text || ''))) ck('c-tag');
+    // Posts were read, so whether they tag anyone is answered either way.
+    measured('c-tag');
   }
 }
 
@@ -4431,6 +4544,7 @@ function auditState() {
     checks: CHECKS.map(c => [c.id, !!(document.getElementById(c.id) || {}).checked]),
     unk:    [...UNK.entries()],
     direct: [...DIRECT],
+    judged: [...JUDGED],
     fields: STATE_FIELDS.map(id => [id, (document.getElementById(id) || {}).value || '']),
     out:    captureOutput()
   };
@@ -4441,6 +4555,7 @@ function applyState(st) {
   AD = st.AD || {};
   UNK.clear();   (st.unk    || []).forEach(([k, v]) => UNK.set(k, v));
   DIRECT.clear();(st.direct || []).forEach(id => DIRECT.add(id));
+  JUDGED.clear();(st.judged || []).forEach(id => JUDGED.add(id));
   (st.fields || []).forEach(([id, v]) => { const e = document.getElementById(id); if (e) e.value = v; });
   CHECKS.forEach(c => { const e = document.getElementById(c.id); if (e) e.checked = false; });
   (st.checks || []).forEach(([id, on]) => { const e = document.getElementById(id); if (e) e.checked = !!on; });
