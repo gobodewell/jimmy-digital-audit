@@ -954,7 +954,7 @@ input.masked{-webkit-text-security:disc;text-security:disc}
 // different vintages. Both carry the same stamp and the app compares them,
 // because "did you upload both files?" is not something anyone should have
 // to remember -- and a half-upload looks exactly like a fix that did not work.
-const BUILD = '2026-10-07.2';
+const BUILD = '2026-10-07.3';
 const DEFAULT_PROXY = 'https://jimmy-digital-audit.onrender.com';
 let AD = {}; // audit data store
 
@@ -2922,7 +2922,29 @@ Definitions:
 - nav: is navigation simple and clean (7 or fewer items)?
 - linkedContent: does homepage content link to other pages?
 - photos: are there high quality professional photos?
-- headlines: are headlines benefit-based (not just "About Us")?
+- headlines: a headline is benefit-based ONLY if it names an outcome the
+  READER gets — what changes for them, what they will know, avoid or be able to
+  do. The bar is not "is it more interesting than About Us".
+  These do NOT count, however well written:
+    * service or topic labels — "Advanced Planning Strategies", "Wealth
+      Management", "Tax-Efficient Investing". Naming what you sell is not
+      naming what they get.
+    * calls to action — "Schedule A Consultation", "Get Started", "Contact Us".
+      That is a CTA; it is scored separately under ctas.
+    * audience labels — "Entrepreneurs & Executives", "High-Net-Worth
+      Individuals", "Physicians". Naming who it is for is not naming the
+      benefit.
+    * firm-centred lines — "My Primary Purpose", "Our Philosophy", "Why We're
+      Different". The subject is the firm, not the reader.
+    * section or page names of any kind — "Our Process", "Services", "Team".
+  These DO count: "Retire five years earlier", "Know exactly when you can stop
+  working", "Keep more of what you earn", "Stop guessing whether you're on
+  track". Each promises the reader a result.
+  Answer true only if the MAIN headlines — the hero and the primary section
+  headings — are mostly of that second kind. A single good line under a page of
+  labels is false. If the page leads with a service label or a CTA, answer
+  false, and in the summary name the actual headline you read and say which
+  kind it is.
 - ctas: are CTAs descriptive (not just "Click Here" or "Learn More")?
 - resources: is there a blog or resources section?
 - faqs: are there FAQs WITH answers?
@@ -3760,7 +3782,12 @@ const CHECKS = [
   { id:'c-hdl',   cat:'w', grp:'Visual Review', pts:2, type:'modelled', aeo:0, effort:'low',
     q:'Are you using benefit-based headlines that convey what a person can gain or learn?',
     label:'Benefit-based headlines',
-    action:'Rewrite headlines to convey specific gains: e.g. "Retire 5 Years Earlier" vs "Our Services".' },
+    action:'Rewrite the main headlines to name what the reader gets, not what you ' +
+           'offer: "Retire five years earlier" rather than "Advanced Planning ' +
+           'Strategies". Three things are commonly mistaken for benefit headlines ' +
+           'and are not — a service label ("Wealth Management"), an audience label ' +
+           '("Entrepreneurs & Executives") and a button ("Schedule a Consultation"). ' +
+           'Each describes you, or the next click, rather than the result.' },
 
   // ══ Social Media · 100 ═══════════════════════════════════════════════════
   { id:'c-hli', cat:'s', grp:'Channels', pts:20, type:'measured', aeo:1, effort:'medium',
