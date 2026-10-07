@@ -954,7 +954,7 @@ input.masked{-webkit-text-security:disc;text-security:disc}
 // different vintages. Both carry the same stamp and the app compares them,
 // because "did you upload both files?" is not something anyone should have
 // to remember -- and a half-upload looks exactly like a fix that did not work.
-const BUILD = '2026-10-06.7';
+const BUILD = '2026-10-07.1';
 const DEFAULT_PROXY = 'https://jimmy-digital-audit.onrender.com';
 let AD = {}; // audit data store
 
@@ -4831,9 +4831,14 @@ async function queueLoad() {
             // know which ones need the most filling in before opening them.
             (j.measured != null ? '  \u00b7  ' + j.measured + ' measured' : '') +
             (j.external_ref ? '  \u00b7  from Airtable' : '') +
+            (j.ungrounded ? '  \u00b7  nothing scored yet' : '') +
           '</div>' +
-          (j.error ? '<div style="font-size:11px;color:var(--red);margin-top:4px;line-height:1.45">' +
-            escHtml(j.error) + '</div>' : '') +
+          // Red is for a failure. A run that was filed unscored is not one:
+          // it finished, it kept what it grounded, and it is telling the
+          // reviewer what is left to do. Amber says "your turn", not "broken".
+          (j.error ? '<div style="font-size:11px;color:' +
+            (j.status === 'needs_review' ? '#b45309' : 'var(--red)') +
+            ';margin-top:4px;line-height:1.45">' + escHtml(j.error) + '</div>' : '') +
           // Whether the approved result actually reached Airtable. A push can
           // fail while the approval stands -- the audit is still approved, the
           // row just does not know yet -- so this has to be visible or the

@@ -103,15 +103,50 @@ function makeQueue(deps) {
       // A run that reached almost nothing is a failed run, not a bad score.
       // Writing 61 "Critical" into a firm's record because their site was
       // unreachable is the one outcome worth refusing outright.
+      // ── A run that could not support a score ──────────────────────────────
+      // Writing 61 "Critical" into a firm's record because the run reached
+      // nothing is still the one outcome worth refusing outright. So no score
+      // is recorded: the audit is filed with its score columns empty.
+      //
+      // But it is NOT thrown away, which is what used to happen. The checks
+      // the run did ground are real work, and discarding them made a person
+      // start from scratch -- on, in practice, the firms that most need the
+      // audit. A new firm legitimately fails most of these checks, and
+      // "you have no backlinks yet" is the finding, not a failure to look.
+      //
+      // So it is parked for review like any other run. The difference is that
+      // it arrives with nothing scored and says why, and the score is worked
+      // out when a person completes it and saves.
       if (out.ungrounded) {
-        await finish(job.id, {
-          status: 'failed', measured: out.measured, ungrounded: true,
-          error: 'the audit reached too little to score: ' +
-                 out.silentlyFailed.length + ' checks would have counted ' +
-                 'against this firm with nothing checked, against ' +
-                 out.grounded + ' resting on something.' });
-        await mirror(job, 'failed');
-        return { id: job.id, status: 'failed', reason: 'ungrounded' };
+        const why = 'not scored automatically: only ' + out.grounded + ' of 40 ' +
+          'checks rested on something the run could confirm, and ' +
+          out.silentlyFailed.length + ' would have counted against this firm ' +
+          'with nothing actually checked. Complete it and the score follows.';
+        let saved = null;
+        try {
+          saved = await saveAudit({
+            clientName: job.client_name, clientUrl: job.client_url,
+            clientCity: job.client_city,
+            source: job.source, template: job.template,
+            state: out.state, report: out.report,
+            // Explicitly nothing. saveAudit writes null for each of these, so
+            // no number exists to be read, pushed or believed.
+            scores: null, kpisPassed: null, kpisTotal: null,
+            note: why
+          });
+        } catch (e) {
+          // Filing failed too -- now there really is nothing to review.
+          await finish(job.id, { status: 'failed', measured: out.measured,
+            ungrounded: true, error: why + ' (and it could not be filed: ' +
+            e.message.slice(0, 200) + ')' });
+          await mirror(job, 'failed');
+          return { id: job.id, status: 'failed', reason: 'ungrounded' };
+        }
+        await finish(job.id, { status: 'needs_review', audit_id: saved && saved.id,
+          measured: out.measured, ungrounded: true, error: why });
+        await mirror(job, 'needs_review');
+        return { id: job.id, status: 'needs_review', ungrounded: true,
+                 auditId: saved && saved.id, measured: out.measured };
       }
 
       // Filed with no PDF: the document is the reviewer's to approve, and a

@@ -6,7 +6,7 @@ const app  = express();
 // Bumped whenever a build is handed over. /health reports it so the app can
 // tell the user their page and their proxy are different vintages -- the
 // failure mode is a fix that silently is not there.
-const BUILD = '2026-10-06.7';
+const BUILD = '2026-10-07.1';
 // Building the report without a browser. See render.js: the scoring engine
 // stays in the page, this turns the page's report DATA into the same pages.
 const { renderReport, reportName, templateNames, templateInfo, checkReport, rendererStatus } = require('./render.js');
@@ -4326,7 +4326,11 @@ function queue() {
           kpis_passed: a.kpisPassed ?? null, kpis_total: a.kpisTotal ?? null,
           state: a.state, report: a.report || null,
           source: a.source || 'airtable', template: a.template || 'growthline',
-          build: BUILD, prepared_by: '', note: 'run automatically — not yet reviewed'
+          build: BUILD, prepared_by: '',
+          // The caller's note when it has one. An ungrounded run says why it
+          // was not scored, and that belongs on the record rather than only in
+          // the job row somebody has to go looking for.
+          note: a.note || 'run automatically — not yet reviewed'
         })
       });
       return (rows || [])[0] || null;
@@ -4631,7 +4635,7 @@ app.get('/queue', async (req, res) => {
                 'started_at,finished_at,audit_id,error,measured,assigned_to,source,' +
                 // Where it came from and whether the result got back there. An
                 // approved audit whose push failed looks finished otherwise.
-                'external_ref,pushed_at,push_error';
+                'external_ref,pushed_at,push_error,ungrounded';
     const jobs = await sbJson('/rest/v1/audit_jobs?select=' + sel +
       '&order=created_at.desc&limit=' + Math.min(+req.query.limit || 100, 200));
     const by = st => (jobs || []).filter(j => j.status === st).length;
