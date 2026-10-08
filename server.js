@@ -6,7 +6,7 @@ const app  = express();
 // Bumped whenever a build is handed over. /health reports it so the app can
 // tell the user their page and their proxy are different vintages -- the
 // failure mode is a fix that silently is not there.
-const BUILD = '2026-10-07.3';
+const BUILD = '2026-10-08.1';
 // Building the report without a browser. See render.js: the scoring engine
 // stays in the page, this turns the page's report DATA into the same pages.
 const { renderReport, reportName, templateNames, templateInfo, checkReport, rendererStatus } = require('./render.js');
@@ -4418,7 +4418,8 @@ async function pollAirtable(opts) {
   const byId = new Map();
   take.forEach(t => byId.set(t.recordId, { kind: 'take', job: t }));
   rejected.forEach(r => byId.set(r.recordId, { kind: 'reject', why: r.why,
-                                              company: r.company, stale: r.stale }));
+                                              company: r.company, stale: r.stale,
+                                              fixable: r.fixable }));
 
   const queued = [], refused = [], problems = [];
   let mark = since, stopped = null;
@@ -4437,10 +4438,15 @@ async function pollAirtable(opts) {
     const d = byId.get(rec.id);
     if (!d) continue;
     if (d.kind === 'reject') {
-      refused.push({ recordId: rec.id, company: d.company, why: d.why });
-      // A refusal is a decision the mark may move past -- except a stale row,
-      // which is the fence itself and must never drag the mark backwards.
-      if (!d.stale) advance(rec.createdTime);
+      refused.push({ recordId: rec.id, company: d.company, why: d.why,
+                     fixable: !!d.fixable });
+      // A refusal is a decision the mark may move past -- except two. A stale
+      // row is the fence itself and must never drag the mark backwards. A
+      // fixable one (no website, an unusable URL) is waiting on a person, and
+      // stepping over it would mean the row is never looked at again --
+      // including after they paste the URL in. Setting AUDIT STATUS to
+      // anything at all drops it out of the query if it is never coming.
+      if (!d.stale && !d.fixable) advance(rec.createdTime);
       continue;
     }
     const j = d.job;

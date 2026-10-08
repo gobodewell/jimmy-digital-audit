@@ -213,10 +213,16 @@ function makeAirtable(deps) {
   // the formula is a pre-filter to keep the page small, and the JS check is
   // the one that is actually trusted.
   function formula(sinceIso) {
+    // No {WEBSITE}!='' here, on purpose.
+    //
+    // It was the obvious condition and it made the one thing somebody needs to
+    // be told invisible: Airtable never returned the row, so it could not be
+    // refused with a reason, and the pass reported "candidates: 0" about a row
+    // sitting right there waiting for a URL. A request with no website is not
+    // nothing to say -- it is the whole message.
     const parts = [
       "{Catelogue}='Audit'",
       "{AUDIT STATUS}=''",
-      "{WEBSITE}!=''",
       "IS_AFTER(CREATED_TIME(),'" + sinceIso + "')"
     ];
     return 'AND(' + parts.join(',') + ')';
@@ -265,7 +271,13 @@ function makeAirtable(deps) {
 
       const site = normaliseSite(f[F.website]);
       if (site.reject) {
-        rejected.push(Object.assign({ why: site.reject }, ref));
+        // `fixable` keeps the row in view. A missing or unusable URL is waiting
+        // on a person, not a verdict, and advancing the watermark past it would
+        // mean the row is never looked at again -- including after somebody
+        // pastes the URL in. It keeps being reported until it is fixed, or
+        // until AUDIT STATUS is set to anything at all, which drops it out of
+        // the query. A dead STAGE above is a decision and does advance.
+        rejected.push(Object.assign({ fixable: true, why: site.reject }, ref));
         continue;
       }
 

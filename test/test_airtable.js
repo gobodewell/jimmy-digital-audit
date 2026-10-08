@@ -247,11 +247,40 @@ global.fetch = async (u, o) => {
         (await A.watermark()) === '2026-10-06T12:00:00.000Z', await A.watermark());
 
   // ── I. the formula ──────────────────────────────────────────────────────
-  console.log('\nI. the query sent to Airtable');
+  console.log('\nJ. a row with no website is reported, never hidden');
+{
+  // The obvious condition, {WEBSITE}!='', made the one thing somebody needs to
+  // be told invisible: Airtable never returned the row, so it could not be
+  // refused with a reason, and the pass said "candidates: 0" about a request
+  // sitting right there waiting for a URL.
+  const t2 = A.triage([row('recNoSite', '2026-10-06T13:00:00.000Z',
+    { [F.website]: '' })], since);
+  check('it comes back refused rather than not coming back at all',
+        t2.take.length === 0 && t2.rejected.length === 1,
+        JSON.stringify(t2.rejected));
+  check('with a reason a person can act on',
+        /no website on the record/.test(t2.rejected[0].why), t2.rejected[0].why);
+  check('and marked fixable, so the watermark will not step over it',
+        t2.rejected[0].fixable === true, JSON.stringify(t2.rejected[0]));
+
+  const t3 = A.triage([row('recLinkedIn', '2026-10-06T13:00:00.000Z',
+    { [F.website]: 'https://www.linkedin.com/in/someone/' })], since);
+  check('an unusable URL is fixable too — somebody can paste the right one',
+        t3.rejected[0].fixable === true, JSON.stringify(t3.rejected[0]));
+
+  const t4 = A.triage([row('recDead', '2026-10-06T13:00:00.000Z',
+    { [F.stage]: { id: 's', name: 'Canceled Project' } })], since);
+  check('but a dead STAGE is a decision, not something to keep raising',
+        !t4.rejected[0].fixable, JSON.stringify(t4.rejected[0]));
+}
+
+console.log('\nI. the query sent to Airtable');
   const fx = A.formula(since);
   check('it asks for Catelogue = Audit', fx.includes("{Catelogue}='Audit'"), fx);
   check('it asks for an empty AUDIT STATUS', fx.includes("{AUDIT STATUS}=''"));
-  check('it requires a website', fx.includes("{WEBSITE}!=''"));
+  check('it does NOT filter on the website — a row without one has to come ' +
+        'back so it can be refused out loud',
+        !fx.includes("{WEBSITE}"), fx);
   check('it fences on CREATED_TIME', fx.includes('IS_AFTER(CREATED_TIME()'));
 
   console.log();
