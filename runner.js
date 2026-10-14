@@ -174,6 +174,17 @@ async function runAudit(opts) {
     // legitimate and returned 61 "Critical" with a 200. This counts instead.
     out.ungrounded = out.silentlyFailed.length > out.grounded;
     return out;
+  } catch (e) {
+    // Name it. "Target page, context or browser has been closed" is what a
+    // Chromium that DIED looks like from outside, and it tells whoever reads
+    // the queue nothing about what to do. A browser that died is worth
+    // retrying; an audit that failed is a different decision.
+    if (/Target (page|closed)|browser has been closed|Target closed/i.test(e.message))
+      throw new Error('the browser died part-way through the audit (' +
+        e.message.split('\n')[0] + '). That is usually memory — try again, ' +
+        'and if it keeps happening set QUEUE_CONCURRENCY to 1 so only one ' +
+        'browser runs at a time.');
+    throw e;
   } finally {
     if (browser) await browser.close().catch(() => {});
   }

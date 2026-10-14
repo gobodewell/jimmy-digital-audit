@@ -167,6 +167,65 @@ setTimeout(async () => {
         !!sent && !!sent.body.fields[F.reportUrl],
         JSON.stringify(sent && sent.body.fields[F.reportUrl]));
 
+  // ── F. the Export page's own push ────────────────────────────────────────
+  console.log('\nF. pushing from Export, with no queued job behind it');
+  // It used to go through the /airtable proxy with a Base ID, a table name and
+  // a mapping for every field, all typed into Settings -- a second description
+  // of a table the server already knows by field ID. Unfilled, the button
+  // pushed nothing. It now takes the queue's path.
+  calls = [];
+  sbHandler = (p2, m) => {
+    if (p2.includes('/rest/v1/audits')) return json([{ id: 'audit-E',
+      score_overall: 91, score_v: 85, score_w: 94, score_s: 88,
+      pdf_path: 'firm/report.pdf' }]);
+    if (p2.includes('/storage/v1/object/sign'))
+      return json({ signedURL: '/object/sign/audit-reports/firm/report.pdf?token=t' });
+    return json([]);
+  };
+  airtablePatch = () => json({ id: 'recE' });
+
+  let r2 = await post('/airtable/push', { recordId: 'recE', auditId: 'audit-E' });
+  check('a filed audit pushes by record id alone', r2.status === 200 && r2.json.ok,
+        r2.status + ' ' + r2.text.slice(0, 120));
+  let f2 = calls.filter(c => c.who === 'airtable').pop().body.fields;
+  check('the four scores come from the filed audit, not the page',
+        f2[F.scoreAll] === '91' && f2[F.scoreVis] === '85' &&
+        f2[F.scoreWeb] === '94' && f2[F.scoreSoc] === '88',
+        JSON.stringify(f2));
+  check('with the report link, because that audit has a stored PDF',
+        !!f2[F.reportUrl]);
+  check('and the same AUDIT STATUS the queue writes',
+        f2[F.status] === 'Approved', f2[F.status]);
+
+  console.log('\nG. pushing before the audit has been filed');
+  calls = [];
+  sbHandler = () => json([]);
+  r2 = await post('/airtable/push',
+    { recordId: 'recE', scores: { overall: 77, v: 70, w: 80, s: 82 } });
+  check('the page\'s own scores are accepted', r2.status === 200, r2.text.slice(0, 120));
+  f2 = calls.filter(c => c.who === 'airtable').pop().body.fields;
+  check('and written', f2[F.scoreAll] === '77' && f2[F.scoreSoc] === '82',
+        JSON.stringify(f2));
+  check('no PDF exists, so the report field is left alone and it says so',
+        !(F.reportUrl in f2) && /no saved PDF/.test(r2.json.urlNote || ''),
+        r2.json.urlNote);
+
+  console.log('\nH. nothing to push');
+  r2 = await post('/airtable/push', { recordId: 'recE', scores: {} });
+  check('an empty audit is refused rather than writing blanks',
+        r2.status === 502 && /no scores to push/.test(r2.text), r2.text.slice(0, 120));
+  r2 = await post('/airtable/push', {});
+  check('and so is a push naming neither a job nor a record',
+        r2.status === 400, r2.status + ' ' + r2.text.slice(0, 80));
+
+  console.log('\nI. the page asks for the right thing');
+  check('the Export button calls the push route, not the old proxy',
+        /pushAirtable[\s\S]{0,1400}\/airtable\/push/.test(html));
+  check('it no longer needs a Base ID and table typed into Settings',
+        !/pushAirtable[\s\S]{0,600}cfg_at-base/.test(html));
+  check('it checks the record id looks like one before sending',
+        /\^rec\[A-Za-z0-9\]\{14\}\$/.test(html));
+
   console.log();
   console.log(failures ? failures + ' check(s) failed' : 'all checks passed');
   process.exit(failures ? 1 : 0);

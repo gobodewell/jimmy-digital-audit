@@ -954,7 +954,7 @@ input.masked{-webkit-text-security:disc;text-security:disc}
 // different vintages. Both carry the same stamp and the app compares them,
 // because "did you upload both files?" is not something anyone should have
 // to remember -- and a half-upload looks exactly like a fix that did not work.
-const BUILD = '2026-10-08.1';
+const BUILD = '2026-10-14.1';
 const DEFAULT_PROXY = 'https://jimmy-digital-audit.onrender.com';
 let AD = {}; // audit data store
 
@@ -4363,6 +4363,10 @@ async function downloadReportPDF() {
       say('var(--text3)', 'Downloaded ' + name + ' \u2014 filing to history\u2026');
       const b64 = await new Promise(r => pdf.getBase64(x => r(x)));
       const f = await fileAudit(b64, '', d);
+      // Held so a push from the Export page can name it: the audit row is
+      // what carries the stored PDF, and therefore the only way the report
+      // link reaches Airtable.
+      AD.lastAuditId = f.id;
       say('var(--green)', 'Downloaded ' + name + ' \u00b7 filed to history');
       console.log('Filed audit', f.id, 'under', f.domain);
     } catch (e) {
@@ -4441,50 +4445,47 @@ function copyOut() {
 // ── Airtable push ─────────────────────────────────────────────────────────────
 async function pushAirtable() {
   buildOut();
-  const base = lg('cfg_at-base'), tbl = lg('cfg_at-tbl');
-  if (!base||!tbl) { toast('Set Airtable Base ID + table in Settings first'); showPage('settings'); return; }
-
-  const s     = AD.scores||{};
-  const notes = [getVal('n-vis'), getVal('n-web'), getVal('n-soc')].filter(Boolean).join(' | ')||'';
-  const aiSum = [AD.aiVisibility||'', AD.aiWebsite||'', AD.aiSocial||'']
-                .join('\n\n---\n\n').replace(/<[^>]+>/g,'');
-
-  const fields = {};
-  if(fv('name')) fields[fv('name')] = AD.clientName||'';
-  if(fv('url'))  fields[fv('url')]  = AD.clientURL||'';
-  if(fv('vis'))  fields[fv('vis')]  = s.v||'';
-  if(fv('web'))  fields[fv('web')]  = s.w||'';
-  if(fv('soc'))  fields[fv('soc')]  = s.s||'';
-  if(fv('da') && AD.da)    fields[fv('da')]  = AD.da;
-  if(fv('spd') && AD.speed) fields[fv('spd')] = AD.speed;
-  if(fv('nts')) fields[fv('nts')] = notes;
-  if(fv('ai'))  fields[fv('ai')]  = aiSum.slice(0,2000);
-  if(fv('dte')) fields[fv('dte')] = new Date().toISOString().split('T')[0];
-
-  const recId = getVal('atRecordId');
-
+  const msg = document.getElementById('at-msg');
   const btn = document.getElementById('pushBtn');
-  btn.disabled = true; btn.textContent = 'Pushing...';
+  const say = (c, t) => { msg.style.color = c; msg.textContent = t; };
 
+  // This used to go through the /airtable proxy with a Base ID, a table name
+  // and a mapping for every field, all typed into Settings. That is a second
+  // description of a table the server already knows by field ID, and an
+  // unfilled one meant the button quietly pushed nothing. It now takes the
+  // same path the queue takes on approval: same fields, same score format,
+  // same rule about the report link.
+  const recId = getVal('atRecordId');
+  if (!/^rec[A-Za-z0-9]{14}$/.test(recId)) {
+    say('#b45309', 'Paste the Airtable record ID on the Setup tab first — it ' +
+        'looks like rec0C1YOw8PCBozgZ, from the record\'s own URL.');
+    return;
+  }
+  const sc = AD.scores || {};
+  if (sc.overall == null) { say('#b45309', 'Run the audit first — there are no scores to push.'); return; }
+
+  const was = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Pushing\u2026';
+  say('var(--text3)', 'Writing to Airtable\u2026');
   try {
-    const r = await pf('/airtable', {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ base, table: tbl, recordId: recId || null, fields })
-    });
+    const r = await pf('/airtable/push', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        recordId: recId,
+        // When the audit has been filed, the server reads its scores and its
+        // stored PDF from the record rather than trusting the page -- which is
+        // how the report link gets there at all.
+        auditId: AD.lastAuditId || null,
+        scores: { overall: sc.overall, v: sc.v, w: sc.w, s: sc.s }
+      }), timeout: 60000 });
     const d = await r.json();
-    if (d.id) {
-      toast('Pushed to Airtable ✓');
-      document.getElementById('at-msg').textContent = 'Pushed at ' + new Date().toLocaleTimeString() + ' - ' + d.id;
-      saveHist();
-    } else {
-      toast('Airtable error - check field names');
-      document.getElementById('at-msg').textContent = 'Error: ' + (d.error?.message || JSON.stringify(d).slice(0,100));
-    }
-  } catch(e) { toast('Push failed: '+e.message); }
-
-  btn.disabled = false;
-  btn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg> Push to Airtable';
+    if (!r.ok) throw new Error(d.error || ('proxy ' + r.status));
+    say('var(--green)', 'Pushed ' + d.wrote + ' fields at ' +
+        new Date().toLocaleTimeString() +
+        (d.urlNote ? ' \u00b7 ' + d.urlNote : ' \u00b7 report link included'));
+  } catch (e) {
+    say('var(--red)', 'Could not write to Airtable: ' + e.message);
+  } finally { btn.disabled = false; btn.textContent = was; }
 }
 
 // ── History ───────────────────────────────────────────────────────────────────

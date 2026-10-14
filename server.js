@@ -6,7 +6,7 @@ const app  = express();
 // Bumped whenever a build is handed over. /health reports it so the app can
 // tell the user their page and their proxy are different vintages -- the
 // failure mode is a fix that silently is not there.
-const BUILD = '2026-10-08.1';
+const BUILD = '2026-10-14.1';
 // Building the report without a browser. See render.js: the scoring engine
 // stays in the page, this turns the page's report DATA into the same pages.
 const { renderReport, reportName, templateNames, templateInfo, checkReport, rendererStatus } = require('./render.js');
@@ -139,6 +139,10 @@ const AIRTABLE_PUSH_URL = env('AIRTABLE_PUSH_URL') !== 'off';
 // queued job and then waits for somebody to press Run, which is not what "a
 // row appears and the audit runs" means.
 const QUEUE_AUTORUN = env('QUEUE_AUTORUN') !== 'off';
+// How many browsers run at once, overridable without a deploy. Each run holds
+// a headless Chromium worth a few hundred MB, so this is the first dial to
+// turn when runs start dying with "the browser died part-way through".
+const QUEUE_CONCURRENCY = +env('QUEUE_CONCURRENCY') || null;
 
 // Audit history. The SERVICE key lives here and never reaches the browser: the
 // app talks to this proxy, which is already gated by AUDIT_KEY, and the proxy
@@ -4557,10 +4561,47 @@ app.post('/airtable/watermark', async (req, res) => {
 // while Airtable was unreachable, and how a re-push is done.
 app.post('/airtable/push', async (req, res) => {
   const b = req.body || {};
-  if (!b.jobId) return res.status(400).json({ error: 'which job?' });
-  try { res.json(await pushJob(b.jobId, { force: !!b.force })); }
-  catch (e) { res.status(502).json({ error: e.message }); }
+  try {
+    if (b.jobId)    return res.json(await pushJob(b.jobId, { force: !!b.force }));
+    if (b.recordId) return res.json(await pushRecord(b));
+    res.status(400).json({ error: 'which job, or which Airtable record?' });
+  } catch (e) { res.status(502).json({ error: e.message }); }
 });
+
+// ── A push with no queued job behind it ─────────────────────────────────────
+// The Export page, after an audit run by hand. It used to go through
+// /airtable proxy with a Base ID, a table name and a mapping for every single
+// field, all typed into Settings -- a second description of the same table,
+// which nobody had filled in, so the button did nothing useful.
+//
+// This is the queue's path with a different source for the numbers: same field
+// IDs, same score formatter, same rule about the report link. One description
+// of where an audit's results go.
+async function pushRecord(b) {
+  const A = airtable();
+  let audit = null;
+  if (b.auditId) {
+    const rows = await sbJson('/rest/v1/audits?id=eq.' +
+      encodeURIComponent(b.auditId) +
+      '&select=id,score_overall,score_v,score_w,score_s,pdf_path');
+    audit = (rows || [])[0];
+    if (!audit) throw new Error('no such audit: ' + b.auditId);
+  } else {
+    // Not filed yet: take what is on the page. No pdf_path, so no report link
+    // -- and pushApproved says so rather than leaving it to be assumed.
+    const s = b.scores || {};
+    if (s.overall == null && s.v == null && s.w == null && s.s == null)
+      throw new Error('there are no scores to push — run the audit first');
+    audit = { score_overall: s.overall, score_v: s.v, score_w: s.w, score_s: s.s };
+  }
+  let reportUrl = null;
+  if (AIRTABLE_PUSH_URL && audit.pdf_path) {
+    try { reportUrl = await A.reportLink(audit.pdf_path, HIST_BUCKET, SUPABASE_URL); }
+    catch (e) { console.error('airtable: could not sign the report link — ' + e.message); }
+  }
+  const wrote = await A.pushApproved({ recordId: b.recordId, audit, reportUrl });
+  return Object.assign({ ok: true, reportUrl }, wrote);
+}
 
 // The push itself. Separate from the route because approval calls it too.
 async function pushJob(jobId, opts) {
@@ -4697,7 +4738,7 @@ async function autoRunQueue() {
     waiting = await sbJson('/rest/v1/audit_jobs?status=eq.queued&select=id&limit=1');
   } catch (e) { return { error: e.message }; }
   if (!waiting || !waiting.length) return { skipped: 'nothing queued' };
-  try { return startDrain({}, 'queue autorun'); }
+  try { return startDrain({ concurrency: QUEUE_CONCURRENCY }, 'queue autorun'); }
   catch (e) { return { error: e.message }; }
 }
 
