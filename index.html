@@ -954,7 +954,7 @@ input.masked{-webkit-text-security:disc;text-security:disc}
 // different vintages. Both carry the same stamp and the app compares them,
 // because "did you upload both files?" is not something anyone should have
 // to remember -- and a half-upload looks exactly like a fix that did not work.
-const BUILD = '2026-10-15.1';
+const BUILD = '2026-10-15.2';
 const DEFAULT_PROXY = 'https://jimmy-digital-audit.onrender.com';
 let AD = {}; // audit data store
 
@@ -4345,8 +4345,29 @@ async function downloadReportPDF() {
     const doc = buildReportDoc(d, { logoWhite: A.logoWhite, logoPurple: A.logoPurple, coverBg: A.cover });
     const name = 'Digital Audit - ' + (d.firm || 'Client') + ' - ' +
                  new Date().toLocaleDateString('en-US', { month:'long', year:'numeric' }) + '.pdf';
+    // ── Rendered ONCE ─────────────────────────────────────────────────────
+    // This used to call pdf.download(), then pdf.getBase64() on the same
+    // object: one render for the client, a second for the file. pdfmake
+    // annotates the document definition as it lays out, so the second render
+    // walks an already-measured tree and produces a DIFFERENT document --
+    // measurably so. On a real audit the download was 5 pages and the stored
+    // copy 14, five of them blank, with the right-hand group of every section
+    // dropped: 17 of 40 questions survived. The comment below has always
+    // claimed "the exact bytes the client just received", and until now that
+    // was not true.
+    //
+    // So: one render, and the download is made from those same bytes. Now the
+    // claim holds by construction rather than by hope.
     const pdf = pdfMake.createPdf(doc);
-    await new Promise(res => pdf.download(name, res));
+    const b64 = await new Promise(r => pdf.getBase64(x => r(x)));
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const url = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
+    const a = document.createElement('a');
+    a.href = url; a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 20000);
     const out = document.getElementById('dl-result');
     const say = (colour, text) => { if (out) { out.style.color = colour; out.textContent = text; } };
     say('var(--green)', 'Downloaded ' + name);
@@ -4361,7 +4382,7 @@ async function downloadReportPDF() {
           'This browser keeps a local copy.');
     } else try {
       say('var(--text3)', 'Downloaded ' + name + ' \u2014 filing to history\u2026');
-      const b64 = await new Promise(r => pdf.getBase64(x => r(x)));
+      // The same bytes, not a second rendering of them.
       const f = await fileAudit(b64, '', d);
       // Held so a push from the Export page can name it: the audit row is
       // what carries the stored PDF, and therefore the only way the report
