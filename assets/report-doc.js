@@ -63,7 +63,18 @@ function ctaBar(link, heading, body, button, gap) {
           }]] },
         layout: { hLineWidth: () => 0, vLineWidth: () => 0, fillColor: () => RC.gold },
         margin: [0, heading ? 6 : 4, 0, 0] }
-    ], columnGap: 0, margin: [0, gap == null ? 20 : gap, 0, 0] };
+    ],
+    columnGap: 0, margin: [0, gap == null ? 20 : gap, 0, 0],
+    // Held together.
+    //
+    // A columns block is three independent children to pdfmake, measured and
+    // broken separately. When the space left on the page fits the copy but not
+    // the 44pt rule beside it, the copy stays and the rule goes over the fold
+    // -- alone, on a page of its own, four millimetres of gold on an otherwise
+    // empty sheet. That is what pages 4, 8, 11 and 14 of a delivered audit
+    // were: one orphaned rule each, because every section ends with one of
+    // these.
+    unbreakable: true };
 }
 
 const RC = {
@@ -639,12 +650,22 @@ function scorecard(sec, logoPurple) {
 
 function buildReportDoc(d, assets) {
   const content = [];
+  // A page break belongs ON the element it precedes, not on an empty text node
+  // standing in front of it.
+  //
+  // `{ text: '', pageBreak: 'after' }` is still an element: it occupies a line,
+  // it can land at the top of a fresh page, and then its own break pushes the
+  // real content to the page after that -- leaving a sheet carrying nothing but
+  // the footer. Page 5 of a delivered audit was exactly that.
+  const breakBefore = blocks => {
+    const b = blocks.slice();
+    b[0] = Object.assign({}, b[0], { pageBreak: 'before' });
+    return b;
+  };
   content.push(...cover(d, assets.logoWhite));
-  content.push({ text: '', pageBreak: 'after' });
-  content.push(...priorities(d, assets.logoPurple));
+  content.push(...breakBefore(priorities(d, assets.logoPurple)));
   d.sections.forEach(sec => {
-    content.push({ text: '', pageBreak: 'before' });
-    content.push(...scorecard(sec, assets.logoPurple));
+    content.push(...breakBefore(scorecard(sec, assets.logoPurple)));
   });
 
   return {
