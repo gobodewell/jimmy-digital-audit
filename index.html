@@ -954,7 +954,7 @@ input.masked{-webkit-text-security:disc;text-security:disc}
 // different vintages. Both carry the same stamp and the app compares them,
 // because "did you upload both files?" is not something anyone should have
 // to remember -- and a half-upload looks exactly like a fix that did not work.
-const BUILD = '2026-10-15.2';
+const BUILD = '2026-10-16.1';
 const DEFAULT_PROXY = 'https://jimmy-digital-audit.onrender.com';
 let AD = {}; // audit data store
 
@@ -1603,9 +1603,20 @@ function applyExtension() {
   // checks are decided by a judgement, and on a site that refuses the server
   // that judgement was being made with nothing in front of it.
   if (d.text) { AD.pageText = d.text; AD.pageHeadings = d.headings || []; }
-  // Counted, not scored: "descriptive CTAs" is a judgement, but "Click here"
-  // is a fact, and the reviewer should see it.
-  if (d.weakCtaCount) console.log('WEAK CTAs on the page:', d.weakCtaExamples.join(', '));
+  // Counted AND scored. This was deliberately only counted -- "descriptive
+  // CTAs" read as a judgement -- but the rule makes it a fact: one generic
+  // link is a page that happened to need one, two or more is a habit, and a
+  // habit is what the check is actually asking about. The extension already
+  // counts exact matches of "click here", "read more", "learn more", "more",
+  // "here" and "submit", so this is a measurement, not an opinion, and it
+  // outranks the model's view of the same page.
+  if (d.weakCtaCount != null)
+    take('c-cta', d.weakCtaCount <= 1,
+         d.weakCtaCount === 0 ? 'no generic CTAs on the page'
+           : 'one generic CTA (' + (d.weakCtaExamples || []).join(', ') + ')');
+  if (d.weakCtaCount > 1)
+    console.log('WEAK CTAs on the page: ' + d.weakCtaCount + ' — ' +
+                (d.weakCtaExamples || []).join(', '));
   // A link to the firm's listing is proof one exists, but not proof it is
   // theirs -- it is shown, never scored.
   const gbp = (d.gbpLinks || []).length
@@ -2945,7 +2956,17 @@ Definitions:
   labels is false. If the page leads with a service label or a CTA, answer
   false, and in the summary name the actual headline you read and say which
   kind it is.
-- ctas: are CTAs descriptive (not just "Click Here" or "Learn More")?
+- ctas: count the generic ones rather than judging the good ones. A link or
+  button whose entire text is "Click here", "Learn more", "Read more", "More",
+  "Here" or "Submit" is generic: it describes the mechanics of clicking, not
+  what happens next.
+  ONE of those on a page is fine — somewhere there is usually a link that
+  genuinely has nothing more to say. TWO OR MORE means the site reaches for a
+  generic label by habit, which is what this check is about, so answer false.
+  Count every instance, not distinct wordings: four buttons all reading "Learn
+  more" is four, not one.
+  Judge the main pages you actually read. In the summary say how many you
+  counted and quote them.
 - resources: is there a blog or resources section?
 - faqs: are there FAQs WITH answers?
 - reviewCTA: does site direct clients to leave Google reviews?
@@ -3766,7 +3787,11 @@ const CHECKS = [
   { id:'c-cta',   cat:'w', grp:'Visual Review', pts:5, type:'modelled', aeo:0, effort:'low',
     q:'Are you using descriptive, actionable CTAs instead of “Click Here” or “Learn More”?',
     label:'Descriptive CTAs',
-    action:'Replace generic CTAs with specific ones like "Schedule a Free Consultation".' },
+    action:'Replace the generic buttons with ones that name what happens next — ' +
+           '"Schedule a Free Consultation" rather than "Learn More". A single ' +
+           'generic link is not worth chasing; two or more is a habit, and it is ' +
+           'the habit this measures. Every button is a chance to say what the ' +
+           'reader gets by pressing it.' },
   { id:'c-res',   cat:'w', grp:'Visual Review', pts:4, type:'modelled', aeo:1, effort:'ongoing',
     q:'Is there a blog or resources section that sets you up as a thought leader?',
     label:'Blog/resources section',
