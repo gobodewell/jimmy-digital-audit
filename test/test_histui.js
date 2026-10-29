@@ -8,7 +8,7 @@ let failures=0;
 const check=(l,c,d)=>{console.log((c?'  PASS  ':'  FAIL  ')+l+(d?'   → '+d:'')); if(!c) failures++;};
 
 (async()=>{
-  const b=await chromium.launch({executablePath:'/opt/pw-browsers/chromium-1194/chrome-linux/chrome'});
+  const b=await chromium.launch({executablePath:require('../chromium-path.js')()});
   const page=await b.newPage();
   const errs=[]; page.on('pageerror',e=>errs.push(e.message));
   await page.goto(PAGE);
@@ -28,7 +28,11 @@ const check=(l,c,d)=>{console.log((c?'  PASS  ':'  FAIL  ')+l+(d?'   → '+d:'')
     recalc();
     return auditState();
   });
-  check('version stamped', cap.v===1, String(cap.v));
+  // Stamped, not pinned to a literal: the shape is expected to grow (v2 added
+  // the rendered findings and the follower counts), and a hard-coded number
+  // here just fails on every bump. That an OLD record still loads is the thing
+  // worth holding, and test_restore section C holds it.
+  check('version stamped', Number.isInteger(cap.v) && cap.v>=1, String(cap.v));
   check('all 40 check states', cap.checks.length===40, String(cap.checks.length));
   check('unmeasured reasons kept', cap.unk.length===1 && /Cloudflare/.test(cap.unk[0][1]));
   check('measured-directly set kept', cap.direct.includes('c-spd'));
@@ -65,8 +69,13 @@ const check=(l,c,d)=>{console.log((c?'  PASS  ':'  FAIL  ')+l+(d?'   → '+d:'')
   console.log('\nC. filing sends the domain, the scores and the PDF');
   const sent = await page.evaluate(async()=>{
     let body=null;
+    // Shaped like a real Response: fileAudit reads the STATUS before the body,
+    // because a proxy that rejects an oversized upload answers 413 with an HTML
+    // error page, and parsing that as JSON reported "Unexpected token <" rather
+    // than the size limit that actually stopped it.
     window.pf = async (p,o) => { body={path:p, json:JSON.parse(o.body)};
-      return { json: async()=>({ ok:true, id:'abc', domain:'totuswm.com' }) }; };
+      return { ok:true, status:200, text: async()=>'',
+               json: async()=>({ ok:true, id:'abc', domain:'totuswm.com' }) }; };
     await fileAudit('JVBERi0xLjQ=', 'note');
     return body;
   });
@@ -76,6 +85,21 @@ const check=(l,c,d)=>{console.log((c?'  PASS  ':'  FAIL  ')+l+(d?'   → '+d:'')
   check('sent the PDF', sent.json.pdfBase64==='JVBERi0xLjQ=');
   check('sent the build stamp', !!sent.json.build);
   check('sent the state', !!sent.json.state && sent.json.state.checks.length===40);
+
+  console.log('\nC2. a proxy that refuses the upload says so, in words');
+  // The 413 an oversized body produces is an HTML error page, not JSON. Reading
+  // it as JSON reported "Unexpected token <", which told nobody that a report
+  // had been refused for its size.
+  const refused = await page.evaluate(async () => {
+    window.pf = async () => ({ ok:false, status:413,
+      text: async () => '<!DOCTYPE html><html><body><pre>PayloadTooLargeError</pre></body></html>',
+      json: async () => { throw new SyntaxError('Unexpected token <'); } });
+    try { await fileAudit('JVBERi0xLjQ=', 'note'); return 'no error'; }
+    catch (e) { return e.message; }
+  });
+  check('names the size limit, not a parse error', /too large/.test(refused), refused);
+  check('says how big it was', /\d+KB/.test(refused), refused);
+  check('and what to do', /server\.js/.test(refused), refused);
 
   console.log('\nD. history unavailable falls back to the local copy, and says so');
   const fb = await page.evaluate(async()=>{
@@ -95,7 +119,7 @@ const check=(l,c,d)=>{console.log((c?'  PASS  ':'  FAIL  ')+l+(d?'   → '+d:'')
     const mk=(n,d,o,t)=>({id:'11111111-2222-3333-4444-55555555555'+n, created_at:t,
       client_domain:d, client_name:n, score_overall:o, score_v:o, score_w:o, score_s:o,
       kpis_passed:29, kpis_total:40, pdf_path: o===89 ? d+'/a.pdf' : null, prepared_by:'', build:'x'});
-    window.pf = async()=>({ json: async()=>({ audits:[
+    window.pf = async()=>({ ok:true, status:200, text: async()=>'', json: async()=>({ audits:[
       mk('1','totuswm.com',91,'2026-09-30T10:00:00Z'),
       mk('2','totuswm.com',89,'2026-06-01T10:00:00Z'),
       mk('3','other.com',  75,'2026-05-01T10:00:00Z')] }) });
@@ -116,6 +140,10 @@ const check=(l,c,d)=>{console.log((c?'  PASS  ':'  FAIL  ')+l+(d?'   → '+d:'')
 
   console.log('\nF. page health');
   check('zero page errors', errs.length===0, errs.join(' | ')||'none');
+  console.log('\nZ. a proxy that never answers does not leave the page waiting');
+  // The History tab sat on "Looking…" for ever when the free Render instance
+  // was asleep: no deadline, no error, no list. Silence reads as a broken
+  // feature rather than a sleeping server.
   await b.close();
   console.log(failures?`\n${failures} FAILURE(S)`:'\nall checks passed');
   process.exit(failures?1:0);

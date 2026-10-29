@@ -116,10 +116,28 @@ check('and a missing city is empty rather than undefined',
 console.log('\nE. the Index Score fields');
 check('the default is the number the audit measured',
       makeFormatter('number')(92) === '92');
+// This used to assert a throw: "nothing will be guessed". The rule it was
+// protecting -- never invent a grade boundary -- still holds; what changed is
+// that there is now something to inherit instead of inventing. report-doc.js
+// defines A/B/C/D for the client-facing PDF, and an Airtable column sitting
+// beside that report saying a different letter would be the real defect. So an
+// unset AIRTABLE_GRADE_BANDS now means "the same bands the report uses",
+// which is a decision, not a guess.
+const RD = require('../assets/report-doc.js');
+check('grades with no env spec inherit the report\'s bands, not invented ones',
+      makeFormatter('grade', '')(85) === RD.gradeFor(85) &&
+      makeFormatter('grade', '')(85) === 'B',
+      makeFormatter('grade', '')(85));
+check('across every boundary, not just one score',
+      [100, 90, 89, 80, 79, 70, 69, 0]
+        .every(n => makeFormatter('grade', '')(n) === RD.gradeFor(n)));
 let threw = null;
-try { makeFormatter('grade', ''); } catch (e) { threw = e.message; }
-check('grades without bands throw rather than inventing boundaries',
-      !!threw && /AIRTABLE_GRADE_BANDS/.test(threw), threw);
+// The throw survives for the case it was really written for: grades asked for
+// on a proxy that has no report builder installed, where there is genuinely
+// no answer to inherit.
+try { makeFormatter('grade', 'nonsense'); } catch (e) { threw = e.message; }
+check('a malformed spec is still refused outright',
+      !!threw && /malformed/.test(threw), threw);
 check('grades with bands work',
       makeFormatter('grade', '90:A,80:B,70:C,60:D')(85) === 'B');
 check('number+grade carries both',

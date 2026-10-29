@@ -175,6 +175,89 @@ const COVER_ASPECT = 1920 / 1080;
 const COVER_W = Math.round(792 * COVER_ASPECT);      // 1408
 const COVER_X = Math.round((612 - COVER_W) / 2);     // -398, centred
 
+// ── grades ───────────────────────────────────────────────────────────
+//
+// A letter instead of a number, on the PDF only. The app keeps showing numbers:
+// a reviewer needs to see 84 move to 86 when they tick a box, and a letter that
+// sits still for ten points would make the tool feel broken to the one person
+// who uses it all day.
+//
+// One definition, here. airtable.js had grade bands first (AIRTABLE_GRADE_BANDS,
+// for the score columns it pushes) and a second copy would drift -- a client
+// reading B on the report while the row beside it says A is the kind of thing
+// nobody spots until a client does.
+const GRADE_BANDS = [
+  { min: 90, grade: 'A' }, { min: 80, grade: 'B' },
+  { min: 70, grade: 'C' }, { min: 0,  grade: 'D' }
+];
+const gradeFor = n => (GRADE_BANDS.find(b => n >= b.min) ||
+                       GRADE_BANDS[GRADE_BANDS.length - 1]).grade;
+
+// How many points until the next grade up, or null at the top. This is what
+// rescues the near miss: "completing all five keeps this firm at B" is true and
+// useless, where "2 points short of an A" is the same fact as a reason to act.
+const toNextGrade = n => {
+  const up = GRADE_BANDS.filter(b => b.min > n).sort((a, b) => a.min - b.min)[0];
+  return up ? up.min - n : null;
+};
+
+// Carried on the report data, not read from an env var, because report-doc.js
+// runs in the browser too and there is no process.env there. Default is number,
+// so nothing changes for anyone until a caller asks.
+// "Completing both adds 1 points" -- rendered, on a real fixture. The number
+// branch has read that way the whole time; a one-point gain is just rare enough
+// in testing never to have been looked at.
+const pts = n => n + (n === 1 ? ' point' : ' points');
+
+// A grade letter as a filled badge rather than loose type. One helper, so the
+// cover, the channel row and the three scorecards cannot drift apart.
+//
+// pdfmake has no way to put text inside a canvas, so the rect is drawn and the
+// letter pulled back up over it with a negative top margin -- the same trick
+// the cover's score ring already used. The constants are eyeballed against a
+// render, not derived: Gelasio's cap height is about 0.70em, so lifting by
+// (box + cap) / 2 lands the letter on the box's optical centre.
+const gradeBadge = (letter, fontSize, opts) => {
+  const o = opts || {};
+  // A single capital needs far less box than the first attempt gave it: at
+  // 50pt the 1.62 ratio made an 81pt box inside a 76pt column, which overflowed
+  // and printed the letter straight through "Needs attention".
+  const w = Math.round(fontSize * 1.30);
+  const h = Math.round(fontSize * 1.36);
+  return {
+    width: o.width || w,
+    stack: [
+      { canvas: [{ type: 'rect', x: 0, y: 0, w: w, h: h, r: 3,
+                   color: o.fill || RC.purple }] },
+      // The lift is calibrated, not guessed. The first version used the cap
+      // height (0.70em) and left the letter 11pt low in a 68pt box: 25.7pt of
+      // air above it and 3.5 below, measured off a render by counting white
+      // pixels inside the drawn rect. pdfmake positions the text BLOCK, whose
+      // top is the font's ascent line, so centring the ink means clearing the
+      // gap between ascent and cap as well -- 1.252em all told for Gelasio,
+      // which scales with the size because the box does too.
+      { text: letter, font: 'Display', bold: true, fontSize: fontSize,
+        color: o.color || RC.white, alignment: 'center', width: w,
+        margin: [0, -Math.round(fontSize * 1.252), 0, 0] }
+    ],
+    // Whatever follows must clear the box, which the lifted text no longer
+    // accounts for on its own.
+    marginBottom: 0
+  };
+};
+
+// Carried on the report data, not read from an env var, because report-doc.js
+// runs in the browser too and there is no process.env there.
+//
+// Grades are the default now: every report built from this document prints
+// A/B/C/D unless its caller explicitly asks for numbers with
+// scoreStyle: 'number'. The app keeps showing numbers on screen -- a reviewer
+// ticking a box needs to watch 84 become 86, and that surface never builds
+// this document to display a score.
+const SCORE_STYLE_DEFAULT = 'grade';
+const graded    = d => (((d && d.scoreStyle) || SCORE_STYLE_DEFAULT) === 'grade');
+const showScore = (d, n) => graded(d) ? gradeFor(n) : String(n);
+
 // ── cover ────────────────────────────────────────────────────────────────────
 // The cover is a FIXED GRID, not a flow. Every block is placed at a hard-coded
 // y from the top of the page and nothing below it can be pushed.
@@ -204,7 +287,13 @@ const COVER_Y = {
   // review anyone agreed was a baseline. Citing it to a client as "the last
   // review" claims a history that was never established.
   stats:    527,   // score ring + the four figures
-  channels: 635,   // the three category scores and their bars
+  channels: 635,   // the three category scores and their bars (numbers)
+  // Grade mode needs its own slot rather than an offset applied where the row
+  // is placed. The cover positions everything absolutely, so a taller row does
+  // not push the disclosure down -- it prints over it; and a fudge at the call
+  // site makes this table a description of a layout the page does not have,
+  // which the cover's own slot test caught immediately.
+  channelsGraded: 617,
   foot:     721    // disclosure
 };
 const COVER_LOGO_W = 168;
@@ -233,7 +322,10 @@ function cover(d, logoWhite) {
     width: '*',
     stack: [
       { text: name, font: 'Body', bold: true, fontSize: 8.5, color: RC.white, margin: [0, 0, 0, 4] },
-      { text: String(score), font: 'Display', bold: true, fontSize: 26, color: RC.white, margin: [0, 0, 0, 5] },
+      ...(graded(d)
+        ? [{ columns: [gradeBadge(gradeFor(score), 33, { fill: RC.white, color: RC.purple })],
+             margin: [0, 0, 0, 7] }]
+        : [{ text: String(score), font: 'Display', bold: true, fontSize: 26, color: RC.white, margin: [0, 0, 0, 5] }]),
       bar(score, 150, 3.2, RC.white, '#6B4A8C')   // no rgba in canvas
     ]
   });
@@ -256,17 +348,27 @@ function cover(d, logoWhite) {
     at(COVER_Y.summary, { text: fitSummary(d.summary), font: 'Display', fontSize: SUMMARY_SIZE,
                           lineHeight: 1.5, color: '#F2EAF7' }, SUMMARY_W),
 
-    at(COVER_Y.scoreLbl, { text: `OVERALL DIGITAL SCORE — ${s.overall} OF 100`, font: 'Body',
+    at(COVER_Y.scoreLbl, { text: graded(d) ? 'OVERALL DIGITAL GRADE'
+                             : `OVERALL DIGITAL SCORE — ${s.overall} OF 100`, font: 'Body',
                            bold: true, fontSize: 7.5, color: '#CBB8DC', characterSpacing: 1.1 }),
 
     at(COVER_Y.band, { text: s.band, font: 'Display', fontSize: 23, color: RC.white }),
 
     { columns: [
-        { width: 110, stack: [
-            { canvas: [{ type: 'ellipse', x: 34, y: 34, r1: 33, r2: 33, lineColor: '#B9A3D0', lineWidth: 2.4 }] },
-            { text: String(s.overall), font: 'Display', bold: true, fontSize: 25, color: RC.white,
-              alignment: 'left', margin: [19, -45, 0, 0] }
-          ] },
+        // 25 -> 31pt, a quarter larger, and on a solid box. The cover art is a
+        // purple gradient, so RC.purple reads as a darker chip against it
+        // rather than disappearing into it.
+        // White on the cover, purple on the scorecards. A purple box on a purple
+        // field reads as a patch; inverted, it reads as a mark. Same helper,
+        // so the two can only ever differ in colour.
+        { width: 110, stack: graded(d)
+            ? [{ columns: [gradeBadge(gradeFor(s.overall), 31,
+                                      { fill: RC.white, color: RC.purple })] }]
+            : [
+                { canvas: [{ type: 'ellipse', x: 34, y: 34, r1: 33, r2: 33, lineColor: '#B9A3D0', lineWidth: 2.4 }] },
+                { text: String(s.overall), font: 'Display', bold: true, fontSize: 25, color: RC.white,
+                  alignment: 'left', margin: [19, -45, 0, 0] }
+              ] },
         { width: '*', columns: [
             { width: '*', stack: [ stat(d.kpiPassed, 'KPIs passed'), { text: '', margin: [0, 9, 0, 0] }, stat(d.aeoPassed, 'AEO KPIs passed') ] },
             { width: '*', stack: [ stat(d.needWork, 'need work', true), { text: '', margin: [0, 9, 0, 0] }, stat(d.ptsAvailable, d.actions.length
@@ -275,8 +377,13 @@ function cover(d, logoWhite) {
           ] }
       ], absolutePosition: { x: M, y: COVER_Y.stats } },
 
+    // The cover places its blocks absolutely, so a taller channel row does not
+    // push the disclosure down -- it prints over it. A badge is taller than the
+    // line of type it replaced, so in grade mode the row starts higher.
     { columns: [chan('Company Visibility', s.v), chan('Website Performance', s.w), chan('Social Media', s.s)],
-      columnGap: 16, absolutePosition: { x: M, y: COVER_Y.channels } },
+      columnGap: 16,
+      absolutePosition: { x: M,
+        y: graded(d) ? COVER_Y.channelsGraded : COVER_Y.channels } },
 
     at(COVER_Y.foot, { text: `${DISCLOSURE}  ·  Prepared by Cetera GrowthLine`,
                        font: 'Body', fontSize: 7, color: '#B9A6CC' })
@@ -410,7 +517,26 @@ const GTEXT_DRAFT = {
 
 // One lookup for the report. GTEXT first, always: an approved row supersedes a
 // draft the moment it exists, without anything else having to change.
-const gtextFor = id => GTEXT[id] || GTEXT_DRAFT[id] || null;
+//
+// The whitespace is cleaned on the way out. The sheet's cells carry hard line
+// breaks where the spreadsheet column happened to wrap, and four approved rows
+// still had one sitting mid-sentence. pdfmake honours a \n, so page 2 of a
+// delivered report printed "...if that image is more than 500 KB it is" and
+// then broke the line with 105pt of white space to its right -- on the one page
+// the firm actually acts on.
+//
+// Collapsed here rather than in the constants, so GTEXT stays byte-identical to
+// what was transcribed from the sheet and the next transcription cannot quietly
+// undo the fix. Not one word changes; only the space between them.
+// Not memoised, deliberately. A cache keyed on the id made gtextFor ignore a
+// GTEXT row added after its first call -- which is exactly the guarantee the
+// comment above makes, and a test caught it falsified. Squashing two short
+// strings costs nothing worth having a stale answer for.
+const squash = s => String(s).replace(/\s+/g, ' ').trim();
+const gtextFor = id => {
+  const g = GTEXT[id] || GTEXT_DRAFT[id] || null;
+  return g ? Object.assign({}, g, { title: squash(g.title), text: squash(g.text) }) : null;
+};
 
 // Checks with no copy from EITHER source. Page 2 still withholds these rather
 // than inventing anything; the list is empty today and the machinery stays so
@@ -419,6 +545,133 @@ const GTEXT_MISSING = [
   // Empty: the ten that had no approved row are covered by GTEXT_DRAFT until
   // their wording lands in the sheet.
 ];
+
+
+// ── what comes after the checklist ───────────────────────────────────────────
+//
+// Forty checks measure whether the foundations are there. They cannot measure
+// whether anything is still happening: a blog that stopped in 2023 passes "is
+// there a blog", twelve reviews from 2021 pass "do you have reviews", and a
+// firm can reach 100 while every one of those signals quietly ages.
+//
+// So a perfect audit used to end on a page reading "No priority fixes · Every
+// check in this audit passed" and nothing else -- true, and no use to the
+// person holding it.
+//
+// These five are what to do next. Three rules hold them in shape:
+//
+//   1. They are NOT checks. Nothing here is scored, counted in a KPI tally, or
+//      added to d.failedCount. A 100 stays a 100 with all five undone -- which
+//      is the point: the audit measures the foundations honestly and does not
+//      move the goalposts to manufacture work.
+//   2. They do not read as failures. No chips, no boxes, no point values, and
+//      an opening line that says plainly they are not part of the score.
+//   3. An advisor can do every one of them alone. No developer, no vendor, no
+//      robots.txt, no schema markup, no platform access -- a good share of
+//      these firms are on a managed site (the Airtable schema carries "Is your
+//      current site on FMG?") and cannot touch any of that. Anything needing a
+//      ticket raised with somebody else does not belong on this page.
+const KEEP_GOING = [
+  { title: 'Publish something every month \u2014 make it a question a client asked you',
+    text: 'The audit checks that a blog exists; it cannot check whether it is alive. A last ' +
+          'post from two years ago passes the box and still tells a prospect you stopped. Keep ' +
+          'one rhythm \u2014 a piece a month \u2014 on the questions you already answer on first calls. ' +
+          'Those are nearly the words people type into a search bar, and recent pages are ' +
+          'pulled into AI answers far more readily than old ones.',
+    meta: 'Monthly \u00b7 Impacts SEO and AEO' },
+
+  { title: 'Build a page for each service and each kind of client you serve',
+    text: 'A page per ' +
+          'service, and one per kind of client \u2014 business owners, retirees, physicians, whoever ' +
+          'you actually sit with \u2014 gives search and AI tools something specific to match a ' +
+          'specific question against. Write each one the way you would explain it on a call. One ' +
+          'page a quarter builds a library that keeps working.',
+    meta: 'One page a quarter \u00b7 Impacts SEO and AEO' },
+
+  { title: 'Keep reviews arriving, and reply to every one',
+    text: 'Put the ask somewhere already on your calendar: at every ' +
+          'annual review, send the client your review link while you are sitting together. Then ' +
+          'reply to each one, warm or awkward \u2014 replies double the words on the listing, and ' +
+          'much of what an AI says about your firm comes from there. Use the pre-approved ' +
+          'review-request templates in MarketingCentral to stay compliant.',
+    meta: 'At every annual review \u00b7 Impacts SEO and AEO' },
+
+  { title: 'Get mentioned somewhere that is not your own site',
+    text: 'A podcast, the local business press, an association profile, a quote in an industry ' +
+          'piece. AI answers are assembled by corroborating across sources, so a firm that can ' +
+          'only be cited from its own domain is one algorithm change from invisible. Two or ' +
+          'three mentions a year changes that. Pitch the one thing you are genuinely good at ' +
+          'explaining.',
+    meta: 'Two or three a year \u00b7 Impacts AEO' },
+
+  { title: 'Sponsor something local and ask for the link',
+    text: 'The little league team, the chamber golf outing, the library fundraiser. Sponsor ' +
+          'pages list their sponsors, so ask for your firm\u2019s name linked back to your site \u2014 ' +
+          'a mention on a real neighbourhood page with the town\u2019s name around it, which is much ' +
+          'of what local search and an AI answer use to tie a firm to the place it serves. The ' +
+          'sponsorship is probably in the budget already; the only new step is asking.',
+    meta: 'Once or twice a year \u00b7 Impacts local SEO' }
+];
+
+// The page appears when the firm has nearly run out of checklist: fewer than
+// TOP_N failing checks. It is gated on failedCount, not on actions.length,
+// because those two numbers differ when a failing check is held back for want
+// of approved copy -- and a firm with eight failures printing "sponsor the
+// little league team" would be the audit losing its sense of proportion.
+//
+// The whole set shows, or none of it. Topping up to five would mean picking
+// which two of five unranked habits a firm at three fixes gets, and there is
+// no basis for that choice.
+const showKeepGoing = d =>
+  ((d.failedCount == null ? (d.actions || []).length : d.failedCount) < TOP_N);
+
+// Last page, deliberately. Page 2 stays the priorities page and every scorecard
+// keeps its index, so adding this moved nothing; and a firm that passed
+// everything now ends its report on something to do rather than on a column of
+// green ticks.
+function keepGoingPage(d, logoPurple) {
+  const rows = KEEP_GOING.map((a, i) => ([
+    { text: String(i + 1), font: 'Display', fontSize: 15, color: RC.g200, margin: [0, 3, 0, 0] },
+    { stack: [
+        { text: a.title, font: 'Body', bold: true, fontSize: 10.5, color: RC.purple, margin: [0, 2, 0, 4] },
+        { text: a.text, font: 'Body', fontSize: 8.4, color: RC.gray, lineHeight: 1.3, margin: [0, 0, 0, 4] },
+        { text: a.meta, font: 'Body', fontSize: 7.8, color: RC.grayMid }
+      ] }
+  ]));
+
+  return [
+    { columns: [
+        { text: 'What comes after the checklist', font: 'Display', fontSize: 21, color: RC.purple, width: '*' },
+        { svg: logoPurple, width: 95, alignment: 'right' }
+      ], margin: [0, 0, 0, 16] },
+    rule(CONTENT),
+
+    // Said before the list, not after it, because a reader who has just scored
+    // 100 needs to know in the first sentence that this is not a page of
+    // things they got wrong.
+    { text: 'None of these five is scored, and none of them is part of the ' +
+            'audit above — a firm can leave all five undone and its score does not ' +
+            'change. The forty questions measure whether the foundations are in ' +
+            'place. These are the habits that build on them, and every one is ' +
+            'something you can do yourself without a developer.',
+      font: 'Body', fontSize: 8.8, color: RC.gray, lineHeight: 1.38, margin: [0, 11, 30, 10] },
+
+    // dontBreakRows, because the alternative is what the first render of this
+    // page did: item five split across the fold, the sentence "with the town's
+    // name around it" beginning a page on its own. A row here is one habit and
+    // reads as one thing; it moves to the next page whole or not at all.
+    { table: { widths: [22, '*'], body: rows, dontBreakRows: true },
+      layout: {
+        hLineWidth: (i, node) => (i === 0 || i === node.table.body.length) ? 0 : 0.6,
+        vLineWidth: () => 0, hLineColor: () => RC.g200,
+        paddingTop: () => 7, paddingBottom: () => 7, paddingLeft: () => 0, paddingRight: () => 0
+      }, margin: [0, 2, 0, 12] },
+
+    ctaBar(ROADMAP_LINK, null,
+      'Add and follow the Implement GrowthLine Audit Recommendations roadmap in Growth360.',
+      'Launch Roadmap', 12)
+  ];
+}
 
 // ── page 2 · priorities ──────────────────────────────────────────────────────
 function priorities(d, logoPurple) {
@@ -487,31 +740,85 @@ function priorities(d, logoPurple) {
     // nothing to complete it claimed "Completing all five moves this firm from
     // Strong into the Strong band" -- five fixes that are not listed, and a
     // move from a band into itself.
-    ...(n > 0 && d.projected > d.scores.overall ? [
+    // At the top grade the band promised movement it could not deliver: "adds
+    // 4 points, holding this firm at A" over a picture of an arrow going
+    // nowhere. There is nothing above A, so the band is simply not printed --
+    // the five recommendations stand on their own. Every other case still
+    // shows it, including the near miss, where naming the gap is the point.
+    ...(n > 0 && d.projected > d.scores.overall &&
+        // Suppressed for exactly one case: the grade does not change AND there
+        // is nothing above it. That is the "adds 4 points, holding this firm at
+        // A" band -- an arrow pointing nowhere over a promise it cannot keep.
+        //
+        // The first version of this test dropped the "grade does not change"
+        // half and asked only whether anything was above the projection. Every
+        // climb INTO A then suppressed the band as well, which deleted the
+        // B -> A story the grades were added to tell. Caught in the render, on
+        // the 84 -> 90 fixture, not in the arithmetic.
+        !(graded(d) && gradeFor(d.scores.overall) === gradeFor(d.projected)
+                    && toNextGrade(d.projected) === null) ? [
     { table: { widths: ['*'], body: [[{
         columns: [
           // 26pt held two digits at 19pt Display bold and wrapped a third, so a
           // firm reaching 100 saw "10" above a lone "0". Both score columns are
           // sized for three digits, and the band widened to match.
-          { width: 150, columns: [
-              { width: 36, text: String(d.scores.overall), font: 'Display', bold: true, fontSize: 19, color: RC.purple, noWrap: true },
-              { width: 24, svg: MARK.arrow, margin: [0, 8, 0, 0] },
-              { width: 36, text: String(d.projected), font: 'Display', bold: true, fontSize: 19, color: RC.purple, noWrap: true }
-            ], columnGap: 9 },
-          { width: '*', text: (d.projectedBand === d.scores.band
+          // In grade mode a crossing reads B -> A. A near miss would read
+          // "B -> B", which looks like a rendering fault rather than a result,
+          // so when the grade does not change the letter is shown once and the
+          // sentence beside it carries the movement.
+          ...(graded(d)
+            ? (gradeFor(d.scores.overall) === gradeFor(d.projected)
+                // 19pt, not 24. A badge is taller than the numeral it replaces,
+                // and at 24 page 2 no longer held five recommendations, the band
+                // AND the CTA -- the call to action went over the fold onto a
+                // sheet of its own, which is the orphaned-CTA fault this report
+                // has already been fixed for once.
+                ? [{ width: 150, columns: [gradeBadge(gradeFor(d.scores.overall), 19)] }]
+                : [{ width: 150, columns: [
+                      gradeBadge(gradeFor(d.scores.overall), 19),
+                      { width: 24, svg: MARK.arrow, margin: [0, 11, 0, 0] },
+                      gradeBadge(gradeFor(d.projected), 19)
+                    ], columnGap: 7 }])
+            : [{ width: 150, columns: [
+                  { width: 36, text: String(d.scores.overall), font: 'Display', bold: true, fontSize: 19, color: RC.purple, noWrap: true },
+                  { width: 24, svg: MARK.arrow, margin: [0, 8, 0, 0] },
+                  { width: 36, text: String(d.projected), font: 'Display', bold: true, fontSize: 19, color: RC.purple, noWrap: true }
+                ], columnGap: 9 }]),
+          { width: '*', text: (graded(d) ? (() => {
+              const was = gradeFor(d.scores.overall), now = gradeFor(d.projected);
+              const verb = n === 1 ? 'Completing this one ' : n === 2 ? 'Completing both '
+                         : `Completing all ${NUM_WORD(n)} `;
+              // Crossing a grade is the whole story, so it is told plainly.
+              if (was !== now)
+                return [ verb, 'moves this firm from ', { text: was, bold: true },
+                         ' into the ', { text: now, bold: true }, ' band.' ];
+              // Not crossing. "Keeps this firm at B" is true and gives nobody a
+              // reason to do anything, so say how close the next grade is -- the
+              // one place a number still earns its keep on this page.
+              const gap = toNextGrade(d.projected);
+              if (gap != null)
+                return [ verb, 'takes this firm to the top of the ', { text: was, bold: true },
+                         ' band \u2014 ', { text: pts(gap), bold: true },
+                         ' short of ', { text: gradeFor(d.projected + gap), bold: true }, '.' ];
+              // Already at the top grade: there is nothing above to reach for,
+              // so the gain is the point.
+              return [ verb, 'adds ',
+                       { text: pts(d.projected - d.scores.overall), bold: true },
+                       ', holding this firm at ', { text: was, bold: true }, '.' ];
+            })() : (d.projectedBand === d.scores.band
               // Already in the top band, or the gain is not enough to cross
               // into the next one. Either way the points are real and the band
               // is not changing, so say that instead of inventing a move.
               // "Completing all two" is not English; "all five" is.
               ? [ n === 1 ? 'Completing this one adds ' : n === 2 ? 'Completing both adds '
                   : `Completing all ${NUM_WORD(n)} adds `,
-                  { text: (d.projected - d.scores.overall) + ' points', bold: true },
+                  { text: pts(d.projected - d.scores.overall), bold: true },
                   ', holding this firm in the ', { text: d.scores.band, bold: true }, ' band.' ]
               : [ n === 1 ? 'Completing this one moves this firm from '
                   : n === 2 ? 'Completing both moves this firm from '
                   : `Completing all ${NUM_WORD(n)} moves this firm from `,
                   { text: d.scores.band, bold: true }, ' into the ',
-                  { text: d.projectedBand, bold: true }, ' band.' ]),
+                  { text: d.projectedBand, bold: true }, ' band.' ])),
             font: 'Body', fontSize: 9.5, color: '#1F2A33', lineHeight: 1.4, margin: [0, 3, 0, 0] }
         ], margin: [18, 12, 14, 12]
       }]] },
@@ -531,7 +838,7 @@ function priorities(d, logoPurple) {
 }
 
 // ── pages 3-5 · scorecards ───────────────────────────────────────────────────
-function scorecard(sec, logoPurple) {
+function scorecard(sec, logoPurple, d) {
   const tile = t => ({
     stack: [
       { canvas: [{ type: 'rect', x: 0, y: 0, w: 118, h: 2.2, color: t.ok ? RC.green : RC.magenta }] },
@@ -606,7 +913,9 @@ function scorecard(sec, logoPurple) {
       ], columnGap: 0, margin: [0, 0, 0, 14] },
 
     { columns: [
-        { width: 76, text: String(sec.score), font: 'Display', bold: true, fontSize: 40, color: RC.purple },
+        ...(graded(d)
+          ? [{ width: 76, columns: [gradeBadge(gradeFor(sec.score), 50)] }]
+          : [{ width: 76, text: String(sec.score), font: 'Display', bold: true, fontSize: 40, color: RC.purple }]),
         { width: '*', stack: [
             { text: sec.band, font: 'Body', bold: true, fontSize: 11, color: RC.purple, margin: [0, 8, 0, 3] },
             { text: sec.blurb, font: 'Body', fontSize: 9, color: RC.grayMid }
@@ -665,8 +974,10 @@ function buildReportDoc(d, assets) {
   content.push(...cover(d, assets.logoWhite));
   content.push(...breakBefore(priorities(d, assets.logoPurple)));
   d.sections.forEach(sec => {
-    content.push(...breakBefore(scorecard(sec, assets.logoPurple)));
+    content.push(...breakBefore(scorecard(sec, assets.logoPurple, d)));
   });
+  if (showKeepGoing(d))
+    content.push(...breakBefore(keepGoingPage(d, assets.logoPurple)));
 
   return {
     pageSize: 'LETTER',
@@ -705,6 +1016,9 @@ return { RC, DISCLOSURE, GTEXT, GTEXT_DRAFT, GTEXT_MISSING, gtextFor,
          TOP_N, TOP_N_WORD, NUM_WORD, MARK, CTA_LINK, ROADMAP_LINK,
          PAGE_W, COVER_W, COVER_X, COVER_Y, COVER_ASPECT, COVER_LOGO_W,
          SUMMARY_MAX, SUMMARY_SIZE, SUMMARY_W, fitSummary,
+         KEEP_GOING, showKeepGoing, keepGoingPage,
+         GRADE_BANDS, gradeFor, toNextGrade, graded, showScore, gradeBadge,
+         SCORE_STYLE_DEFAULT,
          n, bar, chip, rule, ctaBar, cover, priorities, scorecard,
          buildReportDoc };
 });

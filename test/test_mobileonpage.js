@@ -26,7 +26,8 @@ const sse=text=>new ReadableStream({start(c){
   c.close();
 }});
 
-const HEAD = '<head><meta name="viewport" content="width=device-width, initial-scale=1">'
+const HEAD = '<head><title>Totus Wealth Management</title>'
+           + '<meta name="viewport" content="width=device-width, initial-scale=1">'
            + '<meta name="description" content="Totus Wealth Management"></head>';
 
 let homeStatus = 403;         // the site refuses us

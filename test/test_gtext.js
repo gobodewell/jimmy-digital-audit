@@ -15,7 +15,7 @@ const src = fs.readFileSync(path.join(__dirname,'..','index.html'),'utf8');
 (async()=>{
   console.log('\nA. the approved copy is present and complete');
   const { chromium } = require('playwright');
-  const b = await chromium.launch({executablePath:'/opt/pw-browsers/chromium-1194/chrome-linux/chrome'});
+  const b = await chromium.launch({executablePath:require('../chromium-path.js')()});
   const page = await b.newPage();
   await page.goto('file://' + path.resolve(__dirname,'..','index.html'));
   const g = await page.evaluate(()=>({ gtext: GTEXT, draft: GTEXT_DRAFT, missing: GTEXT_MISSING,
@@ -64,7 +64,7 @@ print(json.dumps(out, ensure_ascii=False))
   const out = cp.execSync(`python3 -c "
 import pymupdf, json
 d = pymupdf.open('${path.join(__dirname,'cover.pdf')}')
-print(json.dumps({'pages': d.page_count, 'p2': d[1].get_text()}, ensure_ascii=False))
+print(json.dumps({'pages': d.page_count, 'p1': d[0].get_text(), 'p2': d[1].get_text()}, ensure_ascii=False))
 "`).toString();
   const r = JSON.parse(out);
   check('still five pages', r.pages===5, String(r.pages));
@@ -96,7 +96,21 @@ print(json.dumps({'pages': d.page_count, 'p2': d[1].get_text()}, ensure_ascii=Fa
   // nobody catches until a client does.
   check('heading says "'+g.word+'"', flat.includes(strip('Do these '+g.word+' things first')),
         r.p2.split('\n')[0]);
-  check('projection band agrees', flat.includes(strip('Completing all '+g.word+' moves')));
+  // Conditional, because the band is not always printed. This fixture scores
+  // into the top grade and projects into it too, and grade mode prints no band
+  // for a firm with nowhere above it to move. When there IS one, its count word
+  // must still match the heading -- that is the error this check exists for.
+  const hasBand = flat.includes(strip('Completing'));
+  if (hasBand)
+    check('projection band agrees with the heading count',
+          flat.includes(strip('Completing all '+g.word)));
+  else {
+    // Read the grade off the cover rather than recomputing it: the only
+    // acceptable reason for no band is that the firm is already at A.
+    const grade = (r.p1.match(/OVERALL DIGITAL GRADE\s*\n\s*.*\n\s*([A-D])\b/) || [])[1];
+    check('no band printed, and only because the firm is already at the top grade',
+          grade === 'A', 'cover grade: ' + grade);
+  }
   check('word matches the number', ['zero','one','two','three','four','five','six','seven','eight','nine','ten'][g.n]===g.word,
         g.n+' vs '+g.word);
 
@@ -124,6 +138,31 @@ print(json.dumps({'pages': d.page_count, 'p2': d[1].get_text()}, ensure_ascii=Fa
 
   console.log('\nG. the source sheet is kept with the code');
   check('spreadsheet committed alongside', fs.existsSync(SHEET));
+
+  console.log('\nH. the sheet\'s own line breaks do not reach the page');
+  // The cells were transcribed with the hard line breaks the spreadsheet
+  // column happened to wrap at, and four approved rows still carried one
+  // mid-sentence. pdfmake honours a \\n, so page 2 printed "...if that image
+  // is more than 500 KB it is" and broke the line there, leaving 105pt of
+  // white space beside it -- measured, on the page the firm acts on.
+  //
+  // The constants keep the breaks: GTEXT is what was transcribed, and a
+  // re-transcription must not silently differ. gtextFor cleans them on the way
+  // out, which is the only path to a report.
+  const RD = require(path.join(__dirname,'..','assets','report-doc.js'));
+  const RAW = Object.assign({}, RD.GTEXT_DRAFT, RD.GTEXT);
+  const dirty = Object.keys(RAW).filter(id => /\s\s|\n/.test(RAW[id].text + RAW[id].title));
+  check('the stored copy is still byte-for-byte the transcription',
+        dirty.length > 0, dirty.length + ' row(s) carry the sheet\'s breaks');
+  const leaks = Object.keys(RAW).filter(id => {
+    const g = RD.gtextFor(id);
+    return /\n/.test(g.text + g.title) || /\s\s/.test(g.text + g.title);
+  });
+  check('but nothing a report can read carries one', leaks.length === 0, leaks.join(', '));
+  check('and not a word was dropped doing it',
+        Object.keys(RAW).every(id =>
+          RD.gtextFor(id).text.split(' ').filter(Boolean).join(' ') ===
+          RAW[id].text.split(/\s+/).filter(Boolean).join(' ')));
 
   await b.close();
   console.log(failures?`\n${failures} FAILURE(S)`:'\nall checks passed');

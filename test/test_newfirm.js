@@ -16,8 +16,7 @@
 // firm with nothing checked" against 19 grounded, from a run that completed
 // in 310 seconds and had looked at all of them. The audit threw away its
 // results hardest for the firms it helps most.
-process.env.CHROMIUM_PATH = process.env.CHROMIUM_PATH ||
-  '/opt/pw-browsers/chromium-1194/chrome-linux/chrome';
+process.env.CHROMIUM_PATH = require('../chromium-path.js')();
 const path = require('path');
 
 let failures = 0;

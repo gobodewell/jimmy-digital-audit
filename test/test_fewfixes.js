@@ -17,7 +17,7 @@ const check = (l, c, d) => {
 };
 
 (async () => {
-  const b = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium-1194/chrome-linux/chrome' });
+  const b = await chromium.launch({ executablePath: require('../chromium-path.js')() });
   const page = await b.newPage();
   const errs = []; page.on('pageerror', e => errs.push(e.message));
   await page.goto(PAGE);
@@ -30,6 +30,12 @@ const check = (l, c, d) => {
           .forEach(c => { document.getElementById(c.id).checked = false; });
     recalc();
     const d = assembleReport();
+    // Number mode on purpose. Every fixture here fails only a handful of
+    // checks, so each scores into A and projects into A -- and grade mode
+    // prints no band at all for a firm with nowhere above it to move. The
+    // count wording this file protects lives in the number-mode sentence;
+    // grade-mode band behaviour has its own suite.
+    d.scoreStyle = 'number';
     const A = window.REPORT_ASSETS;
     const doc = buildReportDoc(d, { logoWhite: A.logoWhite, logoPurple: A.logoPurple, coverBg: A.cover });
     return { json: JSON.stringify(doc.content), actions: d.actions.length,

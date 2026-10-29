@@ -6,7 +6,7 @@ const PAGE = 'file://' + path.resolve(__dirname, '..', 'index.html');
 const { chromium } = require('playwright');
 
 (async () => {
-  const b = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium-1194/chrome-linux/chrome' });
+  const b = await chromium.launch({ executablePath: require('../chromium-path.js')() });
   const page = await (await b.newContext({ ignoreHTTPSErrors: true })).newPage();
   page.on('pageerror', e => console.error('PAGE ERROR:', e.message));
   page.on('console', m => { if (m.type()==='error') console.error('CONSOLE:', m.text().slice(0,160)); });
@@ -42,7 +42,12 @@ const { chromium } = require('playwright');
     // The widest the band can get. 100 -> 100 is not it: the band only prints
     // when there is a gain to project, so a firm already at 100 has no band at
     // all. 99 -> 100 is the real worst case, and it is the one that wrapped.
-    if (MAX) { d.scores.overall = 99; d.projected = 100; }
+    // Number mode, explicitly. This fixture exists to exercise 99 -> 100 in the
+    // projection band -- three digits at 19pt, which once wrapped and printed
+    // "10" above a lone "0". Reports ship with grades now, where that fault
+    // cannot occur, but the number path is still reachable via scoreStyle and
+    // the bug it guards is still worth guarding.
+    if (MAX) { d.scores.overall = 99; d.projected = 100; d.scoreStyle = 'number'; }
     if (STRESS) {
       d.summary = 'Your firm is performing well overall across the board, with notably ' +
         'strong visibility and social media scores driving an on-track rating and a solid ' +

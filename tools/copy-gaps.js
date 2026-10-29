@@ -18,7 +18,7 @@ const INDEX = 'file://' + path.resolve(__dirname, '..', 'index.html');
 const SHEET = path.resolve(__dirname, '..', 'reference', 'SA_Digital_Audit_Questions.xlsx');
 
 (async () => {
-  const b = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium-1194/chrome-linux/chrome' });
+  const b = await chromium.launch({ executablePath: require('../chromium-path.js')() });
   const page = await b.newPage();
   await page.goto(INDEX);
   const gaps = await page.evaluate(() => {

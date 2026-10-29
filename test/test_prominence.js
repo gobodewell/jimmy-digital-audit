@@ -17,7 +17,7 @@ const check = (l, c, d) => {
 };
 
 (async () => {
-  const b = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium-1194/chrome-linux/chrome' });
+  const b = await chromium.launch({ executablePath: require('../chromium-path.js')() });
   const page = await b.newPage();
   const errs = []; page.on('pageerror', e => errs.push(e.message));
   await page.goto(PAGE);

@@ -111,18 +111,40 @@ function normaliseSite(raw) {
 // always be derived from it. Grades are available but refuse to guess: the
 // bands have to be stated, or this throws rather than inventing boundaries
 // and writing a confident B over something that was never agreed.
+// The report's own bands, as the default. Loaded lazily and on purpose: a
+// top-level require of assets/ would mean a deploy that uploads airtable.js
+// without the assets folder takes the whole proxy down at boot -- no audits, no
+// history, a crash loop -- which render.js already learned and says so at
+// length. Grades are one capability; it should fail like one.
+//
+// This replaces "nothing will be guessed". When that was written there was no
+// canonical answer to guess at, so throwing was right. Now report-doc.js
+// defines A/B/C/D for the client-facing PDF, and the Airtable columns sitting
+// beside that report should say the same thing by default rather than by
+// somebody remembering to set an env var to a matching string.
+function reportBands() {
+  try { return require('./assets/report-doc.js').GRADE_BANDS; }
+  catch (e) { return null; }
+}
+
 function parseBands(spec) {
   const bands = String(spec || '').split(',').map(s => s.trim()).filter(Boolean)
     .map(s => {
       const m = /^(\d+(?:\.\d+)?)\s*:\s*(.+)$/.exec(s);
       if (!m) throw new Error('AIRTABLE_GRADE_BANDS is malformed near "' + s +
-        '" — expected "90:A,80:B,70:C,60:D"');
+        '" — expected "90:A,80:B,70:C,0:D"');
       return { min: Number(m[1]), grade: m[2] };
     })
     .sort((a, b) => b.min - a.min);
-  if (!bands.length) throw new Error(
-    'grades were asked for but AIRTABLE_GRADE_BANDS is not set — ' +
-    'set it to something like "90:A,80:B,70:C,60:D" and nothing will be guessed');
+  if (!bands.length) {
+    const fallback = reportBands();
+    if (fallback) return fallback.slice().sort((a, b) => b.min - a.min);
+    throw new Error(
+      'grades were asked for, AIRTABLE_GRADE_BANDS is not set, and the report ' +
+      'builder that defines the bands (assets/report-doc.js) is not installed ' +
+      'on this proxy — set AIRTABLE_GRADE_BANDS to something like ' +
+      '"90:A,80:B,70:C,0:D" and nothing will be guessed');
+  }
   return bands;
 }
 
@@ -208,10 +230,13 @@ function makeAirtable(deps) {
     });
   }
 
-  // Candidate rows: Catelogue = Audit, nothing in AUDIT STATUS yet, a website
-  // present. The date test is in the formula AND repeated in JS below --
-  // the formula is a pre-filter to keep the page small, and the JS check is
-  // the one that is actually trusted.
+  // Candidate rows: Catelogue = Audit, nothing in AUDIT STATUS yet, created
+  // after the watermark. NOT "a website present" -- this comment said so for a
+  // while after the condition below was deliberately removed, which made the
+  // code read as if a row with no URL were filtered out when the whole point
+  // is that it is not. The date test is in the formula AND repeated in JS
+  // below: the formula is a pre-filter to keep the page small, and the JS
+  // check is the one that is actually trusted.
   function formula(sinceIso) {
     // No {WEBSITE}!='' here, on purpose.
     //

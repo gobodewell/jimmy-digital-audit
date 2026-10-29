@@ -36,13 +36,19 @@ print(json.dumps(r))
   // Comparing with spaces stripped tests the words, not the tracking.
   const flat = r.cover.replace(/\s+/g,'');
   check('contains "SUMMARY"', flat.includes('SUMMARY'));
-  for (const t of ['Digital Audit','OVERALL DIGITAL SCORE','On track',
+  // GRADE, not SCORE, and Strong rather than On track: this fixture lands at
+  // 90, which used to print an "A" above the words "On track" because the word
+  // bands started Strong at 92. They start at 90 now, so the two agree.
+  for (const t of ['Digital Audit','OVERALL DIGITAL GRADE','Strong',
                    'KPIs passed','AEO KPIs passed','Company Visibility',
                    'Website Performance','Social Media','For financial professional use only'])
     check('contains "'+t+'"', r.cover.includes(t));
 
   console.log('\nD. the background is scaled by height only, so nothing is squeezed');
-  const src = fs.readFileSync(path.join(__dirname,'..','index.html'),'utf8');
+  // The document moved to assets/report-doc.js so the proxy can build the same
+  // report for a run nobody is watching. These assertions are about the
+  // document's own source, so they follow it.
+  const src = fs.readFileSync(path.join(__dirname,'..','assets','report-doc.js'),'utf8');
   check('no forced width+height on the cover image',
         !/image: 'cover', width: PAGE_W, height: 792/.test(src));
   check('width derives from the real aspect ratio', /COVER_ASPECT = 1920 \/ 1080/.test(src));
@@ -107,12 +113,14 @@ print(pymupdf.open('${bandPdf}').page_count)
   // erased -- shipped twice. Every block now sits at a hard-coded y, so this reads
   // those numbers out of the source and checks the PDF put the ink exactly there,
   // both for the sample and for a summary far longer than it.
-  const srcY = fs.readFileSync(path.join(__dirname,'..','index.html'),'utf8')
+  const srcY = fs.readFileSync(path.join(__dirname,'..','assets','report-doc.js'),'utf8')
                  .match(/const COVER_Y = \{([\s\S]*?)\};/);
   check('COVER_Y is declared in one place', !!srcY);
   const Y = {};
   (srcY ? srcY[1] : '').replace(/(\w+)\s*:\s*(\d+)/g, (_, k, v) => { Y[k] = +v; });
-  check('it names every block', Object.keys(Y).length === 10, Object.keys(Y).join(','));
+  // 11 since grade mode gained its own channels slot. The count is pinned so a
+  // block added to the layout without a mark here cannot go unchecked.
+  check('it names every block', Object.keys(Y).length === 11, Object.keys(Y).join(','));
 
   cp.execSync('node ' + path.join(__dirname,'render_cover.js'),
               { stdio:'pipe', env: Object.assign({}, process.env, { COVER_STRESS:'1' }) });
@@ -133,10 +141,12 @@ print(json.dumps({'lines': out, 'pages': d.page_count}))
     ['title',    /^Digital Audit$/],
     ['meta',     /Reviewed \d\d\/\d\d\/\d{4}/],
     ['summary',  /^Your firm is performing/],
-    ['scoreLbl', /^OVERALL DIGITAL SCORE/],
-    ['band',     /^On track$/],
+    ['scoreLbl', /^OVERALL DIGITAL GRADE/],
+    ['band',     /^Strong$/],
     ['stats',    /^\d+ of \d+$/],
-    ['channels', /^Company Visibility$/],
+    // Grade mode, so the grade slot: a badge is taller than the line of type it
+    // replaced and the row starts higher to keep clear of the disclosure.
+    ['channelsGraded', /^Company Visibility$/],
     ['foot',     /^For financial professional/]
   ];
 

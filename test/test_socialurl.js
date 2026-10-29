@@ -10,7 +10,7 @@ let failures=0;
 const check=(l,c,d)=>{console.log((c?'  PASS  ':'  FAIL  ')+l+(d?'   → '+d:'')); if(!c) failures++;};
 
 (async()=>{
-  const b=await chromium.launch({executablePath:'/opt/pw-browsers/chromium-1194/chrome-linux/chrome'});
+  const b=await chromium.launch({executablePath:require('../chromium-path.js')()});
   const page=await (await b.newContext({ignoreHTTPSErrors:true})).newPage();
   const errs=[]; page.on('pageerror',e=>errs.push(e.message));
   await page.goto(PAGE);

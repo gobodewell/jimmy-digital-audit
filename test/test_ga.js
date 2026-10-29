@@ -44,7 +44,11 @@ const get = async html => { home = html;
   return (await realFetch('http://127.0.0.1:3983/site/check?url=' +
     encodeURIComponent('https://x.com'))).json(); };
 
-const PAGE = inner => '<html><head>' + inner + '</head><body>hi</body></html>';
+// A <title> because every real homepage has one: without it these stand-ins
+// look like the interstitial a firewall serves, which is a thing the proxy now
+// deliberately refuses to read as the page.
+const PAGE = inner => '<html><head><title>Advisory Firm</title>' + inner +
+                      '</head><body>hi</body></html>';
 
 const GTM_SNIPPET = `<script>(function(w,d,s,l,i){w[l]=w[l]||[];w[l].push({'gtm.start':
 new Date().getTime(),event:'gtm.js'});var f=d.getElementsByTagName(s)[0],
@@ -114,6 +118,19 @@ setTimeout(async () => {
   check('names the measurement ID', /G-0Y7KR0RT0H/.test(d.gaNote||''), d.gaNote);
   check('and does not also list the loose hints',
         !/dataLayer|gtag on the page/.test(d.gaNote||''), d.gaNote);
+
+  console.log('\nG. a tag past the old 300KB cut-off is still found');
+  // This is what actually happened on archstonefinancial.net. Its gtag.js sits
+  // at the end of a <head> padded with inline Datadog RUM, and the page was
+  // handed to the reader with the end missing -- so the tag was in the page,
+  // and in the reader's patterns, and still came back "no analytics".
+  const FILLER = '<script>/*' + 'x'.repeat(320000) + '*/</script>';
+  d = await get(PAGE(FILLER +
+    '<script async src="https://www.googletagmanager.com/gtag/js?id=G-0Y7KR0RT0H"></script>'));
+  check('found past 300KB', d.ga === true, JSON.stringify(d.ga) + ' ' + (d.gaNote||''));
+  check('named correctly', /G-0Y7KR0RT0H/.test(d.gaNote||''), d.gaNote);
+  check('and the page size is on the record',
+        /\d+KB/.test((d.gaRoute||[])[0] || ''), JSON.stringify(d.gaRoute));
 
   console.log('\nF. a blocked homepage — the other routes still find it');
   // The case from the field: an FMG site behind a CDN that refuses this server,

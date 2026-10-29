@@ -1,0 +1,9 @@
+node_modules/
+.env
+package-lock.json
+test/cover.pdf
+test/*.png
+test/legend-*.pdf
+test/band.pdf
+test/cover-stress.pdf
+test/few*.pdf

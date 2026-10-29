@@ -9,8 +9,7 @@
 // for it by habit.
 const path = require('path');
 const fs   = require('fs');
-process.env.CHROMIUM_PATH = process.env.CHROMIUM_PATH ||
-  '/opt/pw-browsers/chromium-1194/chrome-linux/chrome';
+process.env.CHROMIUM_PATH = require('../chromium-path.js')();
 
 let failures = 0;
 const check = (l, c, d) => {

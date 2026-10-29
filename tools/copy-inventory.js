@@ -19,7 +19,7 @@ const OUT   = process.argv[2] || path.resolve(__dirname, '..', 'Audit copy inven
 const INDEX = 'file://' + path.resolve(__dirname, '..', 'index.html');
 
 (async () => {
-  const b = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium-1194/chrome-linux/chrome' });
+  const b = await chromium.launch({ executablePath: require('../chromium-path.js')() });
   const page = await b.newPage();
   await page.goto(INDEX);
   const rows = await page.evaluate(() => {
