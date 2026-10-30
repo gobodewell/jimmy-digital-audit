@@ -954,7 +954,7 @@ input.masked{-webkit-text-security:disc;text-security:disc}
 // different vintages. Both carry the same stamp and the app compares them,
 // because "did you upload both files?" is not something anyone should have
 // to remember -- and a half-upload looks exactly like a fix that did not work.
-const BUILD = '2026-10-30.1';
+const BUILD = '2026-10-30.2';
 const DEFAULT_PROXY = 'https://jimmy-digital-audit.onrender.com';
 let AD = {}; // audit data store
 
@@ -1531,7 +1531,7 @@ function applyExtension() {
     msg.textContent = 'That JSON did not come from the audit reader.'; return;
   }
 
-  const set = [], cleared = [], gained = [];
+  const set = [], cleared = [], gained = [], kept = [];
   // The reading is applied AFTER the automatic run, so `false` has to be able
   // to correct an answer the run already gave.
   //
@@ -1542,8 +1542,42 @@ function applyExtension() {
   // real measurement saying "no" was discarded, and the guess it disagreed
   // with kept the box AND was promoted to measured, which locks out every
   // later correction. setCk answers both ways.
+  // Some findings are provable but not disprovable.
+  //
+  // A request to googletagmanager.com proves the tag is installed -- a URL like
+  // that does not appear by accident. NOT seeing one proves very little: an ad
+  // blocker in the reviewer's browser stops it loading, a consent banner holds
+  // it until somebody clicks, a tag manager injects it after the reader has
+  // already looked. So a source that saw it outranks a source that did not,
+  // whichever happened to run last.
+  //
+  // Without this the last writer won, and the audit contradicted itself on one
+  // screen: PageSpeed observes googletagmanager.com, ticks the box and prints
+  // "Google Analytics" in the technology panel; a pasted reading from a browser
+  // with an ad blocker then clears the box, while the panel beside it still
+  // names the tag. Reported on a real audit of strategizewmg.com, whose every
+  // stored run carries the tag id G-0XY17VH6YX.
+  //
+  // This is deliberately narrow. For almost every check the pasted reading is
+  // the better evidence -- it is the live rendered page -- and it must keep its
+  // power to correct the run. Only a check whose absence is weak evidence
+  // belongs here, with the reason written down.
+  const POSITIVE_ONLY = new Map([
+    ['c-ga', 'a request to googletagmanager.com proves the tag is there, ' +
+             'while not seeing one can just be an ad blocker, a consent ' +
+             'banner, or a tag injected after the page was read']
+  ]);
+
   const take = (id, val, label) => {
     if (val == null) return;
+    // A "no" from this reading cannot clear a box something else positively
+    // saw. It is still recorded, so the disagreement is visible rather than
+    // silently resolved either way.
+    if (!val && POSITIVE_ONLY.has(id) &&
+        (document.getElementById(id) || {}).checked) {
+      kept.push(ckLabel(id) + ' — ' + POSITIVE_ONLY.get(id));
+      return;
+    }
     const was = !!(document.getElementById(id) || {}).checked;
     setCk(id, !!val);
     UNK.delete(id);
@@ -1629,6 +1663,10 @@ function applyExtension() {
     // Named, not folded into a count: these are answers the run got wrong, and
     // the preparer should see which ones the page corrected.
     cleared.length ? 'Corrected to NO from the page: ' + cleared.join(', ') : '',
+    // Said out loud. A reading that disagreed and did not win is exactly the
+    // kind of thing that should not be settled behind the reviewer's back.
+    kept.length ? 'Left as YES — this reading saw no sign of them, but ' +
+      'something else did: ' + kept.join('; ') : '',
     changed && AD.coverSummaryStale
       ? 'The cover summary and the sign-off were cleared — the audit changed after they were made'
       : ''
@@ -2444,6 +2482,35 @@ async function runGBP(name, url, city) {
 // What the site runs, identified from the crawl these sites allow rather than
 // from a page they will not show us. Grouped, and every entry says how it was
 // found, because a technology list nobody can check is just an assertion.
+// A chip that disagrees with the box it maps to.
+//
+// Only states the contradiction; it does not resolve it. Deciding which source
+// wins belongs where the evidence is read, not in the thing that draws the
+// panel -- and a renderer that quietly corrected a check would be the worst
+// kind of hidden writer.
+const TECH_VS_CHECK = [
+  [/^Google Analytics$|^Google Tag Manager$/, 'c-ga',
+   'the page loaded it during Google\'s crawl']
+];
+
+function techContradictions(tech) {
+  const names = (tech || []).map(t => String(t.name || ''));
+  const bad = [];
+  for (const [re, id, why] of TECH_VS_CHECK) {
+    const hit = names.find(n => re.test(n));
+    const box = document.getElementById(id);
+    if (hit && box && !box.checked)
+      bad.push(escHtml(hit) + ' is listed above (' + escHtml(why) + ') but "' +
+               escHtml(ckLabel(id)) + '" is not ticked');
+  }
+  if (!bad.length) return '';
+  return '<div style="margin-top:10px;padding:8px 10px;border-radius:6px;' +
+         'background:#FEF3C7;border:1px solid #F59E0B;font-size:11.5px;' +
+         'color:#78350F;line-height:1.5">' +
+         '<b>These two disagree.</b> ' + bad.join('; ') +
+         '. One of them is wrong — check it before you approve.</div>';
+}
+
 function renderTech(d) {
   const block = document.getElementById('tech-block');
   const body  = document.getElementById('tech-body');
@@ -2466,7 +2533,13 @@ function renderTech(d) {
         groups[g].map(t => '<span class="badge bgr" style="margin:0 6px 4px 0" title="' +
           escHtml(t.via) + '">' + escHtml(t.name) + '</span>').join('') +
       '</div></div>'
-    ).join('');
+    ).join('') +
+    // The panel and the checkbox read the same list of requests, so they cannot
+    // honestly disagree -- and when they did, on a real audit, the screen
+    // showed "Google Analytics" here while the Visibility tab said it was
+    // missing, and said nothing about it. Whatever puts them out of step, the
+    // reviewer should be told by the page rather than have to notice.
+    techContradictions(tech);
 }
 
 function renderPageWeight(d) {
