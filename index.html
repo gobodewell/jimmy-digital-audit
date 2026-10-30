@@ -954,7 +954,7 @@ input.masked{-webkit-text-security:disc;text-security:disc}
 // different vintages. Both carry the same stamp and the app compares them,
 // because "did you upload both files?" is not something anyone should have
 // to remember -- and a half-upload looks exactly like a fix that did not work.
-const BUILD = '2026-10-30.2';
+const BUILD = '2026-10-30.3';
 const DEFAULT_PROXY = 'https://jimmy-digital-audit.onrender.com';
 let AD = {}; // audit data store
 
@@ -1038,6 +1038,43 @@ const decide = (id, val, whyUnknown) => {
 // Used by the AI passes instead of ck(). Refuses anything already measured and
 // says so in the console, rather than silently disagreeing with the panel
 // above it.
+// The model's THREE answers, kept apart.
+//
+// ckAI only ever acts on a yes. Every caller was written as `if (j.faqs)
+// ckAI('c-faq')`, which makes "I read the site and there are no FAQs" and "I
+// could not read the site" the same event: an unticked box, not judged, not
+// unknown, no reason recorded. 18 of 31 stored audits carry exactly that for
+// c-faq, and 8 of them are runs where the model said plainly that it could not
+// read the page.
+//
+// The prompt goes to some length over this -- "false is a finding reported to
+// the client as something their firm is doing wrong; null says nobody could
+// check. Reporting a failure for a page you never saw is the one mistake this
+// audit must not make" -- and then the code collapsed the two one line later.
+//
+// Returns true when the model actually answered, which is what the caller's
+// counter is for.
+function decideAI(id, val, whyNull) {
+  // A measurement outranks a judgement, in both directions. This is the guard
+  // ckAI already had and the reason it exists.
+  if (DIRECT.has(id)) {
+    console.log('AI answered ' + id + ' but it was already measured directly — keeping the measurement');
+    return false;
+  }
+  if (val === true)  { ck(id); judged(id); return true; }
+  if (val === false) {
+    // A real no, from a model that read the page. It GROUNDS the check without
+    // ticking it -- which is the whole point, and the state that did not exist
+    // before. It deliberately does not clear a box another pass ticked: two
+    // judgements disagreeing is no reason for the later one to win.
+    judged(id);
+    return true;
+  }
+  // null, or missing from the response entirely.
+  unk(id, whyNull || 'the model could not read the page');
+  return false;
+}
+
 function ckAI(id, what) {
   if (DIRECT.has(id)) {
     console.log('AI suggested ' + id + ' but it was already measured directly — keeping the measurement');
@@ -3667,10 +3704,13 @@ function buildReport() {
     // ckAI, not ck: every one of these is the model's reading, and c-meta in
     // particular is measured directly by the page fetch. Bare ck() here walked
     // straight past the guard and let a guess overwrite the measurement.
-    if (visJ.sitemap)   { if (ckAI('c-sm'))    filled++; }
-    if (visJ.meta)      { if (ckAI('c-meta'))  filled++; }
-    if (visJ.reviewCTA) { if (ckAI('c-rcta'))  filled++; }
-    if (visJ.awards)    { if (ckAI('c-awd'))   filled++; }
+    const visWhy = visJ.fetched === false
+      ? 'the model could not load the site'
+      : 'the model read the site but could not tell';
+    if (decideAI('c-sm',   visJ.sitemap,   visWhy)) filled++;
+    if (decideAI('c-meta', visJ.meta,      visWhy)) filled++;
+    if (decideAI('c-rcta', visJ.reviewCTA, visWhy)) filled++;
+    if (decideAI('c-awd',  visJ.awards,    visWhy)) filled++;
     if (visJ.summary) {
       const n = document.getElementById('n-vis');
       if (n) n.value = visJ.summary;
@@ -3680,16 +3720,22 @@ function buildReport() {
   // Parse website JSON
   const webJ = extractJSON(AD.aiWebsite || '');
   if (webJ) {
-    if (webJ.nav)           { if (ckAI('c-nav'))  filled++; }
-    if (webJ.linkedContent) { if (ckAI('c-lnk'))  filled++; }
-    if (webJ.photos)        { if (ckAI('c-pho'))  filled++; }
-    if (webJ.headlines)     { if (ckAI('c-hdl'))  filled++; }
-    if (webJ.ctas)          { if (ckAI('c-cta'))  filled++; }
-    if (webJ.resources)     { if (ckAI('c-res'))  filled++; }
-    if (webJ.faqs)          { if (ckAI('c-faq'))  filled++; }
-    if (webJ.reviewCTA)     { if (ckAI('c-rcta')) filled++; }
-    if (webJ.awards)        { if (ckAI('c-awd'))  filled++; }
-    if (webJ.analytics)     { if (ckAI('c-ga'))   filled++; }
+    // "the model could not read the page" is the reason that matters: it is
+    // what a blocked fetch looks like from here, and it must not be filed as
+    // the firm failing a check.
+    const webWhy = webJ.fetched === false
+      ? 'the model could not load the site'
+      : 'the model read the site but could not tell';
+    if (decideAI('c-nav',  webJ.nav,           webWhy)) filled++;
+    if (decideAI('c-lnk',  webJ.linkedContent, webWhy)) filled++;
+    if (decideAI('c-pho',  webJ.photos,        webWhy)) filled++;
+    if (decideAI('c-hdl',  webJ.headlines,     webWhy)) filled++;
+    if (decideAI('c-cta',  webJ.ctas,          webWhy)) filled++;
+    if (decideAI('c-res',  webJ.resources,     webWhy)) filled++;
+    if (decideAI('c-faq',  webJ.faqs,          webWhy)) filled++;
+    if (decideAI('c-rcta', webJ.reviewCTA,     webWhy)) filled++;
+    if (decideAI('c-awd',  webJ.awards,        webWhy)) filled++;
+    if (decideAI('c-ga',   webJ.analytics,     webWhy)) filled++;
     if (webJ.notes) {
       const n = document.getElementById('n-web');
       if (n && !n.value) n.value = webJ.notes;
