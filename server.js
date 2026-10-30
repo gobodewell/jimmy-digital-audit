@@ -6,7 +6,7 @@ const app  = express();
 // Bumped whenever a build is handed over. /health reports it so the app can
 // tell the user their page and their proxy are different vintages -- the
 // failure mode is a fix that silently is not there.
-const BUILD = '2026-10-29.1';
+const BUILD = '2026-10-30.1';
 // Building the report without a browser. See render.js: the scoring engine
 // stays in the page, this turns the page's report DATA into the same pages.
 const { renderReport, reportName, templateNames, templateInfo, checkReport, rendererStatus } = require('./render.js');
@@ -76,6 +76,22 @@ function semWhy(errText) {
   }[code];
   return errText.trim().slice(0, 120) + (why ? ' — ' + why : '');
 }
+// Lighthouse audit ids and the reader that survives a rename. Its own module
+// so tools/lighthouse-audit-drift.js and the test can read the list without
+// booting this server.
+//
+// Loaded on first use, like queue.js and airtable.js, not at the top. A
+// top-level require turns a deploy that misses one file into "Cannot find
+// module" BEFORE app.listen -- no audits, no history, no AI, a crash loop on
+// Render. Parsing a PageSpeed response is one capability and should fail like
+// one. test_render.js boots a server from three files on purpose and caught
+// this the first time it was written the other way.
+let _lhAudits = null;
+const lhAudit = (audits, name) => {
+  if (!_lhAudits) _lhAudits = require('./lighthouse-audits.js');
+  return _lhAudits.lhAudit(audits, name);
+};
+
 // A self-identifying UA ("GrowthLineAudit/1.0") is a bot signature, and the
 // managed WAFs in front of advisory-firm sites answer it with 403 — which the
 // audit then had to report as "could not measure" for indexability and schema
@@ -1006,11 +1022,11 @@ app.get('/site/lighthouse', async (req, res) => {
     }
 
     // Extract the metrics we need for the audit checklist
-    const lcp      = audits['largest-contentful-paint']?.numericValue;
-    const fcp      = audits['first-contentful-paint']?.numericValue;
-    const tbt      = audits['total-blocking-time']?.numericValue;
+    const lcp      = lhAudit(audits, 'largest-contentful-paint').audit?.numericValue;
+    const fcp      = lhAudit(audits, 'first-contentful-paint').audit?.numericValue;
+    const tbt      = lhAudit(audits, 'total-blocking-time').audit?.numericValue;
     const speed    = lcp ? (lcp / 1000).toFixed(2) : fcp ? (fcp / 1000).toFixed(2) : null;
-    const totalBytes = audits['total-byte-weight']?.numericValue;
+    const totalBytes = lhAudit(audits, 'total-byte-weight').audit?.numericValue;
     const sizeMB   = totalBytes ? (totalBytes / 1024 / 1024).toFixed(2) : null;
     const perfScore = cats?.performance?.score != null ? Math.round(cats.performance.score * 100) : null;
     const seoScore  = cats?.seo?.score          != null ? Math.round(cats.seo.score * 100)         : null;
@@ -1022,7 +1038,12 @@ app.get('/site/lighthouse', async (req, res) => {
     // mean nothing at all. Lighthouse's `viewport` audit is the real signal
     // (does the page declare a mobile viewport?) and it is returned under both
     // strategies. Falls back to the old rule only if the audit is missing.
-    const viewportAudit = audits['viewport']?.score;
+    // viewport-insight scores exactly as the old audit did -- 1 when the insight
+    // passes, 0 when it fails, null when it could not be evaluated -- so the
+    // >= 0.9 test below is unchanged. Verified in Lighthouse's own
+    // insight-audit.js, not assumed from the name.
+    const viewportRead  = lhAudit(audits, 'viewport');
+    const viewportAudit = viewportRead.audit?.score;
     // No fallback to perfScore. That rule measured SPEED, not mobile-
     // friendliness, and under a desktop run it means nothing at all -- it is
     // the exact conflation the note above describes removing, and leaving it
@@ -1047,8 +1068,8 @@ app.get('/site/lighthouse', async (req, res) => {
     const sizePass    = sizeMB == null ? null : parseFloat(sizeMB) < 3;
 
     // Oversized images
-    const imgItems  = audits['uses-optimized-images']?.details?.items || 
-                      audits['uses-responsive-images']?.details?.items || [];
+    const imgItems  = lhAudit(audits, 'uses-optimized-images').audit?.details?.items ||
+                      lhAudit(audits, 'uses-responsive-images').audit?.details?.items || [];
 
     // The box says "Images under 500KB", so that is what this has to measure.
     // It was reading the uses-optimized-images / uses-responsive-images lists
@@ -1071,7 +1092,7 @@ app.get('/site/lighthouse', async (req, res) => {
       }
       return null;
     };
-    const netAudit = audits['network-requests'];
+    const netAudit = lhAudit(audits, 'network-requests').audit;
     const netImgs  = (netAudit?.details?.items || [])
       .filter(i => /image/i.test(String(i.resourceType || i.mimeType || '')));
 
@@ -1102,7 +1123,7 @@ app.get('/site/lighthouse', async (req, res) => {
 
     // total-byte-weight is the audit behind "avoid enormous network payloads":
     // every resource the page pulled, with its real transfer size.
-    const heavy = (audits['total-byte-weight']?.details?.items || [])
+    const heavy = (lhAudit(audits, 'total-byte-weight').audit?.details?.items || [])
       .slice(0, 10)
       .map(i => ({
         url:  i.url || '',
@@ -1123,7 +1144,7 @@ app.get('/site/lighthouse', async (req, res) => {
       .slice(0, 5);
 
     // Weight by resource type, straight from Lighthouse's resource summary.
-    const byType = (audits['resource-summary']?.details?.items || [])
+    const byType = (lhAudit(audits, 'resource-summary').audit?.details?.items || [])
       .filter(i => i.resourceType && i.resourceType !== 'total' && i.transferSize)
       .map(i => ({ type: i.resourceType, kb: Math.round(i.transferSize / 1024), count: i.requestCount }))
       .sort((a, b) => b.kb - a.kb);
@@ -1151,7 +1172,8 @@ app.get('/site/lighthouse', async (req, res) => {
     // third-party-summary stays as a second opinion: it names entities rather
     // than URLs, so it can recognise a tag served from the firm's own domain
     // that the URL test would miss.
-    const thirdParty = audits['third-party-summary']?.details?.items;
+    const thirdPartyRead = lhAudit(audits, 'third-party-summary');
+    const thirdParty = thirdPartyRead.audit?.details?.items;
     const tpGA = !thirdParty ? null : thirdParty.some(i =>
       /google.tag|google.analytics|googletagmanager/i.test(i.entity || '')
     );
@@ -1171,10 +1193,14 @@ app.get('/site/lighthouse', async (req, res) => {
       attempts: tries,
       speed, sizeMB, perfScore, seoScore,
       isHttps, isMobile, isIndexable, hasMeta, robotsTxtValid,
+      // Which Lighthouse id actually supplied each signal. Stored with the run,
+      // so a rename is a visible fact in the record rather than a check that
+      // silently stops answering.
+      lhVia: { viewport: viewportRead.via, thirdParty: thirdPartyRead.via },
       // The technology fingerprint, from the crawl these sites allow.
       tech: detectTech(netUrls,
                        lh.stackPacks,
-                       audits['js-libraries']?.details?.items),
+                       lhAudit(audits, 'js-libraries').audit?.details?.items),
       speedPass, sizePass, imagesOk, imgList, hasGA, gaFrom,
       gaRequests: gaReq.slice(0, 5),
       imgLimitKb: IMG_LIMIT_KB,
